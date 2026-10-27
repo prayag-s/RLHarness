@@ -1,8 +1,8 @@
 # RL-Native Agent IDE — Progress & Session Handoff Log
 
-**Project:** RL-Native Agent IDE (v2.0 Hardened)  
+**Project:** RL-Native Agent IDE (v3.0 Vibe Studio & Universal Ingestion)  
 **Last Updated:** 2026-10-27  
-**Current Status:** Phase 0A-0E, Phase 1 & Phase 2 Completed (100% Tests Passing: 25/25; Frontend Build Clean 0 Errors)  
+**Current Status:** Phase 0A-0E, Phase 1, Phase 2 & Phase 3A Completed (100% Tests Passing: 28/28; Frontend Build Clean 0 Errors)  
 
 
 ---
@@ -399,6 +399,101 @@ dist/assets/index-CJsI4LuI.css   26.80 kB │ gzip:  5.54 kB
 dist/assets/index-8pbjSn4v.js   241.77 kB │ gzip: 68.19 kB
 ✓ built in 15.02s
 ```
+
+---
+
+## 13. Completed Work: Phase 3A (Universal File & Live SQL Ingestor + AutoDataAdapter)
+
+### 13.1 Live SQL Database Connector & Read-Only Safety Guardrails
+- **File:** `backend/rl_ide/ingest/sql_connector.py`
+- Implemented `SQLConnector`, `validate_read_only_sql`, `test_sql_connection`, `list_sql_tables`, and `load_sql_dataset`:
+  - Supports SQLAlchemy connection URIs (`sqlite:///...`, `postgresql://...`, `mysql+pymysql://...`).
+  - **Strict Read-Only Enforcement (`validate_read_only_sql`):** Blocks `DROP`, `DELETE`, `UPDATE`, `INSERT`, `ALTER`, `TRUNCATE`, `GRANT`, `REVOKE`, `CREATE`, `REPLACE`, `EXEC`, multi-statement attacks, and comment-based evasions.
+  - Automatic `LIMIT 2000` pagination wrapper for arbitrary queries or table scans.
+
+### 13.2 Universal Schema Profiler, Vectorizer & Document Rule Extraction
+- **File:** `backend/rl_ide/ingest/profiler.py`
+- **Schema Profiler (`SchemaProfiler`):** Inspects incoming dataFrames and categorizes columns into `numeric_continuous`, `numeric_discrete`, `categorical_low_card`, `text_freeform`, `boolean`, `timestamp`, or `target_candidate`. Sanitizes column names into safe AST variables (`obs.<sanitized_name>`).
+- **AutoFeatureVectorizer (`AutoFeatureVectorizer`):** Produces deterministic `float32` observation vectors with standard-scaled continuous features, one-hot encoded categoricals, booleans, and 32-dim `HashingVectorizer` embeddings for freeform text.
+- **Document Rule Extractor (`DocumentRuleExtractor`):** Analyzes policy text from `.pdf`, `.docx`, `.txt`, `.md` and extracts candidate `RewardTerm` AST rules (e.g. high-dollar thresholds, missing PO penalties, critical risk escalations).
+
+### 13.3 Universal File Loader
+- **File:** `backend/rl_ide/ingest/loader.py`
+- Supports `.csv`, `.tsv`, `.xlsx` (via `openpyxl`), `.json`, `.jsonl`, `.sqlite`/`.db`, `.pdf` (via `pypdf`), `.docx` (via `python-docx`), `.txt`, and `.md`.
+- Normalizes structured tables or document chunks into `IngestedDataset` with attached `DatasetProfile` and extracted candidate rules.
+- Extracts document NLP features (`obs.page_number`, `obs.word_count`, `obs.has_currency_amount`, `obs.max_dollar_value`, `obs.has_date`, `obs.risk_keyword_count`, `obs.sentiment_score`).
+
+### 13.4 AutoDataAdapter
+- **File:** `backend/rl_ide/adapters/auto_data_adapter.py`
+- Implements full `@runtime_checkable` `DomainAdapter` protocol.
+- Dynamically derives observation vectors, discrete action labels, event schema, step execution, and polymorphic UI rendering.
+- Emits `ui_mode: "tabular_inspector"` for SQL/CSV/Excel or `ui_mode: "document_reader"` for PDF/DOCX chunk records.
+- Registered in `ADAPTER_REGISTRY` in `nl_to_config.py` with mock client support in `llm_client.py`.
+
+---
+
+## 14. Verification Gate Results (Phase 3A)
+
+### Full Backend Regression Suite: 28 / 28 Tests Passing (100% Green)
+```text
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.1.1, pluggy-1.7.0 -- /home/devuser/projects/RLHarness/.venv/bin/python
+cachedir: .pytest_cache
+rootdir: /home/devuser/projects/RLHarness/backend
+configfile: pyproject.toml
+plugins: asyncio-1.4.1, anyio-4.15.1
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+
+backend/tests/test_adapter_conformance.py::test_full_cross_domain_conformance_pipeline[CSVStreamAdapter] PASSED [  3%]
+backend/tests/test_adapter_conformance.py::test_full_cross_domain_conformance_pipeline[TextClassifyAdapter] PASSED [  7%]
+backend/tests/test_phase_0a.py::test_synthetic_stream_generation PASSED  [ 10%]
+backend/tests/test_phase_0a.py::test_1_valid_yaml_dsl_evaluation PASSED  [ 14%]
+backend/tests/test_phase_0a.py::test_2_undefined_variable_raises_validation_error PASSED [ 17%]
+backend/tests/test_phase_0a.py::test_3_malicious_code_injection_raises_security_error PASSED [ 21%]
+backend/tests/test_phase_0a.py::test_4_adapter_episode_stepping_and_fast_rescoring PASSED [ 25%]
+backend/tests/test_phase_0b.py::test_1_compile_english_prose_to_valid_config PASSED [ 28%]
+backend/tests/test_phase_0b.py::test_2_automatic_validator_retry_on_invalid_field PASSED [ 32%]
+backend/tests/test_phase_0b.py::test_3_saving_sequential_versions_and_rollback PASSED [ 35%]
+backend/tests/test_phase_0b.py::test_byok_llm_factory_fallback PASSED    [ 39%]
+backend/tests/test_phase_0c.py::test_1_adapter_gym_env_and_hotswap PASSED [ 42%]
+backend/tests/test_phase_0c.py::test_2_episode_buffer_operations PASSED  [ 46%]
+backend/tests/test_phase_0c.py::test_3_warmstart_behavioral_cloning PASSED [ 50%]
+backend/tests/test_phase_0c.py::test_4_critique_diff_engine_and_two_stage_preview PASSED [ 53%]
+backend/tests/test_phase_0c.py::test_5_full_critique_alignment_loop PASSED [ 57%]
+backend/tests/test_phase_0d.py::test_1_drift_detector_signals PASSED     [ 60%]
+backend/tests/test_phase_0d.py::test_2_onnx_export_and_numerical_parity PASSED [ 64%]
+backend/tests/test_phase_0d.py::test_3_runbundle_packaging_and_standalone_run_local PASSED [ 67%]
+backend/tests/test_phase_0d.py::test_4_fastapi_rest_endpoints_and_websocket PASSED [ 71%]
+backend/tests/test_phase_2.py::test_1_runbundle_registry_catalog_and_inspection PASSED [ 75%]
+backend/tests/test_phase_2.py::test_2_runbundle_zip_import_and_roundtrip PASSED [ 78%]
+backend/tests/test_phase_2.py::test_3_standalone_run_local_daemon_http_serving PASSED [ 82%]
+backend/tests/test_phase_2.py::test_4_byok_settings_validation_and_routing PASSED [ 85%]
+backend/tests/test_phase_2.py::test_5_fastapi_bundle_registry_and_settings_endpoints PASSED [ 89%]
+backend/tests/test_phase_3a.py::test_1_ingest_csv_xlsx_and_train_export PASSED [ 92%]
+backend/tests/test_phase_3a.py::test_2_sqlite_sqlalchemy_readonly_guardrails_and_query_burst PASSED [ 96%]
+backend/tests/test_phase_3a.py::test_3_document_pdf_docx_rule_extraction_and_chunk_stepping PASSED [100%]
+
+======================= 28 passed, 27 warnings in 17.98s =======================
+```
+
+### Phase 3A Verification Suite:
+- `test_phase_3a.py::test_1_ingest_csv_xlsx_and_train_export`: **PASSED** (CSV & XLSX ingestion, AST compilation, warmstart, burst, ONNX parity < 1e-5, RunBundle export)
+- `test_phase_3a.py::test_2_sqlite_sqlalchemy_readonly_guardrails_and_query_burst`: **PASSED** (SQLite DB connection, read-only SQL validation guardrail blocking DROP/DELETE/UPDATE/INSERT, query loading, burst)
+- `test_phase_3a.py::test_3_document_pdf_docx_rule_extraction_and_chunk_stepping`: **PASSED** (PDF & DOCX rule extraction, NLP feature extraction, document chunk stepping, `ui_mode: "document_reader"`)
+
+### Frontend Production Build: 100% Clean (0 Errors)
+```text
+> rl-ide-frontend@0.1.0 build
+> tsc && vite build
+
+vite v6.4.5 building for production...
+✓ 1596 modules transformed.
+dist/index.html                   0.56 kB │ gzip:  0.37 kB
+dist/assets/index-CJsI4LuI.css   26.80 kB │ gzip:  5.54 kB
+dist/assets/index-Bf12CDTc.js   242.58 kB │ gzip: 68.34 kB
+✓ built in 4.11s
+```
+
 
 
 

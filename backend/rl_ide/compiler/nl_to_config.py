@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from rl_ide.contracts.adapter import DomainAdapter
 from rl_ide.adapters.stream_adapter import CSVStreamAdapter
 from rl_ide.adapters.text_classify_adapter import TextClassifyAdapter
+from rl_ide.adapters.auto_data_adapter import AutoDataAdapter
 from rl_ide.compiler.models import TaskConfig
 from rl_ide.compiler.llm_client import BaseLLMClient, MockRulesLLMClient, create_llm_client
 from rl_ide.reward.evaluator import RewardValidator, RewardValidationError
@@ -16,6 +17,7 @@ from rl_ide.reward.evaluator import RewardValidator, RewardValidationError
 ADAPTER_REGISTRY: dict[str, type[DomainAdapter]] = {
     "CSVStreamAdapter": CSVStreamAdapter,
     "TextClassifyAdapter": TextClassifyAdapter,
+    "AutoDataAdapter": AutoDataAdapter,
 }
 
 
@@ -64,7 +66,18 @@ class NLToConfigCompiler:
                 raise ValueError(
                     f"Unknown adapter '{adapter_name}'. Registered: {list(self.adapter_registry.keys())}"
                 )
-            adapter = adapter_cls()
+            if adapter_name == "AutoDataAdapter":
+                import pandas as pd
+                sample_df = pd.DataFrame({
+                    "amount": [100.0, 5500.0, 20.0, 12000.0],
+                    "risk_score": [0.1, 0.9, 0.2, 0.85],
+                    "has_po": [True, False, True, False],
+                    "department": ["sales", "engineering", "sales", "ops"],
+                    "target": ["pass", "flag", "pass", "flag"],
+                })
+                adapter = adapter_cls(sample_df)
+            else:
+                adapter = adapter_cls()
 
         schema = adapter.event_schema()
         obs_spec = adapter.observations()

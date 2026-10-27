@@ -22,6 +22,14 @@ dependencies = [
     "onnxruntime",
     "scikit-learn",
     "httpx",
+    "pypdf",
+    "python-docx",
+    "openpyxl",
+    "sqlalchemy",
+    "pymysql",
+    "psycopg2-binary",
+    "python-multipart",
+    "reportlab",
 ]
 
 [project.optional-dependencies]

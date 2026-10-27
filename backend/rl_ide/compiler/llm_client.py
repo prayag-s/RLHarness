@@ -4,6 +4,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any
 import json
+import re
 import httpx
 from pydantic import BaseModel, Field
 
@@ -106,6 +107,32 @@ class MockRulesLLMClient(BaseLLMClient):
 
         # Handle auto-repair retry prompts
         if "RewardValidationError" in prompt or "Undefined variable" in prompt:
+            if "AutoDataAdapter" in prompt or "autodata" in prompt.lower():
+                return """
+task_id: "auto_data_task_repaired"
+name: "Auto Ingested Data (Repaired)"
+description: "Repaired task configuration with valid schema fields"
+adapter_name: "AutoDataAdapter"
+adapter_config:
+  episode_length: 25
+hyperparameters:
+  learning_rate: 0.001
+  gamma: 0.0
+reward_dsl:
+  version: "1.0"
+  horizon:
+    gamma: 0.0
+    critic_warmup_epochs_on_diff: 10
+    kl_coef: 0.1
+  reward:
+    terms:
+      - name: accurate_classification_match
+        when: "truth.has_label == True and action.label == truth.label"
+        value: 5.0
+    pinned_episodes: []
+    aggregate: sum
+    clamp: [-50.0, 50.0]
+"""
             if "TextClassifyAdapter" in prompt or "ticket" in prompt.lower() or "triage" in prompt.lower() or "email" in prompt.lower():
                 return """
 task_id: "ticket_triage_task_repaired"
@@ -206,6 +233,94 @@ reward_dsl:
       - name: neglect_angry_vip_penalty
         when: "action.label == 'normal' and obs.sender_is_vip == True and obs.angry_tone_score > 0.6"
         value: -12.0
+    pinned_episodes: []
+    aggregate: sum
+    clamp: [-50.0, 50.0]
+"""
+
+        # Handle AutoDataAdapter compilation prompts
+        if "AutoDataAdapter" in prompt or "autodata" in prompt.lower():
+            schema_vars: set[str] = set()
+            schema_match = re.search(r"Available Event Schema \(legal variables\):\s*(\{.*?\})", prompt)
+            if schema_match:
+                try:
+                    import ast
+                    schema_dict = ast.literal_eval(schema_match.group(1))
+                    schema_vars = set(schema_dict.keys())
+                except Exception:
+                    pass
+
+            action_labels = ["flag", "pass"]
+            act_match = re.search(r"'labels':\s*(\[.*?\])", prompt)
+            if act_match:
+                try:
+                    import ast
+                    action_labels = ast.literal_eval(act_match.group(1))
+                except Exception:
+                    pass
+
+            pos_act = action_labels[0] if len(action_labels) > 0 else "flag"
+            neg_act = action_labels[1] if len(action_labels) > 1 else "pass"
+
+            terms: list[str] = [
+                "      - name: accurate_classification_match\n"
+                "        when: \"truth.has_label == True and action.label == truth.label\"\n"
+                "        value: 5.0"
+            ]
+
+            amount_var = next(
+                (c for c in ("obs.amount", "obs.dollar_amount", "obs.max_dollar_value", "obs.price", "obs.cost") if c in schema_vars),
+                None
+            )
+            if amount_var:
+                terms.append(
+                    f"      - name: flag_high_value\n"
+                    f"        when: \"{amount_var} > 5000.0 and action.label == '{pos_act}'\"\n"
+                    f"        value: 6.0"
+                )
+
+            if "obs.has_po" in schema_vars:
+                terms.append(
+                    f"      - name: missing_po_penalty\n"
+                    f"        when: \"obs.has_po == False and action.label == '{neg_act}'\"\n"
+                    f"        value: -12.0"
+                )
+            elif "obs.risk_keyword_count" in schema_vars:
+                terms.append(
+                    f"      - name: high_risk_penalty\n"
+                    f"        when: \"obs.risk_keyword_count >= 2 and action.label == '{neg_act}'\"\n"
+                    f"        value: -10.0"
+                )
+
+            if len(terms) == 1:
+                first_obs = next((k for k in schema_vars if k.startswith("obs.")), None)
+                if first_obs:
+                    terms.append(
+                        f"      - name: target_feature_alignment\n"
+                        f"        when: \"{first_obs} > 0.0 and action.label == '{pos_act}'\"\n"
+                        f"        value: 2.0"
+                    )
+
+            terms_yaml = "\n".join(terms)
+            return f"""
+task_id: "auto_data_task_v1"
+name: "Auto Ingested Data Policy"
+description: "Compiled policy for ingested data records"
+adapter_name: "AutoDataAdapter"
+adapter_config:
+  episode_length: 25
+hyperparameters:
+  learning_rate: 0.001
+  gamma: 0.0
+reward_dsl:
+  version: "1.0"
+  horizon:
+    gamma: 0.0
+    critic_warmup_epochs_on_diff: 10
+    kl_coef: 0.1
+  reward:
+    terms:
+{terms_yaml}
     pinned_episodes: []
     aggregate: sum
     clamp: [-50.0, 50.0]
