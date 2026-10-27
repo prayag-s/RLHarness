@@ -187,4 +187,58 @@ export interface BundleDetails {
   has_run_local_daemon: boolean
 }
 
+// =============================================================================
+// Phase 3D: Vibe Studio Polymorphic Types
+// =============================================================================
+
+export interface PlainRuleCard {
+  id: string
+  title: string
+  description: string
+  importance: 'Must Do' | 'High Priority' | 'Bonus' | 'Avoid' | 'Strict Ban' | string
+  badge_variant: 'emerald' | 'blue' | 'indigo' | 'amber' | 'rose' | string
+  weight: number
+  expression: string
+  direction: 'reward' | 'penalty' | string
+  category: string
+  icon?: string
+}
+
+export interface SkillSummary {
+  mastery_score: number
+  status_badge: string
+  badge_variant: string
+  win_rate: number
+  total_episodes: number
+  key_insights: string[]
+}
+
+export interface VibeSessionData {
+  session_id: string
+  task_id: string
+  adapter_name: string
+  ui_mode: 'board_grid' | 'robot_canvas' | 'document_reader' | 'tabular_inspector' | 'time_series' | 'ticket_card' | string
+  mastery_score: number
+  status_badge: string
+  win_rate: number
+  rules: PlainRuleCard[]
+  recent_episodes: EpisodeLog[]
+  latest_frame: Record<string, any>
+  coach_message: string
+}
+
+export interface IngestedDatasetSummary {
+  dataset_id: string
+  name: string
+  format: string
+  role: string
+  total_rows: number
+  columns: string[]
+  column_types: Record<string, string>
+  sample_records: Record<string, any>[]
+  extracted_rules: any[]
+  profile_summary?: Record<string, any>
+}
+
+
 

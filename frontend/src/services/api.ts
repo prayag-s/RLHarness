@@ -204,3 +204,144 @@ export async function deleteBundle(
   if (!res.ok) throw new Error('Failed to delete bundle')
   return res.json()
 }
+
+// =============================================================================
+// Phase 3D: Vibe Autopilot & Ingestion API
+// =============================================================================
+
+export async function createVibeSession(
+  prompt: string,
+  datasetId?: string,
+  burstEpisodes = 15,
+  llmSettings?: LLMSettings,
+): Promise<any> {
+  const payload: any = {
+    prompt,
+    dataset_id: datasetId,
+    burst_episodes: burstEpisodes,
+  }
+  const config = formatLLMConfig(llmSettings)
+  if (config) payload.llm_config = config
+
+  const res = await fetch(`${API_BASE}/vibe/create`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || 'Failed to create Vibe session')
+  }
+  return res.json()
+}
+
+export async function coachVibeSession(
+  sessionId: string,
+  params: {
+    critiqueText?: string
+    feedbackType?: 'thumbs_up' | 'thumbs_down' | 'text' | 'rule_boost' | 'rule_reduce'
+    targetEpisodeId?: number
+    termName?: string
+    newImportance?: string
+    burstEpisodes?: number
+    llmSettings?: LLMSettings
+  },
+): Promise<any> {
+  const payload: any = {
+    session_id: sessionId,
+    critique_text: params.critiqueText,
+    feedback_type: params.feedbackType,
+    target_episode_id: params.targetEpisodeId,
+    term_name: params.termName,
+    new_importance: params.newImportance,
+    burst_episodes: params.burstEpisodes || 10,
+  }
+  const config = formatLLMConfig(params.llmSettings)
+  if (config) payload.llm_config = config
+
+  const res = await fetch(`${API_BASE}/vibe/coach`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || 'Failed to apply coaching')
+  }
+  return res.json()
+}
+
+export async function interactSim(params: {
+  sessionId?: string
+  adapterName?: string
+  boardState?: number[]
+  humanCellIdx?: number
+  robotState?: Record<string, number>
+  targetXy?: [number, number]
+  obstaclesList?: Array<{ x: number; y: number; radius: number }>
+  nFrames?: number
+}): Promise<any> {
+  const payload: any = {
+    session_id: params.sessionId,
+    adapter_name: params.adapterName,
+    board_state: params.boardState,
+    human_cell_idx: params.humanCellIdx,
+    robot_state: params.robotState,
+    target_xy: params.targetXy,
+    obstacles_list: params.obstaclesList,
+    n_frames: params.nFrames || 4,
+  }
+
+  const res = await fetch(`${API_BASE}/sim/interact`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || 'Simulation interaction failed')
+  }
+  return res.json()
+}
+
+export async function uploadIngestFile(
+  file: File,
+  role = 'tabular',
+  targetCol?: string,
+): Promise<any> {
+  const formData = new FormData()
+  formData.append('file', file)
+  formData.append('role', role)
+  if (targetCol) formData.append('target_col', targetCol)
+
+  const res = await fetch(`${API_BASE}/ingest/upload`, {
+    method: 'POST',
+    body: formData,
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || 'File ingestion failed')
+  }
+  return res.json()
+}
+
+export async function ingestSQL(
+  connectionUri: string,
+  queryOrTable: string,
+  limit = 2000,
+): Promise<any> {
+  const res = await fetch(`${API_BASE}/ingest/sql`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      connection_uri: connectionUri,
+      query_or_table: queryOrTable,
+      limit,
+    }),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || 'SQL ingestion failed')
+  }
+  return res.json()
+}
