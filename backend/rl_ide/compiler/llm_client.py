@@ -107,6 +107,97 @@ class MockRulesLLMClient(BaseLLMClient):
 
         # Handle auto-repair retry prompts
         if "RewardValidationError" in prompt or "Undefined variable" in prompt:
+            if "DynamicSimAdapter" in prompt or "tictactoe" in prompt.lower() or "robot" in prompt.lower() or "inventory" in prompt.lower():
+                if "robot" in prompt.lower() or "obstacle" in prompt.lower():
+                    return """
+task_id: "robot_rover_repaired"
+name: "2D Robot Rover (Repaired)"
+description: "Repaired task configuration with valid schema fields"
+adapter_name: "DynamicSimAdapter"
+adapter_config:
+  mode: "robot_rover"
+  episode_length: 50
+hyperparameters:
+  learning_rate: 0.0003
+  gamma: 0.90
+reward_dsl:
+  version: "1.0"
+  horizon:
+    gamma: 0.90
+    critic_warmup_epochs_on_diff: 10
+    kl_coef: 0.1
+  reward:
+    terms:
+      - name: reach_target_bonus
+        when: "obs.reached_target == True"
+        value: 15.0
+      - name: obstacle_collision_penalty
+        when: "obs.collided == True"
+        value: -15.0
+    pinned_episodes: []
+    aggregate: sum
+    clamp: [-50.0, 50.0]
+"""
+                elif "inventory" in prompt.lower() or "stock" in prompt.lower():
+                    return """
+task_id: "smart_inventory_repaired"
+name: "Smart Inventory (Repaired)"
+description: "Repaired task configuration with valid schema fields"
+adapter_name: "DynamicSimAdapter"
+adapter_config:
+  mode: "inventory_sim"
+  episode_length: 30
+hyperparameters:
+  learning_rate: 0.001
+  gamma: 0.90
+reward_dsl:
+  version: "1.0"
+  horizon:
+    gamma: 0.90
+    critic_warmup_epochs_on_diff: 10
+    kl_coef: 0.1
+  reward:
+    terms:
+      - name: profit_sales_reward
+        when: "obs.profit_margin > 0.0"
+        value: 4.0
+      - name: stockout_penalty
+        when: "obs.is_stockout == True"
+        value: -12.0
+    pinned_episodes: []
+    aggregate: sum
+    clamp: [-50.0, 50.0]
+"""
+                else:
+                    return """
+task_id: "tictactoe_master_repaired"
+name: "Tic-Tac-Toe Sparring Agent (Repaired)"
+description: "Repaired task configuration with valid schema fields"
+adapter_name: "DynamicSimAdapter"
+adapter_config:
+  mode: "tictactoe"
+  episode_length: 9
+hyperparameters:
+  learning_rate: 0.001
+  gamma: 0.90
+reward_dsl:
+  version: "1.0"
+  horizon:
+    gamma: 0.90
+    critic_warmup_epochs_on_diff: 10
+    kl_coef: 0.1
+  reward:
+    terms:
+      - name: win_game_bonus
+        when: "state.winner == 'agent'"
+        value: 10.0
+      - name: block_opponent_win_bonus
+        when: "obs.blocked_opponent_win == True"
+        value: 8.0
+    pinned_episodes: []
+    aggregate: sum
+    clamp: [-50.0, 50.0]
+"""
             if "AutoDataAdapter" in prompt or "autodata" in prompt.lower():
                 return """
 task_id: "auto_data_task_repaired"
@@ -199,6 +290,124 @@ reward_dsl:
     pinned_episodes: []
     aggregate: sum
     clamp: [-100.0, 100.0]
+"""
+
+        # Handle DynamicSimAdapter compilation prompts
+        if "DynamicSimAdapter" in prompt or "tictactoe" in prompt.lower() or "tic-tac-toe" in prompt.lower() or "robot" in prompt.lower() or "rover" in prompt.lower() or "inventory" in prompt.lower():
+            p_low = prompt.lower()
+            if "robot" in p_low or "rover" in p_low or "arm" in p_low or "obstacle" in p_low or "kinematics" in p_low:
+                return """
+task_id: "robot_rover_v1"
+name: "2D Robot Rover Obstacle Avoidance"
+description: "Train robot rover to reach target coordinates while avoiding obstacles and minimizing jerk"
+adapter_name: "DynamicSimAdapter"
+adapter_config:
+  mode: "robot_rover"
+  episode_length: 50
+hyperparameters:
+  learning_rate: 0.0003
+  gamma: 0.90
+reward_dsl:
+  version: "1.0"
+  horizon:
+    gamma: 0.90
+    critic_warmup_epochs_on_diff: 10
+    kl_coef: 0.1
+  reward:
+    terms:
+      - name: reach_target_bonus
+        when: "obs.reached_target == True"
+        value: 15.0
+      - name: approach_target_bonus
+        when: "obs.distance_reduced == True"
+        value: 2.0
+      - name: obstacle_collision_penalty
+        when: "obs.collided == True"
+        value: -15.0
+      - name: obstacle_proximity_penalty
+        when: "obs.min_obstacle_dist < 8.0"
+        value: -6.0
+      - name: jerk_minimization_penalty
+        when: "obs.jerk_magnitude > 2.0"
+        value: -2.0
+      - name: docking_smooth_brake
+        when: "obs.in_docking_zone == True and action.label == 'brake_hold'"
+        value: 3.0
+    pinned_episodes: []
+    aggregate: sum
+    clamp: [-50.0, 50.0]
+"""
+            elif "inventory" in p_low or "stock" in p_low or "supply" in p_low:
+                return """
+task_id: "smart_inventory_v1"
+name: "Smart Inventory Replenishment"
+description: "Optimize inventory orders to prevent stockouts while minimizing holding costs"
+adapter_name: "DynamicSimAdapter"
+adapter_config:
+  mode: "inventory_sim"
+  episode_length: 30
+hyperparameters:
+  learning_rate: 0.001
+  gamma: 0.90
+reward_dsl:
+  version: "1.0"
+  horizon:
+    gamma: 0.90
+    critic_warmup_epochs_on_diff: 10
+    kl_coef: 0.1
+  reward:
+    terms:
+      - name: profit_sales_reward
+        when: "obs.profit_margin > 0.0"
+        value: 4.0
+      - name: stockout_penalty
+        when: "obs.is_stockout == True"
+        value: -12.0
+      - name: excess_holding_penalty
+        when: "obs.holding_cost > 10.0"
+        value: -4.0
+    pinned_episodes: []
+    aggregate: sum
+    clamp: [-50.0, 50.0]
+"""
+            else:
+                return """
+task_id: "tictactoe_master_v1"
+name: "Tic-Tac-Toe Sparring Agent"
+description: "Train agent to play tic-tac-toe, take center when open, block opponent wins, and win"
+adapter_name: "DynamicSimAdapter"
+adapter_config:
+  mode: "tictactoe"
+  episode_length: 9
+hyperparameters:
+  learning_rate: 0.001
+  gamma: 0.90
+reward_dsl:
+  version: "1.0"
+  horizon:
+    gamma: 0.90
+    critic_warmup_epochs_on_diff: 10
+    kl_coef: 0.1
+  reward:
+    terms:
+      - name: win_game_bonus
+        when: "state.winner == 'agent'"
+        value: 10.0
+      - name: lose_game_penalty
+        when: "state.winner == 'opponent'"
+        value: -10.0
+      - name: take_center_bonus
+        when: "obs.center_open == True and action.is_center == True"
+        value: 5.0
+      - name: block_opponent_win_bonus
+        when: "obs.blocked_opponent_win == True"
+        value: 8.0
+      - name: illegal_move_penalty
+        when: "obs.is_legal_move == False"
+        value: -20.0
+    pinned_episodes: []
+    aggregate: sum
+    clamp: [-50.0, 50.0]
 """
 
         # Handle standard task compilation prompts for TextClassifyAdapter

@@ -10,6 +10,7 @@ from rl_ide.contracts.adapter import DomainAdapter
 from rl_ide.adapters.stream_adapter import CSVStreamAdapter
 from rl_ide.adapters.text_classify_adapter import TextClassifyAdapter
 from rl_ide.adapters.auto_data_adapter import AutoDataAdapter
+from rl_ide.adapters.dynamic_sim_adapter import DynamicSimAdapter
 from rl_ide.compiler.models import TaskConfig
 from rl_ide.compiler.llm_client import BaseLLMClient, MockRulesLLMClient, create_llm_client
 from rl_ide.reward.evaluator import RewardValidator, RewardValidationError
@@ -18,6 +19,7 @@ ADAPTER_REGISTRY: dict[str, type[DomainAdapter]] = {
     "CSVStreamAdapter": CSVStreamAdapter,
     "TextClassifyAdapter": TextClassifyAdapter,
     "AutoDataAdapter": AutoDataAdapter,
+    "DynamicSimAdapter": DynamicSimAdapter,
 }
 
 
@@ -76,6 +78,17 @@ class NLToConfigCompiler:
                     "target": ["pass", "flag", "pass", "flag"],
                 })
                 adapter = adapter_cls(sample_df)
+            elif adapter_name == "DynamicSimAdapter":
+                p_lower = user_prompt.lower()
+                if "tictactoe" in p_lower or "tic-tac-toe" in p_lower or "board" in p_lower:
+                    mode = "tictactoe"
+                elif "robot" in p_lower or "rover" in p_lower or "arm" in p_lower or "obstacle" in p_lower:
+                    mode = "robot_rover"
+                elif "inventory" in p_lower or "stock" in p_lower or "supply" in p_lower:
+                    mode = "inventory_sim"
+                else:
+                    mode = "tictactoe"
+                adapter = adapter_cls(mode=mode)
             else:
                 adapter = adapter_cls()
 

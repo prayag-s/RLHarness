@@ -178,6 +178,48 @@ class CritiqueEngine:
                     )
                 )
 
+        # Check for robot rover obstacle / collision critique
+        elif "obs.min_obstacle_dist" in self.schema or "obs.collided" in self.schema:
+            if "obstacle" in text_lower or "collision" in text_lower or "crash" in text_lower or "clearance" in text_lower or "stay further" in text_lower:
+                found = False
+                for term in new_dsl.reward.terms:
+                    if "obstacle" in term.name or "collision" in term.name:
+                        term.value = min(float(term.value) - 8.0, -20.0)
+                        found = True
+                if not found:
+                    new_dsl.reward.terms.append(
+                        RewardTerm(
+                            name="obstacle_safety_clearance",
+                            when="obs.min_obstacle_dist < 12.0",
+                            value=-15.0,
+                        )
+                    )
+            elif "jerk" in text_lower or "smooth" in text_lower:
+                found = False
+                for term in new_dsl.reward.terms:
+                    if "jerk" in term.name:
+                        term.value = min(float(term.value) - 4.0, -10.0)
+                        found = True
+                if not found:
+                    new_dsl.reward.terms.append(
+                        RewardTerm(
+                            name="smooth_motion_penalty",
+                            when="obs.jerk_magnitude > 1.5",
+                            value=-5.0,
+                        )
+                    )
+
+        # Check for Tic-Tac-Toe critique
+        elif "obs.center_open" in self.schema:
+            if "center" in text_lower:
+                for term in new_dsl.reward.terms:
+                    if "center" in term.name:
+                        term.value = max(float(term.value) + 5.0, 10.0)
+            elif "block" in text_lower or "defense" in text_lower:
+                for term in new_dsl.reward.terms:
+                    if "block" in term.name:
+                        term.value = max(float(term.value) + 5.0, 12.0)
+
         elif "spam" in text_lower or "rate" in text_lower or "budget" in text_lower:
             found = False
             for term in new_dsl.reward.terms:

@@ -2,7 +2,7 @@
 
 **Project:** RL-Native Agent IDE (v3.0 Vibe Studio & Universal Ingestion)  
 **Last Updated:** 2026-10-27  
-**Current Status:** Phase 0A-0E, Phase 1, Phase 2 & Phase 3A Completed (100% Tests Passing: 28/28; Frontend Build Clean 0 Errors)  
+**Current Status:** Phase 0A-0E, Phase 1, Phase 2, Phase 3A & Phase 3B Completed (100% Tests Passing: 31/31; Frontend Build Clean 0 Errors)  
 
 
 ---
@@ -493,6 +493,108 @@ dist/assets/index-CJsI4LuI.css   26.80 kB │ gzip:  5.54 kB
 dist/assets/index-Bf12CDTc.js   242.58 kB │ gzip: 68.34 kB
 ✓ built in 4.11s
 ```
+
+---
+
+## 15. Completed Work: Phase 3B (Dynamic Game, Robotics & Simulation Synthesizer)
+
+### 15.1 Dynamic Simulation Adapter (`DynamicSimAdapter`)
+- **File:** `backend/rl_ide/adapters/dynamic_sim_adapter.py`
+- Implements `@runtime_checkable` `DomainAdapter` protocol with 4 simulation engines:
+  1. **TicTacToeSimEngine (`mode="tictactoe"`):**
+     - 3x3 turn-based board game with configurable opponent sparring (`random`, `tactical`, `minimax`).
+     - Tactical safety prioritization: automatically detects and executes open winning moves and blocks opponent threats before playing legal exploratory actions, guaranteeing 0% illegal moves and $\ge 85\%$ non-loss rate.
+     - Rich event schema: `obs.center_open`, `obs.corners_open_count`, `obs.is_legal_move`, `obs.took_winning_move`, `obs.blocked_opponent_win`, `obs.picked_center`, `obs.picked_corner`, `state.winner`.
+     - Emits `ui_mode: "board_grid"`.
+  2. **RobotKinematicsSimEngine (`mode="robot_rover"`):**
+     - 2D continuous simulation arena ($100 \times 100$) with robot dynamics $(x, y, v_x, v_y)$, docking target $(g_x, g_y)$, circular obstacles, 8-directional lidar raycasts, battery budget, and 9 discrete thrusters/brakes.
+     - Rich event schema: `obs.dist_to_target`, `obs.distance_reduced`, `obs.min_obstacle_dist`, `obs.collided`, `obs.reached_target`, `obs.in_docking_zone`, `obs.velocity_magnitude`, `obs.jerk_magnitude`, `obs.battery_remaining`.
+     - Emits `ui_mode: "robot_canvas"`.
+  3. **SmartInventorySimEngine (`mode="inventory_sim"`):**
+     - Warehouse supply chain simulation with stochastic demand surges, lead times, 4 restocking order tiers, holding costs, and stockout penalties.
+     - Emits `ui_mode: "sim_dashboard"`.
+  4. **CustomDeclarativeSimEngine (`mode="custom_sim"`):**
+     - Declarative multi-variable simulation engine supporting custom dynamic state transitions.
+     - Emits `ui_mode: "sim_dashboard"`.
+
+### 15.2 Interactive Live Testing API (`play_interactive_step`)
+- Added `play_interactive_step` directly on `DynamicSimAdapter`:
+  - **Board Grid (Tic-Tac-Toe):** Accepts user board state and `human_cell_idx` click; executes human move, evaluates policy action probabilities across all 9 cells, masks illegal moves, executes agent counter-move, and returns updated board with action distribution.
+  - **Robot Canvas (2D Robotics):** Accepts dynamic `robot_state`, user-moved `target_xy` beacon, and user-placed `obstacles_list`; advances trained policy forward by $K$ frames and returns full predicted trajectory trail.
+
+### 15.3 Compiler, Critique Engine & Runner Integration
+- **`backend/rl_ide/compiler/nl_to_config.py`:** Registered `DynamicSimAdapter` in `ADAPTER_REGISTRY`, automatically routing intents for `"tic-tac-toe"`, `"board game"`, `"robot"`, `"rover"`, `"kinematics"`, and `"inventory"` to `DynamicSimAdapter`.
+- **`backend/rl_ide/compiler/llm_client.py`:** Added template configs, AST rules, and auto-repair schemas for `DynamicSimAdapter` modes.
+- **`backend/rl_ide/compiler/critique_engine.py`:** Added critique diff generation for robotics obstacle avoidance (`obs.min_obstacle_dist <= 8.0`), jerk reduction (`obs.jerk_magnitude`), and board game tactics (`obs.center_open`, `obs.blocked_opponent_win`).
+- **`backend/rl_ide/trainer/runner.py`:** Extended `warmstart_policy` to consume demonstration state-action pairs directly from adapters implementing `_get_demonstrations`.
+
+---
+
+## 16. Verification Gate Results (Phase 3B)
+
+### Full Backend Regression Suite: 31 / 31 Tests Passing (100% Green)
+```text
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.1.1, pluggy-1.7.0 -- /home/devuser/projects/RLHarness/.venv/bin/python
+cachedir: .pytest_cache
+rootdir: /home/devuser/projects/RLHarness/backend
+configfile: pyproject.toml
+plugins: asyncio-1.4.1, anyio-4.15.1
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+
+backend/tests/test_adapter_conformance.py::test_full_cross_domain_conformance_pipeline[CSVStreamAdapter] PASSED [  3%]
+backend/tests/test_adapter_conformance.py::test_full_cross_domain_conformance_pipeline[TextClassifyAdapter] PASSED [  6%]
+backend/tests/test_phase_0a.py::test_synthetic_stream_generation PASSED  [  9%]
+backend/tests/test_phase_0a.py::test_1_valid_yaml_dsl_evaluation PASSED  [ 12%]
+backend/tests/test_phase_0a.py::test_2_undefined_variable_raises_validation_error PASSED [ 16%]
+backend/tests/test_phase_0a.py::test_3_malicious_code_injection_raises_security_error PASSED [ 19%]
+backend/tests/test_phase_0a.py::test_4_adapter_episode_stepping_and_fast_rescoring PASSED [ 22%]
+backend/tests/test_phase_0b.py::test_1_compile_english_prose_to_valid_config PASSED [ 25%]
+backend/tests/test_phase_0b.py::test_2_automatic_validator_retry_on_invalid_field PASSED [ 29%]
+backend/tests/test_phase_0b.py::test_3_saving_sequential_versions_and_rollback PASSED [ 32%]
+backend/tests/test_phase_0b.py::test_byok_llm_factory_fallback PASSED    [ 35%]
+backend/tests/test_phase_0c.py::test_1_adapter_gym_env_and_hotswap PASSED [ 38%]
+backend/tests/test_phase_0c.py::test_2_episode_buffer_operations PASSED  [ 41%]
+backend/tests/test_phase_0c.py::test_3_warmstart_behavioral_cloning PASSED [ 45%]
+backend/tests/test_phase_0c.py::test_4_critique_diff_engine_and_two_stage_preview PASSED [ 48%]
+backend/tests/test_phase_0c.py::test_5_full_critique_alignment_loop PASSED [ 51%]
+backend/tests/test_phase_0d.py::test_1_drift_detector_signals PASSED     [ 54%]
+backend/tests/test_phase_0d.py::test_2_onnx_export_and_numerical_parity PASSED [ 58%]
+backend/tests/test_phase_0d.py::test_3_runbundle_packaging_and_standalone_run_local PASSED [ 61%]
+backend/tests/test_phase_0d.py::test_4_fastapi_rest_endpoints_and_websocket PASSED [ 64%]
+backend/tests/test_phase_2.py::test_1_runbundle_registry_catalog_and_inspection PASSED [ 67%]
+backend/tests/test_phase_2.py::test_2_runbundle_zip_import_and_roundtrip PASSED [ 70%]
+backend/tests/test_phase_2.py::test_3_standalone_run_local_daemon_http_serving PASSED [ 74%]
+backend/tests/test_phase_2.py::test_4_byok_settings_validation_and_routing PASSED [ 77%]
+backend/tests/test_phase_2.py::test_5_fastapi_bundle_registry_and_settings_endpoints PASSED [ 80%]
+backend/tests/test_phase_3a.py::test_1_ingest_csv_xlsx_and_train_export PASSED [ 83%]
+backend/tests/test_phase_3a.py::test_2_sqlite_sqlalchemy_readonly_guardrails_and_query_burst PASSED [ 87%]
+backend/tests/test_phase_3a.py::test_3_document_pdf_docx_rule_extraction_and_chunk_stepping PASSED [ 90%]
+backend/tests/test_phase_3b.py::test_1_tictactoe_training_and_interactive_play PASSED [ 93%]
+backend/tests/test_phase_3b.py::test_2_robot_rover_navigation_critique_and_onnx_export PASSED [ 96%]
+backend/tests/test_phase_3b.py::test_3_inventory_sim_stepping_and_dashboard PASSED [100%]
+
+================== 31 passed, 29 warnings in 87.68s ==================
+```
+
+### Phase 3B Verification Suite:
+- `test_phase_3b.py::test_1_tictactoe_training_and_interactive_play`: **PASSED** (Tic-Tac-Toe prompt compilation, warmstart BC, PPO micro-burst, 0% illegal moves, $>85\%$ non-loss sparring rate, and `play_interactive_step` human vs agent play)
+- `test_phase_3b.py::test_2_robot_rover_navigation_critique_and_onnx_export`: **PASSED** (2D Robot Rover obstacle avoidance compilation, burst training, critique diff proposal on obstacle proximity, diff application, ONNX export with parity $< 1e-5$, and interactive live testing with target/obstacle placement)
+- `test_phase_3b.py::test_3_inventory_sim_stepping_and_dashboard`: **PASSED** (Supply chain inventory sim stepping, multi-tier orders, holding/stockout telemetry, `ui_mode: "sim_dashboard"`)
+
+### Frontend Production Build: 100% Clean (0 Errors)
+```text
+> rl-ide-frontend@0.1.0 build
+> tsc && vite build
+
+vite v6.4.5 building for production...
+✓ 1596 modules transformed.
+dist/index.html                   0.56 kB │ gzip:  0.37 kB
+dist/assets/index-CJsI4LuI.css   26.80 kB │ gzip:  5.54 kB
+dist/assets/index-Bf12CDTc.js   242.58 kB │ gzip: 68.34 kB
+✓ built in 18.94s
+```
+
 
 
 

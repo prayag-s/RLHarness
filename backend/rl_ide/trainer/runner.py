@@ -86,7 +86,9 @@ class TrainingRunner:
             )
 
         # Sample demonstration steps from the adapter's domain
-        if hasattr(self.adapter, "df"):
+        if hasattr(self.adapter, "_get_demonstrations"):
+            states, actions = getattr(self.adapter, "_get_demonstrations")(n_samples)
+        elif hasattr(self.adapter, "df"):
             df = getattr(self.adapter, "df")
             sample_indices = np.linspace(0, len(df) - 1, num=min(n_samples, len(df)), dtype=int)
             labels_list = getattr(self.adapter, "ACTION_LABELS", None)
