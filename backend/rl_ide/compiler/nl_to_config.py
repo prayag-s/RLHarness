@@ -55,6 +55,7 @@ class NLToConfigCompiler:
         adapter_name: str,
         adapter: DomainAdapter | None = None,
         task_id: str | None = None,
+        candidate_rules: list[Any] | None = None,
     ) -> TaskConfig:
         """Translates user English prose into a validated TaskConfig.
         
@@ -137,6 +138,26 @@ class NLToConfigCompiler:
 
                 # Static validation against schema
                 RewardValidator.validate(task_config.reward_dsl, schema=schema)
+
+                # Incorporate extracted candidate rules if provided
+                if candidate_rules:
+                    from rl_ide.reward.dsl import RewardTerm
+                    for cr in candidate_rules:
+                        expr = getattr(cr, "ast_expression", None)
+                        weight = float(getattr(cr, "suggested_weight", 5.0))
+                        term_name = getattr(cr, "rule_id", "doc_rule")
+                        if expr:
+                            try:
+                                RewardValidator.validate_expression(expr, schema)
+                                if not any(t.name == term_name for t in task_config.reward_dsl.reward.terms):
+                                    task_config.reward_dsl.reward.terms.append(RewardTerm(
+                                        name=term_name,
+                                        expression=expr,
+                                        weight=weight,
+                                    ))
+                            except Exception:
+                                pass
+
                 return task_config
 
             except (RewardValidationError, ValidationError, yaml.YAMLError, ValueError) as err:

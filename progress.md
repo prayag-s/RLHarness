@@ -2,7 +2,7 @@
 
 **Project:** RL-Native Agent IDE (v3.0 Vibe Studio & Universal Ingestion)  
 **Last Updated:** 2026-10-27  
-**Current Status:** Phase 0A-0E, Phase 1, Phase 2, Phase 3A & Phase 3B Completed (100% Tests Passing: 31/31; Frontend Build Clean 0 Errors)  
+**Current Status:** Phase 0A-0E, Phase 1, Phase 2, Phase 3A, Phase 3B & Phase 3C Completed (100% Tests Passing: 34/34; Frontend Build Clean 0 Errors)  
 
 
 ---
@@ -594,6 +594,104 @@ dist/assets/index-CJsI4LuI.css   26.80 kB │ gzip:  5.54 kB
 dist/assets/index-Bf12CDTc.js   242.58 kB │ gzip: 68.34 kB
 ✓ built in 18.94s
 ```
+
+---
+
+## 17. Completed Work: Phase 3C ("Vibe Mode" Autopilot Orchestrator & FastAPI Endpoints)
+
+### 17.1 Behavioral Translator & Plain-English Rule Cards
+- **File:** `backend/rl_ide/vibe/translator.py`
+- Implemented `PlainRuleCard`, `dsl_to_plain_rules(dsl)`, and `plain_rule_to_dsl_diff(card, new_importance)`:
+  - Translates formal AST `RewardDSL` expressions into user-friendly plain-English titles, detailed descriptions, category pills, and importance levels (`Must Do`, `High Priority`, `Bonus`, `Avoid`, `Strict Ban`).
+  - Supports 1-click priority boost/reduction mapping directly into `TermDiff` objects with weight scaling.
+
+### 17.2 Vibe Autopilot Orchestrator & Agent Mastery Engine
+- **File:** `backend/rl_ide/vibe/orchestrator.py`
+- Implemented `compute_skill_summary(episodes, adapter_name)`:
+  - Computes 0–100% **Agent Mastery Score**, status badge (`Mastered`, `Proficient`, `Learning`, `Needs Coaching`), win/success rates, and plain-English behavioral insights across domains (Board Game, Robotics, Inventory, Stream/Data).
+- Implemented `VibeOrchestrator`:
+  - `create_session`: One-click autopilot orchestrating adapter synthesis/selection (incorporating uploaded document candidate rules), compilation, warmstart, and micro-burst training.
+  - `coach_session`: Conversational coaching engine handling thumbs-up golden episode locking, 1-click rule priority adjustments, and freeform text critiques with Critic Warmup and follow-up micro-bursts.
+
+### 17.3 Universal Ingestion & Vibe API Endpoints
+- **File:** `backend/rl_ide/api/server.py`
+- Added 5 high-level endpoints:
+  1. `POST /api/ingest/upload`: Multipart file upload for `.csv`, `.xlsx`, `.json`, `.sqlite`, `.pdf`, `.docx`, `.txt`, `.md`. Returns dataset ID, auto-profiled schema, sample records, and extracted document rules.
+  2. `POST /api/ingest/sql`: Live SQL connection with read-only SQL validation guardrail (blocking DROP, DELETE, UPDATE, etc.) and dataset ingestion.
+  3. `POST /api/vibe/create`: Autopilot creation endpoint returning plain rules, latest frame, and Agent Mastery Score.
+  4. `POST /api/vibe/coach`: Coaching endpoint for conversational critique, 1-click rule card priority adjustments, and golden episode locking.
+  5. `POST /api/sim/interact`: Interactive live testing API for playing Tic-Tac-Toe turns against policy or dragging waypoints and obstacles on the 2D Robot Canvas.
+
+---
+
+## 18. Verification Gate Results (Phase 3C)
+
+### Full Backend Regression Suite: 34 / 34 Tests Passing (100% Green)
+```text
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.1.1, pluggy-1.7.0 -- /home/devuser/projects/RLHarness/.venv/bin/python
+cachedir: .pytest_cache
+rootdir: /home/devuser/projects/RLHarness/backend
+configfile: pyproject.toml
+plugins: asyncio-1.4.1, anyio-4.15.1
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+
+backend/tests/test_adapter_conformance.py::test_full_cross_domain_conformance_pipeline[CSVStreamAdapter] PASSED [  2%]
+backend/tests/test_adapter_conformance.py::test_full_cross_domain_conformance_pipeline[TextClassifyAdapter] PASSED [  5%]
+backend/tests/test_phase_0a.py::test_synthetic_stream_generation PASSED  [  8%]
+backend/tests/test_phase_0a.py::test_1_valid_yaml_dsl_evaluation PASSED  [ 11%]
+backend/tests/test_phase_0a.py::test_2_undefined_variable_raises_validation_error PASSED [ 14%]
+backend/tests/test_phase_0a.py::test_3_malicious_code_injection_raises_security_error PASSED [ 17%]
+backend/tests/test_phase_0a.py::test_4_adapter_episode_stepping_and_fast_rescoring PASSED [ 20%]
+backend/tests/test_phase_0b.py::test_1_compile_english_prose_to_valid_config PASSED [ 23%]
+backend/tests/test_phase_0b.py::test_2_automatic_validator_retry_on_invalid_field PASSED [ 26%]
+backend/tests/test_phase_0b.py::test_3_saving_sequential_versions_and_rollback PASSED [ 29%]
+backend/tests/test_phase_0b.py::test_byok_llm_factory_fallback PASSED    [ 32%]
+backend/tests/test_phase_0c.py::test_1_adapter_gym_env_and_hotswap PASSED [ 35%]
+backend/tests/test_phase_0c.py::test_2_episode_buffer_operations PASSED  [ 38%]
+backend/tests/test_phase_0c.py::test_3_warmstart_behavioral_cloning PASSED [ 41%]
+backend/tests/test_phase_0c.py::test_4_critique_diff_engine_and_two_stage_preview PASSED [ 44%]
+backend/tests/test_phase_0c.py::test_5_full_critique_alignment_loop PASSED [ 47%]
+backend/tests/test_phase_0d.py::test_1_drift_detector_signals PASSED     [ 50%]
+backend/tests/test_phase_0d.py::test_2_onnx_export_and_numerical_parity PASSED [ 52%]
+backend/tests/test_phase_0d.py::test_3_runbundle_packaging_and_standalone_run_local PASSED [ 55%]
+backend/tests/test_phase_0d.py::test_4_fastapi_rest_endpoints_and_websocket PASSED [ 58%]
+backend/tests/test_phase_2.py::test_1_runbundle_registry_catalog_and_inspection PASSED [ 61%]
+backend/tests/test_phase_2.py::test_2_runbundle_zip_import_and_roundtrip PASSED [ 64%]
+backend/tests/test_phase_2.py::test_3_standalone_run_local_daemon_http_serving PASSED [ 67%]
+backend/tests/test_phase_2.py::test_4_byok_settings_validation_and_routing PASSED [ 70%]
+backend/tests/test_phase_2.py::test_5_fastapi_bundle_registry_and_settings_endpoints PASSED [ 73%]
+backend/tests/test_phase_3a.py::test_1_ingest_csv_xlsx_and_train_export PASSED [ 76%]
+backend/tests/test_phase_3a.py::test_2_sqlite_sqlalchemy_readonly_guardrails_and_query_burst PASSED [ 79%]
+backend/tests/test_phase_3a.py::test_3_document_pdf_docx_rule_extraction_and_chunk_stepping PASSED [ 82%]
+backend/tests/test_phase_3b.py::test_1_tictactoe_training_and_interactive_play PASSED [ 85%]
+backend/tests/test_phase_3b.py::test_2_robot_rover_navigation_critique_and_onnx_export PASSED [ 88%]
+backend/tests/test_phase_3b.py::test_3_inventory_sim_stepping_and_dashboard PASSED [ 91%]
+backend/tests/test_phase_3c.py::test_1_universal_ingest_upload_and_sql_endpoints PASSED [ 94%]
+backend/tests/test_phase_3c.py::test_2_vibe_lifecycle_tictactoe PASSED   [ 97%]
+backend/tests/test_phase_3c.py::test_3_vibe_lifecycle_robot_rover PASSED [100%]
+
+================== 34 passed, 29 warnings in 81.22s ==================
+```
+
+### Phase 3C Verification Suite:
+- `test_phase_3c.py::test_1_universal_ingest_upload_and_sql_endpoints`: **PASSED** (Universal file upload for CSV, PDF, DOCX with rule extraction, plus live SQLite read-only query and DROP TABLE blocking guardrail)
+- `test_phase_3c.py::test_2_vibe_lifecycle_tictactoe`: **PASSED** (One-click autopilot Vibe session creation for Tic-Tac-Toe, live interactive sparring via `POST /api/sim/interact`, golden episode lock, 1-click rule card priority adjustment, and conversational coaching)
+- `test_phase_3c.py::test_3_vibe_lifecycle_robot_rover`: **PASSED** (2D Robot Rover Vibe creation, live target/obstacle dragging via `POST /api/sim/interact`, and obstacle standoff distance critique coaching)
+
+### Frontend Production Build: 100% Clean (0 Errors)
+```text
+> rl-ide-frontend@0.1.0 build
+> tsc && vite build
+
+vite v6.4.5 building for production...
+✓ 1596 modules transformed.
+dist/index.html                   0.56 kB │ gzip:  0.37 kB
+dist/assets/index-CJsI4LuI.css   26.80 kB │ gzip:  5.54 kB
+dist/assets/index-Bf12CDTc.js   242.58 kB │ gzip: 68.34 kB
+✓ built in 15.59s
+```
+
 
 
 

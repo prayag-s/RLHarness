@@ -49,6 +49,15 @@ class TermDiff(BaseModel):
     new_term: dict[str, Any] | None = None
     rationale: str = ""
 
+    @property
+    def new_weight(self) -> float:
+        if self.new_term and "value" in self.new_term:
+            try:
+                return float(self.new_term["value"])
+            except (ValueError, TypeError):
+                pass
+        return 0.0
+
 
 class ConflictWarning(BaseModel):
     """Detected contradiction or regression conflict."""

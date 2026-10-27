@@ -17,6 +17,30 @@ class RewardTerm(BaseModel):
     when: str | bool = True
     value: float | int | str = 0.0
 
+    def __init__(
+        self,
+        name: str,
+        when: str | bool | None = None,
+        value: float | int | str | None = None,
+        expression: str | None = None,
+        weight: float | None = None,
+        **kwargs: Any,
+    ):
+        final_when = when if when is not None else (expression if expression is not None else True)
+        final_val = value if value is not None else (weight if weight is not None else 0.0)
+        super().__init__(name=name, when=final_when, value=final_val, **kwargs)
+
+    @property
+    def expression(self) -> str:
+        return str(self.when)
+
+    @property
+    def weight(self) -> float:
+        try:
+            return float(self.value)
+        except (ValueError, TypeError):
+            return 1.0
+
 
 class PinnedEpisode(BaseModel):
     episode_id: int

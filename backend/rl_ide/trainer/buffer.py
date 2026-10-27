@@ -12,6 +12,15 @@ class EpisodeBuffer:
     def __init__(self, max_episodes: int = 200):
         self.max_episodes = max_episodes
         self._buffer: deque[EpisodeLog] = deque(maxlen=max_episodes)
+        self.locked_ids: set[int] = set()
+
+    def lock_episode(self, episode_id: int) -> None:
+        """Locks an episode by ID so it cannot be degraded or pruned."""
+        self.locked_ids.add(episode_id)
+
+    def unlock_episode(self, episode_id: int) -> None:
+        """Unlocks a locked episode ID."""
+        self.locked_ids.discard(episode_id)
 
     def append(self, episode: EpisodeLog) -> None:
         """Appends a completed episode log."""

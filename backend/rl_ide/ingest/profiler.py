@@ -47,6 +47,11 @@ class DatasetProfile(BaseModel):
     feature_columns: list[str] = Field(default_factory=list)
     summary: dict[str, Any] = Field(default_factory=dict)
 
+    @property
+    def column_types(self) -> dict[str, str]:
+        """Provides a direct dictionary mapping column name -> detected data_type."""
+        return {col.name: col.data_type for col in self.columns}
+
     def get_column(self, name_or_sanitized: str) -> ColumnProfile | None:
         for col in self.columns:
             if col.name == name_or_sanitized or col.sanitized_name == name_or_sanitized:
@@ -299,6 +304,27 @@ class CandidateRule(BaseModel):
     value: float
     importance: str  # "Must Do (+10)" | "High Priority (+5)" | "Avoid (-5)" | "Strict Ban (-10)"
     category: str = "compliance"
+
+    @property
+    def description(self) -> str:
+        return self.plain_text
+
+    @property
+    def ast_expression(self) -> str:
+        return self.when_expr
+
+    @property
+    def suggested_weight(self) -> float:
+        return float(self.value)
+
+    @property
+    def rule_id(self) -> str:
+        return self.name
+
+    def model_dump(self, *args, **kwargs) -> dict[str, Any]:
+        d = super().model_dump(*args, **kwargs)
+        d["description"] = self.plain_text
+        return d
 
 
 class DocumentRuleExtractor:
