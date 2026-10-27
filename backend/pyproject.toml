@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rl-ide"
+version = "0.1.0"
+description = "RL-Native Agent IDE"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic>=2.0",
+    "pyyaml",
+    "numpy",
+    "pandas",
+    "gymnasium",
+    "stable-baselines3",
+    "torch",
+    "onnx",
+    "onnxruntime",
+    "scikit-learn",
+    "httpx",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
