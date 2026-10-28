@@ -15,24 +15,8 @@ from rl_ide.architect.models import (
     PILLAR_INTERACTION,
 )
 from rl_ide.llm.client import BaseLLMClient, create_llm_client, FallbackCodeSynthesizer, get_active_llm_client
+from rl_ide.llm.prompts import INTAKE_ARCHITECT_SYSTEM_PROMPT, ARCHITECT_SYSTEM_PROMPT
 from rl_ide.ingest.loader import IngestedDataset
-
-
-ARCHITECT_SYSTEM_PROMPT = """You are the Lead AI Agent Architect for an autonomous Reinforcement Learning IDE.
-Your job is to interview the user briefly to lock down a complete `AgentBlueprintSpec` before our code synthesizer builds their custom RL environment, visual Arena UI, and autonomous training loop.
-
-Check if the user's prompt (plus any attached dataset schema) clearly specifies the 5 Pillars:
-1. Objective & Actions: What the agent controls and what good behavior looks like.
-2. Data / Environment Source: Uploaded data/SQL/PDFs vs. a synthesized game/simulation.
-3. Visual Arena Design: How they want to visually watch the agent on screen (e.g., 2D grid, canvas physics, card inspector, dashboard).
-4. Target Expectations: The target success metric threshold (0-100%) and how many autonomous self-tuning rounds to run.
-5. Live Interaction Mode: How the human can play against or test the agent interactively.
-
-RULES:
-- If critical details (especially Visual Arena preference or Target Expectations) are missing on the first turn, set `status="needs_clarification"` and ask at most 2 to 3 concise, high-impact questions.
-- Every question MUST include 3-4 clickable `suggested_options` and a sensible `default_option`.
-- If the user answers your questions OR says "use defaults / build now", immediately set `status="ready_to_build"` and output the complete `AgentBlueprintSpec` in strict JSON.
-"""
 
 
 def is_tictactoe_intent(text: str) -> bool:
@@ -102,6 +86,7 @@ class IntakeArchitectAgent:
         conversation_history: list[dict[str, str]] | None = None,
         user_answers: dict[str, str] | None = None,
         force_smart_defaults: bool = False,
+        training_params: dict[str, Any] | None = None,
     ) -> IntakeResponse:
         """Evaluates user intent and returns either clarifying questions or locked blueprint."""
         prompt_clean = user_prompt.strip()
@@ -126,6 +111,7 @@ class IntakeArchitectAgent:
                     conversation_history,
                     answers,
                     wants_defaults=wants_defaults,
+                    training_params=training_params,
                 )
                 if llm_response:
                     return llm_response
@@ -140,6 +126,7 @@ class IntakeArchitectAgent:
             answers,
             wants_defaults=wants_defaults,
             conversation_history=conversation_history,
+            training_params=training_params,
         )
 
     def _call_llm_intake(
@@ -149,6 +136,7 @@ class IntakeArchitectAgent:
         conversation_history: list[dict[str, str]] | None,
         answers: dict[str, str],
         wants_defaults: bool = False,
+        training_params: dict[str, Any] | None = None,
     ) -> IntakeResponse | None:
         """Queries the configured LLM for intake evaluation."""
         context_parts = [f"User Prompt: {prompt}"]
@@ -157,6 +145,8 @@ class IntakeArchitectAgent:
             context_parts.append(f"Attached Dataset ID: {dataset.dataset_id}, Name: {dataset.name}, Columns: {cols}")
         if answers:
             context_parts.append(f"User Answers to Previous Questions: {json.dumps(answers)}")
+        if training_params:
+            context_parts.append(f"User Explicit Training Parameters: {json.dumps(training_params)}")
         if conversation_history:
             history_text = "\n".join(f"{m.get('role', 'user')}: {m.get('content', '')}" for m in conversation_history[-4:])
             context_parts.append(f"Recent Conversation:\n{history_text}")
@@ -169,14 +159,14 @@ class IntakeArchitectAgent:
                 "assistant_message, questions: [], and blueprint_spec populated with all 5 pillars: "
                 "task_title, domain_summary, data_source_type, observation_features, action_labels, "
                 "arena_visual_description, interactive_mode_description, success_metric_name, "
-                "target_metric_threshold, max_auto_tune_rounds, initial_reward_components."
+                "target_metric_threshold, max_auto_tune_rounds, episodes_per_round, initial_reward_components."
             )
         else:
             instruction = (
                 "Analyze the user's agent objective against the 5 Pillars (Observation, Action, Reward, "
-                "Arena UI, Expectations). If critical decisions require clarification, return status: "
-                "'needs_clarification' with clarifying questions. If intent is already clear, return "
-                "status: 'ready_to_build' with blueprint_spec."
+                "Arena UI, Expectations, Interaction). If critical decisions require clarification, return status: "
+                "'needs_clarification' with clarifying questions using unique IDs 'q_objective', 'q_arena_ui', 'q_interaction'. "
+                "If intent is already clear, return status: 'ready_to_build' with blueprint_spec."
             )
         full_query = "\n\n".join(context_parts) + "\n\n" + instruction
 
@@ -190,6 +180,7 @@ class IntakeArchitectAgent:
         answers: dict[str, str],
         wants_defaults: bool,
         conversation_history: list[dict[str, str]] | None = None,
+        training_params: dict[str, Any] | None = None,
     ) -> IntakeResponse:
         """Deterministic, highly reliable intake resolver across the 5 Pillars."""
         prompt_lower = prompt.lower()
@@ -204,110 +195,209 @@ class IntakeArchitectAgent:
 
         # Check pillar coverage
         has_arena_ui = (
-            "arena_ui" in answers
+            "arena_ui" in answers or "q_arena_ui" in answers
             or (
                 any(kw in prompt_lower for kw in ["visualize", "arena", "dark-mode", "grid", "canvas", "board", "dashboard", "radar", "inspector"])
-                and not is_tictactoe  # user simply mentioning tic-tac-toe doesn't mean they specified arena styling
+                and not is_tictactoe
             )
         )
-        # If user explicitly specified styling in prompt, count it
         if any(kw in prompt_lower for kw in ["neon", "wood", "retro", "pixel", "table view", "dark mode", "modern 3x3"]):
             has_arena_ui = True
 
         has_expectations = (
-            "expectations" in answers
+            "expectations" in answers or "q_expectations" in answers
             or re.search(r"\b\d{1,3}%\b", prompt) is not None
             or any(kw in prompt_lower for kw in ["win rate", "accuracy", "threshold", "rounds", "metric"])
         )
 
-        # Check if clarification is needed
-        needs_clarification = (not wants_defaults) and (not has_arena_ui or not has_expectations) and len(answers) == 0
+        has_objective = "q_objective" in answers or "objective" in answers
+        has_interaction = "q_interaction" in answers or "interaction" in answers
+
+        # Check if clarification is needed: prompt is underspecified and no answers given yet
+        needs_clarification = (not wants_defaults) and len(answers) == 0 and (not has_arena_ui or not has_expectations or not has_objective or not has_interaction)
 
         if needs_clarification:
             questions = []
-            if not has_arena_ui:
-                if is_tictactoe:
-                    q = ClarifyingQuestion(
-                        pillar=PILLAR_ARENA_UI,
-                        question="How would you like to visualize the Tic-Tac-Toe arena in the center panel?",
-                        suggested_options=[
-                            "Modern 3x3 dark-mode grid with neon glow and winning lines",
-                            "Minimalist wood-grain board with move history ledger",
-                            "Retro arcade 8-bit grid with animated action markers",
-                            "Compact numeric matrix with live value heatmaps",
-                        ],
-                        default_option="Modern 3x3 dark-mode grid with neon glow and winning lines",
-                        question_id=PILLAR_ARENA_UI,
-                    )
-                elif is_data:
-                    q = ClarifyingQuestion(
-                        pillar=PILLAR_ARENA_UI,
-                        question="How would you like to visualize predictions and records in the Arena center panel?",
-                        suggested_options=[
-                            "Interactive record inspector card with confidence gauge",
-                            "Real-time streaming ledger with live audit heatmaps",
-                            "Multi-metric telemetry dashboard with ROC/confusion sparklines",
-                            "Compact tabular feed with color-coded classification tags",
-                        ],
-                        default_option="Interactive record inspector card with confidence gauge",
-                        question_id=PILLAR_ARENA_UI,
-                    )
-                else:
-                    q = ClarifyingQuestion(
-                        pillar=PILLAR_ARENA_UI,
-                        question="How would you like to visually see the agent's behavior in the Arena center panel?",
-                        suggested_options=[
-                            "Modern dark-mode 2D canvas with neon indicators",
-                            "Interactive simulation field with trajectory traces",
-                            "Clean telemetry dashboard with real-time gauges",
-                            "Minimalist radar chart and timeline inspector",
-                        ],
-                        default_option="Modern dark-mode 2D canvas with neon indicators",
-                        question_id=PILLAR_ARENA_UI,
-                    )
-                questions.append(q)
 
-            if not has_expectations:
-                if is_tictactoe:
-                    q = ClarifyingQuestion(
-                        pillar=PILLAR_EXPECTATIONS,
-                        question="What target mastery win/draw rate and auto-tune round budget should we aim for?",
-                        suggested_options=[
-                            "85% Win/Draw Rate (4 rounds)",
-                            "90% Win/Draw Rate (4 rounds)",
-                            "95% Near-Optimal Mastery (5 rounds)",
-                            "75% Fast Prototyping (2 rounds)",
-                        ],
-                        default_option="85% Win/Draw Rate (4 rounds)",
-                        question_id=PILLAR_EXPECTATIONS,
-                    )
-                elif is_data:
-                    q = ClarifyingQuestion(
-                        pillar=PILLAR_EXPECTATIONS,
-                        question="What target accuracy / success threshold and auto-tune rounds budget should we target?",
-                        suggested_options=[
-                            "90% Target Accuracy (4 rounds)",
-                            "95% High Precision (5 rounds)",
-                            "85% Balanced Classification (3 rounds)",
-                            "75% Quick Baseline (2 rounds)",
-                        ],
-                        default_option="90% Target Accuracy (4 rounds)",
-                        question_id=PILLAR_EXPECTATIONS,
-                    )
-                else:
-                    q = ClarifyingQuestion(
-                        pillar=PILLAR_EXPECTATIONS,
-                        question="What target success rate and auto-tuning round budget should we target?",
-                        suggested_options=[
-                            "85% Success Rate (4 rounds)",
-                            "90% Success Rate (4 rounds)",
-                            "95% High Mastery (5 rounds)",
-                            "75% Fast Prototyping (2 rounds)",
-                        ],
-                        default_option="85% Success Rate (4 rounds)",
-                        question_id=PILLAR_EXPECTATIONS,
-                    )
-                questions.append(q)
+            # 1. Strategy & Rules (q_objective)
+            if is_tictactoe:
+                q_obj = ClarifyingQuestion(
+                    id="q_objective",
+                    question_id="q_objective",
+                    pillar=PILLAR_OBJECTIVE,
+                    question="What core strategic behavior and reward priorities should the agent master?",
+                    suggested_options=[
+                        "Unbeatable minimax play: Win whenever possible and force a draw otherwise",
+                        "Aggressive center-and-corner control with high win pressure",
+                        "Defensive counter-puncher: Prioritize immediate threat blocking",
+                        "Balanced self-play exploration with anti-loss penalty",
+                    ],
+                    default_option="Unbeatable minimax play: Win whenever possible and force a draw otherwise",
+                )
+            elif is_data:
+                q_obj = ClarifyingQuestion(
+                    id="q_objective",
+                    question_id="q_objective",
+                    pillar=PILLAR_OBJECTIVE,
+                    question="What classification strategy and error penalty model should the policy prioritize?",
+                    suggested_options=[
+                        "Balanced precision and recall with equal false positive/negative penalties",
+                        "High precision: Heavily penalize false alarms",
+                        "High recall: Prioritize catching all positive target occurrences",
+                        "Cost-sensitive decision making with tiered penalty matrix",
+                    ],
+                    default_option="Balanced precision and recall with equal false positive/negative penalties",
+                )
+            else:
+                q_obj = ClarifyingQuestion(
+                    id="q_objective",
+                    question_id="q_objective",
+                    pillar=PILLAR_OBJECTIVE,
+                    question="What primary domain goal and reward incentives should the agent optimize?",
+                    suggested_options=[
+                        "Rapid goal completion with minimum steps and distance penalties",
+                        "Energy-efficient conservative navigation avoiding danger zones",
+                        "Dynamic adaptability under environmental perturbations",
+                        "Exploration-first milestone discovery",
+                    ],
+                    default_option="Rapid goal completion with minimum steps and distance penalties",
+                )
+            questions.append(q_obj)
+
+            # 2. Arena Visualization (q_arena_ui)
+            if is_tictactoe:
+                q_ui = ClarifyingQuestion(
+                    id="q_arena_ui",
+                    question_id="q_arena_ui",
+                    pillar=PILLAR_ARENA_UI,
+                    question="How would you like to visualize the Tic-Tac-Toe arena in the center panel?",
+                    suggested_options=[
+                        "Modern 3x3 dark-mode grid with neon glow and winning lines",
+                        "Minimalist wood-grain board with move history ledger",
+                        "Retro arcade 8-bit grid with animated action markers",
+                        "Compact numeric matrix with live value heatmaps",
+                    ],
+                    default_option="Modern 3x3 dark-mode grid with neon glow and winning lines",
+                )
+            elif is_data:
+                q_ui = ClarifyingQuestion(
+                    id="q_arena_ui",
+                    question_id="q_arena_ui",
+                    pillar=PILLAR_ARENA_UI,
+                    question="How would you like to visualize predictions and records in the Arena center panel?",
+                    suggested_options=[
+                        "Interactive record inspector card with confidence gauge",
+                        "Real-time streaming ledger with live audit heatmaps",
+                        "Multi-metric telemetry dashboard with ROC/confusion sparklines",
+                        "Compact tabular feed with color-coded classification tags",
+                    ],
+                    default_option="Interactive record inspector card with confidence gauge",
+                )
+            else:
+                q_ui = ClarifyingQuestion(
+                    id="q_arena_ui",
+                    question_id="q_arena_ui",
+                    pillar=PILLAR_ARENA_UI,
+                    question="How would you like to visually see the agent's behavior in the Arena center panel?",
+                    suggested_options=[
+                        "Modern dark-mode 2D canvas with neon indicators",
+                        "Interactive simulation field with trajectory traces",
+                        "Clean telemetry dashboard with real-time gauges",
+                        "Minimalist radar chart and timeline inspector",
+                    ],
+                    default_option="Modern dark-mode 2D canvas with neon indicators",
+                )
+            questions.append(q_ui)
+
+            # 3. Interactive Mode (q_interaction)
+            if is_tictactoe:
+                q_int = ClarifyingQuestion(
+                    id="q_interaction",
+                    question_id="q_interaction",
+                    pillar=PILLAR_INTERACTION,
+                    question="How will you interact with and test the agent live in the Arena?",
+                    suggested_options=[
+                        "Click-to-place human vs agent interactive board with reset button",
+                        "Step-by-step turn inspection with move undo and probability radar",
+                        "Automated self-play spectator mode with speed slider",
+                        "Simulated opponent difficulty toggle (Random, Tactical, Master)",
+                    ],
+                    default_option="Click-to-place human vs agent interactive board with reset button",
+                )
+            elif is_data:
+                q_int = ClarifyingQuestion(
+                    id="q_interaction",
+                    question_id="q_interaction",
+                    pillar=PILLAR_INTERACTION,
+                    question="How will you test individual data records and scenarios interactively?",
+                    suggested_options=[
+                        "Interactive feature sliders with live probability prediction readout",
+                        "Row-by-row dataset inspector with manual override button",
+                        "Batch record test upload with confusion matrix recalculation",
+                        "Live threshold sensitivity tuning bar",
+                    ],
+                    default_option="Interactive feature sliders with live probability prediction readout",
+                )
+            else:
+                q_int = ClarifyingQuestion(
+                    id="q_interaction",
+                    question_id="q_interaction",
+                    pillar=PILLAR_INTERACTION,
+                    question="How will you interactively test and guide the agent in the Arena?",
+                    suggested_options=[
+                        "Direct point-and-click target guidance with obstacle placement",
+                        "Manual keyboard/button control override for agent comparison",
+                        "State injection inspector with live policy value readout",
+                        "Continuous physics sandbox with gravity/friction sliders",
+                    ],
+                    default_option="Direct point-and-click target guidance with obstacle placement",
+                )
+            questions.append(q_int)
+
+            # 4. Target Expectations (q_expectations)
+            if is_tictactoe:
+                q_exp = ClarifyingQuestion(
+                    id="q_expectations",
+                    question_id="q_expectations",
+                    pillar=PILLAR_EXPECTATIONS,
+                    question="What target mastery win/draw rate and auto-tune round budget should we aim for?",
+                    suggested_options=[
+                        "90% Win/Draw Rate (5 rounds)",
+                        "95% Near-Optimal Mastery (8 rounds)",
+                        "85% Win/Draw Rate (4 rounds)",
+                        "75% Fast Prototyping (2 rounds)",
+                    ],
+                    default_option="90% Win/Draw Rate (5 rounds)",
+                )
+            elif is_data:
+                q_exp = ClarifyingQuestion(
+                    id="q_expectations",
+                    question_id="q_expectations",
+                    pillar=PILLAR_EXPECTATIONS,
+                    question="What target accuracy / success threshold and auto-tune rounds budget should we target?",
+                    suggested_options=[
+                        "90% Target Accuracy (5 rounds)",
+                        "95% High Precision (8 rounds)",
+                        "85% Balanced Classification (4 rounds)",
+                        "75% Quick Baseline (2 rounds)",
+                    ],
+                    default_option="90% Target Accuracy (5 rounds)",
+                )
+            else:
+                q_exp = ClarifyingQuestion(
+                    id="q_expectations",
+                    question_id="q_expectations",
+                    pillar=PILLAR_EXPECTATIONS,
+                    question="What target success rate and auto-tuning round budget should we target?",
+                    suggested_options=[
+                        "90% Target Mastery (5 rounds)",
+                        "95% High Mastery (8 rounds)",
+                        "85% Target Success (4 rounds)",
+                        "75% Fast Prototyping (2 rounds)",
+                    ],
+                    default_option="90% Target Mastery (5 rounds)",
+                )
+            questions.append(q_exp)
 
             return IntakeResponse(
                 status="needs_clarification",
@@ -317,11 +407,16 @@ class IntakeArchitectAgent:
                 ),
                 questions=questions,
                 blueprint_spec=None,
+                recommended_training_params={
+                    "max_auto_tune_rounds": 5,
+                    "episodes_per_round": 200,
+                    "target_metric_threshold": 90.0,
+                },
             )
 
         # 3. Build Locked Blueprint
         # Parse arena_ui
-        arena_ui_choice = answers.get("arena_ui") or answers.get(PILLAR_ARENA_UI)
+        arena_ui_choice = answers.get("q_arena_ui") or answers.get("arena_ui") or answers.get(PILLAR_ARENA_UI)
         if not arena_ui_choice:
             if is_tictactoe:
                 arena_ui_choice = "Modern 3x3 dark-mode grid with neon glow and winning lines"
@@ -331,24 +426,61 @@ class IntakeArchitectAgent:
                 arena_ui_choice = "Modern dark-mode 2D canvas with neon indicators"
 
         # Parse expectations & threshold
-        expectations_choice = answers.get("expectations") or answers.get(PILLAR_EXPECTATIONS) or ""
-        threshold = 85.0
-        max_rounds = 4
+        expectations_choice = answers.get("q_expectations") or answers.get("expectations") or answers.get(PILLAR_EXPECTATIONS) or ""
+        threshold = 85.0 if wants_defaults else 90.0
+        max_rounds = 4 if wants_defaults else 5
+        episodes_per_round = 200
 
-        # Extract percentage threshold
-        match_pct = re.search(r"(\d+(?:\.\d+)?)%", expectations_choice or prompt)
-        if match_pct:
-            threshold = float(match_pct.group(1))
+        # Check explicit training parameters from arguments or answers
+        effective_params = dict(training_params or {})
+        for k in ["max_auto_tune_rounds", "episodes_per_round", "target_metric_threshold"]:
+            if k in answers:
+                effective_params[k] = answers[k]
 
-        # Extract rounds
-        match_rnd = re.search(r"(\d+)\s*rounds?", expectations_choice or prompt, re.IGNORECASE)
-        if match_rnd:
-            max_rounds = int(match_rnd.group(1))
+        if "target_metric_threshold" in effective_params:
+            try:
+                threshold = float(effective_params["target_metric_threshold"])
+            except (ValueError, TypeError):
+                pass
+        else:
+            match_pct = re.search(r"(\d+(?:\.\d+)?)%", expectations_choice or prompt)
+            if match_pct:
+                threshold = float(match_pct.group(1))
+
+        if "max_auto_tune_rounds" in effective_params:
+            try:
+                max_rounds = int(effective_params["max_auto_tune_rounds"])
+            except (ValueError, TypeError):
+                pass
+        else:
+            match_rnd = re.search(r"(\d+)\s*rounds?", expectations_choice or prompt, re.IGNORECASE)
+            if match_rnd:
+                max_rounds = int(match_rnd.group(1))
+
+        if "episodes_per_round" in effective_params:
+            try:
+                episodes_per_round = int(effective_params["episodes_per_round"])
+            except (ValueError, TypeError):
+                pass
+        else:
+            match_eps = re.search(r"(\d+)\s*episodes?", prompt, re.IGNORECASE)
+            if match_eps:
+                episodes_per_round = int(match_eps.group(1))
+
+        # Parse interactive mode choice
+        interactive_choice = answers.get("q_interaction") or answers.get("interaction") or answers.get(PILLAR_INTERACTION)
+
+        # Parse strategy/objective choice
+        objective_choice = answers.get("q_objective") or answers.get("objective") or answers.get(PILLAR_OBJECTIVE)
 
         # Build domain-specific blueprint
         if is_tictactoe:
             task_title = "Tic-Tac-Toe Master Agent"
-            domain_summary = "Zero-sum competitive 3x3 board game agent learning optimal play against stochastic and min-max opponents."
+            domain_summary = (
+                f"Zero-sum competitive 3x3 board game agent. Strategy: {objective_choice}"
+                if objective_choice
+                else "Zero-sum competitive 3x3 board game agent learning optimal play against stochastic and min-max opponents."
+            )
             data_source_type = "pure_simulation"
             dataset_id = None
             observation_features = [
@@ -362,7 +494,7 @@ class IntakeArchitectAgent:
                 "Place (1,0)", "Place (1,1)", "Place (1,2)",
                 "Place (2,0)", "Place (2,1)", "Place (2,2)"
             ]
-            interactive_mode = "Clickable 3x3 interactive board where the human plays as 'O' and the agent responds instantly as 'X'."
+            interactive_mode = interactive_choice or "Clickable 3x3 interactive board where the human plays as 'O' and the agent responds instantly as 'X'."
             success_metric = "Non-Loss Rate (%)"
             reward_components = [
                 {"name": "win_bonus", "weight": 10.0, "description": "Reward for winning the game"},
@@ -371,25 +503,25 @@ class IntakeArchitectAgent:
                 {"name": "illegal_move_penalty", "weight": -5.0, "description": "Penalty for selecting an occupied cell"},
             ]
         elif is_data and dataset is not None:
-            # Data-aware blueprint referencing dataset columns
             raw_cols = list(dataset.df.columns) if hasattr(dataset, "df") and dataset.df is not None else []
-            # Sanitize observation features
             observation_features = [str(c).strip() for c in raw_cols if str(c).strip()]
             if not observation_features:
                 observation_features = ["feature_0", "feature_1", "feature_2", "feature_3"]
 
             task_title = f"{dataset.name} Decision Agent"
-            domain_summary = f"Autonomous sequential decision and classification agent operating over ingested dataset '{dataset.name}'."
+            domain_summary = (
+                f"Autonomous sequential decision and classification agent operating over ingested dataset '{dataset.name}'. Strategy: {objective_choice}"
+                if objective_choice
+                else f"Autonomous sequential decision and classification agent operating over ingested dataset '{dataset.name}'."
+            )
             data_source_type = "uploaded_dataset"
             dataset_id = dataset.dataset_id
 
-            # Determine sensible action labels
             action_labels = ["Accept / Class 0", "Review / Class 1", "Escalate / Class 2"]
             if len(observation_features) > 2:
-                # If there's a binary-like target column, extract or use clean binary actions
                 action_labels = ["Approve / Normal", "Flag / High-Risk"]
 
-            interactive_mode = "Inspect any custom row from the dataset or adjust feature sliders to test agent predictions live."
+            interactive_mode = interactive_choice or "Inspect any custom row from the dataset or adjust feature sliders to test agent predictions live."
             success_metric = "Classification Accuracy (%)"
             reward_components = [
                 {"name": "correct_decision", "weight": 1.0, "description": "Reward for correct classification / action"},
@@ -398,12 +530,12 @@ class IntakeArchitectAgent:
             ]
         else:
             task_title = "Autonomous Task Synthesizer"
-            domain_summary = f"Custom RL agent synthesized for: {prompt[:60]}"
+            domain_summary = f"Custom RL agent synthesized for: {prompt[:60]}. Priority: {objective_choice or 'Balanced efficiency'}"
             data_source_type = "pure_simulation"
             dataset_id = None
             observation_features = ["state_pos_x", "state_pos_y", "velocity_x", "velocity_y", "target_distance"]
             action_labels = ["Move Left", "Move Right", "Move Up", "Move Down", "Hold Position"]
-            interactive_mode = "Click or drag target points in the arena to interactively guide and test the agent."
+            interactive_mode = interactive_choice or "Click or drag target points in the arena to interactively guide and test the agent."
             success_metric = "Target Achievement Rate (%)"
             reward_components = [
                 {"name": "goal_bonus", "weight": 10.0, "description": "Reward for reaching target state"},
@@ -423,6 +555,7 @@ class IntakeArchitectAgent:
             success_metric_name=success_metric,
             target_metric_threshold=threshold,
             max_auto_tune_rounds=max_rounds,
+            episodes_per_round=episodes_per_round,
             initial_reward_components=reward_components,
         )
 
@@ -434,4 +567,9 @@ class IntakeArchitectAgent:
             ),
             questions=[],
             blueprint_spec=spec,
+            recommended_training_params={
+                "max_auto_tune_rounds": max_rounds,
+                "episodes_per_round": episodes_per_round,
+                "target_metric_threshold": threshold,
+            },
         )

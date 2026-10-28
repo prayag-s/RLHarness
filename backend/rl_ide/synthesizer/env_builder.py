@@ -20,24 +20,7 @@ from rl_ide.architect.models import AgentBlueprintSpec
 from rl_ide.architect.intake import is_tictactoe_spec
 from rl_ide.ingest.loader import IngestedDataset
 from rl_ide.llm.client import BaseLLMClient, create_llm_client, FallbackCodeSynthesizer, get_active_llm_client
-
-
-ENV_BUILDER_SYSTEM_PROMPT = """You are an Expert RL Environment Engineer. Given an `AgentBlueprintSpec` (and optional `DatasetProfile`), write a single, self-contained, bug-free Python module defining `SynthesizedGymEnv(gymnasium.Env)`.
-
-STRICT ENGINEERING REQUIREMENTS:
-0. `def __init__(self, dataset_records=None, config=None, **kwargs):` MUST accept optional `dataset_records` and `config` kwargs.
-1. `self.observation_space` MUST be `spaces.Box(low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32)`. Always return `np.asarray(obs, dtype=np.float32)` with exact shape `(obs_dim,)` and no NaNs/Infs.
-2. `self.action_space` MUST be `spaces.Discrete(n_actions)`.
-3. Keep `compute_reward(self, state, action, next_state, info)` modular, returning `(float(total_reward), dict_of_term_floats)`. Clamp all reward terms to [-10.0, +10.0].
-4. Every `step()` MUST set `info["reward_breakdown"]`, `info["is_success"]` (boolean indicating whether the step/episode achieved the user's goal), and `info["arena_state"] = self.render_arena_state()`.
-5. Implement `get_demonstrations(self, num_samples=500)` returning `(X_obs, y_actions)` using sensible domain heuristics so Warm-Start Behavioral Cloning gives the agent an immediate head start.
-6. Implement `interactive_step(self, payload, policy_predict_fn)` so when a human clicks or interacts in the UI, it updates the state, queries `action_idx, action_probs = policy_predict_fn(obs)`, applies the agent's response, and returns a JSON dict with `arena_state`, `agent_action_label`, `action_probs`, and `status_text`.
-7. Allowed imports ONLY: `math`, `random`, `numpy`, `pandas`, `gymnasium`, `typing`, `copy`, `collections`. Never use network calls, `subprocess`, `os.system`, or external game libraries like `pygame`.
-8. Implement `get_valid_actions(self) -> list[int]` returning a list of currently valid action indices. In `step(action)`, if `action not in self.get_valid_actions()`, record `info['illegal_move_attempted'] = True`, apply a bounded penalty (-1.0), and fallback to a valid action instead of immediately terminating the episode.
-9. Domain Randomization & Multi-Strategy Opponent Pools: For turn-based games or adversarial simulation environments, NEVER use a single hardcoded deterministic opponent script. In `reset(self, seed=None, options=None)`, dynamically sample from a pool of diverse opponent behavior profiles (e.g. 50% random/exploratory, 30% tactical/defensive, 20% aggressive/optimal) or respect `options.get("opponent_profile")`.
-10. First-Turn Randomization: In multi-player/board games, `reset()` MUST rigorously randomize who goes first (50% chance agent moves first, 50% chance opponent moves first, or respect `options.get("agent_first")`). If opponent moves first, execute the opponent's opening action inside `reset()` before returning initial observation, ensuring the agent learns to defend and counter as both Player 1 and Player 2.
-11. Code Economy & Conciseness: Write clean, concise, robust Python code without superfluous filler, excessive comments, or redundant docstrings so that the complete module completes cleanly within output token limits.
-"""
+from rl_ide.llm.prompts import ENV_SYNTHESIZER_SYSTEM_PROMPT, ENV_BUILDER_SYSTEM_PROMPT
 
 
 def extract_python_code(raw: str) -> str:

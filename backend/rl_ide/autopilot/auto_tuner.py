@@ -23,6 +23,7 @@ from rl_ide.llm.client import (
     get_active_llm_client,
     UnconfiguredLLMClient,
 )
+from rl_ide.llm.prompts import AUTO_TUNER_SYSTEM_PROMPT
 from rl_ide.synthesizer.verifier import SandboxSmokeTester
 
 
@@ -37,19 +38,6 @@ class TuningResult(BaseModel):
     verified: bool
     hyperparameter_diffs: dict[str, Any] = Field(default_factory=dict)
 
-
-AUTO_TUNER_SYSTEM_PROMPT = """You are the Lead Autonomous RL Policy Auto-Tuner.
-Given episode telemetry from Round N, including per-term reward returns, action distribution, and failure traces:
-1. Diagnose why the agent fell short of the user's target success threshold.
-2. Rewrite the modular `compute_reward(self, state, action, next_state, info)` function in `SynthesizedGymEnv`.
-3. Optionally adjust heuristic demonstrations or exploration entropy.
-
-STRICT CONSTRAINTS:
-- Keep the exact signature: `compute_reward(self, state: dict, action: int, next_state: dict, info: dict) -> tuple[float, dict[str, float]]`
-- Always return a 2-tuple: `(float(total_reward), breakdown_dict)`
-- Clamp all individual reward terms strictly to the range [-10.0, +10.0] so Critic value estimates never diverge.
-- Return ONLY the updated full Python module inside ```python ... ```.
-"""
 
 
 class AutoTunerAgent:

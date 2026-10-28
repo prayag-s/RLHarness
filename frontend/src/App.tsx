@@ -8,6 +8,7 @@ import { LLMVerificationGateModal } from './components/LLMVerificationGateModal'
 import { RegistryModal } from './components/RegistryModal'
 import { CodeInspectorModal } from './components/CodeInspectorModal'
 import { SQLIngestModal } from './components/SQLIngestModal'
+import { ConversationSidebar } from './components/ConversationSidebar'
 
 import {
   AgentBlueprintSpec,
@@ -18,6 +19,9 @@ import {
   LLMSettings,
   IngestedDatasetSummary,
   ActivityTimelineItem,
+  ConversationSummary,
+  ConversationDetail,
+  TrainingParams,
 } from './types'
 
 import {
@@ -33,6 +37,9 @@ import {
   connectTelemetryWebSocket,
   getLLMStatus,
   saveAndVerifyLLMSettings,
+  fetchConversations,
+  fetchConversation,
+  deleteConversation,
 } from './services/api'
 
 export const App: React.FC = () => {
@@ -61,6 +68,17 @@ export const App: React.FC = () => {
   // Dataset & Timeline
   const [attachedDataset, setAttachedDataset] = useState<IngestedDatasetSummary | null>(null)
   const [timeline, setTimeline] = useState<ActivityTimelineItem[]>([])
+
+  // Conversation Persistence State
+  const [isConversationsOpen, setIsConversationsOpen] = useState(false)
+  const [conversations, setConversations] = useState<ConversationSummary[]>([])
+  const [activeConversationId, setActiveConversationId] = useState<string | undefined>(undefined)
+  const [isLoadingConversations, setIsLoadingConversations] = useState(false)
+  const [trainingParams, setTrainingParams] = useState<TrainingParams>({
+    max_auto_tune_rounds: 5,
+    episodes_per_round: 200,
+    target_metric_threshold: 90,
+  })
 
   // Modals & Mandatory LLM Gate
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
@@ -181,6 +199,129 @@ export const App: React.FC = () => {
       .catch(() => {})
   }, [isRegistryOpen])
 
+  // Load conversations list on mount
+  const loadConversationsList = async () => {
+    try {
+      setIsLoadingConversations(true)
+      const list = await fetchConversations()
+      setConversations(list)
+    } catch (e) {
+      console.warn('Failed to load conversations', e)
+    } finally {
+      setIsLoadingConversations(false)
+    }
+  }
+
+  useEffect(() => {
+    loadConversationsList()
+  }, [])
+
+  const handleSelectConversation = async (cid: string) => {
+    try {
+      const conv = await fetchConversation(cid)
+      setActiveConversationId(cid)
+      setArenaHtml(conv.arena_html || '')
+      setEnvModuleCode(conv.env_code || '')
+      setEpisodes(conv.episodes || [])
+      if (conv.best_metric !== undefined) setCurrentMetric(conv.best_metric)
+      if (conv.current_round !== undefined) setCurrentRound(conv.current_round)
+      if (conv.training_params) {
+        setTrainingParams(conv.training_params)
+        if (conv.training_params.max_auto_tune_rounds) setMaxRounds(conv.training_params.max_auto_tune_rounds)
+        if (conv.training_params.target_metric_threshold) setTargetThreshold(conv.training_params.target_metric_threshold)
+      }
+      if (conv.rounds_history && conv.rounds_history.length > 0) {
+        setRoundHistory(conv.rounds_history.map((r: any) => ({
+          round_num: r.round_num,
+          metric: r.metric,
+          target_threshold: r.target_threshold,
+          target_achieved: r.metric >= r.target_threshold,
+          env_code_snapshot: '',
+          diagnosis: r.diagnosis,
+          changes_summary: r.changes_summary,
+        })))
+      } else {
+        setRoundHistory([])
+      }
+      if (conv.chat_history && conv.chat_history.length > 0) {
+        const restoredTimeline: ActivityTimelineItem[] = conv.chat_history.map((msg: any, mIdx: number) => ({
+          id: `hist_${cid}_${mIdx}`,
+          type: msg.role === 'user' ? 'info' : 'synthesis',
+          title: msg.role === 'user' ? 'User Instruction' : 'Architect Evaluation',
+          description: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content || ''),
+          timestamp: msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '',
+          status: 'info',
+        }))
+        setTimeline(restoredTimeline)
+      }
+
+      if (conv.blueprint_spec) {
+        setActiveSession({
+          session_id: cid,
+          blueprint: conv.blueprint_spec,
+          dataset_id: conv.dataset_id,
+          status: conv.status,
+          current_round: conv.current_round,
+          max_rounds: conv.training_params?.max_auto_tune_rounds || 5,
+          target_threshold: conv.training_params?.target_metric_threshold || 90,
+          current_metric: conv.best_metric,
+          env_module_code: conv.env_code || '',
+          arena_html: conv.arena_html || '',
+          rounds_history: conv.rounds_history,
+          episodes: conv.episodes,
+        })
+      }
+
+      setIsTraining(conv.status === 'training')
+      if (conv.status === 'training') {
+        connectWebSocket(cid)
+      }
+
+      addTimelineItem(
+        'Conversation Restored 📂',
+        `Restored session "${conv.title}" (Score: ${conv.best_metric.toFixed(1)}%).`,
+        'info',
+        'success',
+      )
+    } catch (err: any) {
+      console.error('Failed to restore conversation', err)
+      addTimelineItem('Restore Failed', err.message || 'Could not load conversation', 'error', 'warning')
+    }
+  }
+
+  const handleNewAgent = () => {
+    setActiveSession(null)
+    setActiveConversationId(undefined)
+    setArenaHtml('')
+    setEnvModuleCode('')
+    setEpisodes([])
+    setRoundHistory([])
+    setCurrentMetric(0)
+    setCurrentRound(1)
+    setTimeline([])
+    setIsTraining(false)
+    setIsSynthesizing(false)
+    addTimelineItem(
+      'New Workspace Initialized ✨',
+      'Ready to synthesize a brand new RL agent.',
+      'info',
+      'info',
+    )
+  }
+
+  const handleDeleteConversation = async (cid: string) => {
+    try {
+      await deleteConversation(cid)
+      if (activeConversationId === cid) {
+        handleNewAgent()
+      }
+      await loadConversationsList()
+      addTimelineItem('Conversation Deleted', `Session ${cid} removed.`, 'info', 'info')
+    } catch (err: any) {
+      console.error('Failed to delete conversation', err)
+    }
+  }
+
   // Periodic poll fallback in case WebSocket drops frames or disconnects
   useEffect(() => {
     if (!isTraining || !activeSession?.session_id) return
@@ -238,6 +379,7 @@ export const App: React.FC = () => {
     prompt: string,
     answers: Record<string, string> = {},
     forceSmartDefaults: boolean = false,
+    explicitTrainingParams?: TrainingParams,
   ): Promise<IntakeResponse> => {
     if (!isLLMVerified) {
       setIsGateModalOpen(true)
@@ -254,10 +396,19 @@ export const App: React.FC = () => {
     try {
       const resp = await chatWithArchitect({
         user_prompt: prompt,
+        conversation_id: activeConversationId,
         dataset_id: attachedDataset?.dataset_id,
         user_answers: answers,
         force_smart_defaults: forceSmartDefaults,
+        training_params: explicitTrainingParams || trainingParams,
       })
+
+      if (resp.conversation_id) {
+        setActiveConversationId(resp.conversation_id)
+      }
+
+      // Refresh conversations list in background
+      loadConversationsList()
 
       if (resp.status === 'ready_to_build') {
         addTimelineItem(
@@ -305,11 +456,14 @@ export const App: React.FC = () => {
     try {
       const resp = await startSynthesisSession({
         blueprint,
+        session_id: activeConversationId,
         dataset_id: datasetId,
         run_sync: false,
       })
 
       const sid = resp.session_id
+      setActiveConversationId(sid)
+      loadConversationsList()
 
       // Fetch fresh session state to get synthesized code & arena
       const sessionData = await fetchSession(sid)
@@ -611,6 +765,8 @@ export const App: React.FC = () => {
         isExporting={isExporting}
         hasActivePolicy={!!activeSession}
         driftStatus={driftStatus}
+        onOpenConversations={() => setIsConversationsOpen(true)}
+        conversationCount={conversations.length}
       />
 
       {/* Main Studio 3-Panel Workspace */}
@@ -630,6 +786,8 @@ export const App: React.FC = () => {
           activeSessionId={activeSession?.session_id}
           isLLMVerified={isLLMVerified}
           onOpenSettings={() => setIsGateModalOpen(true)}
+          trainingParams={trainingParams}
+          onUpdateTrainingParams={setTrainingParams}
         />
 
         {/* Center Panel: Universal Sandboxed Arena Iframe */}
@@ -655,6 +813,18 @@ export const App: React.FC = () => {
           isRollingBack={isRollingBack}
         />
       </div>
+
+      {/* Persistent Conversation History Drawer */}
+      <ConversationSidebar
+        isOpen={isConversationsOpen}
+        onClose={() => setIsConversationsOpen(false)}
+        conversations={conversations}
+        activeConversationId={activeConversationId}
+        onSelectConversation={handleSelectConversation}
+        onNewAgent={handleNewAgent}
+        onDeleteConversation={handleDeleteConversation}
+        isLoading={isLoadingConversations}
+      />
 
       {/* Mandatory LLM Verification Gate Modal (Unclosable until verified) */}
       <LLMVerificationGateModal

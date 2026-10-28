@@ -8,6 +8,9 @@ import {
   IngestedDatasetSummary,
   LLMSettings,
   LLMStatusResponse,
+  ConversationSummary,
+  ConversationDetail,
+  TrainingParams,
 } from '../types'
 
 const API_V4 = '/api/v4'
@@ -66,10 +69,12 @@ export async function ingestSQLDataset(
 
 export interface ArchitectChatParams {
   user_prompt: string
+  conversation_id?: string | null
   dataset_id?: string | null
   user_answers?: Record<string, string>
   force_smart_defaults?: boolean
   conversation_history?: Array<{ role: string; content: string }>
+  training_params?: TrainingParams
 }
 
 export async function chatWithArchitect(
@@ -90,7 +95,8 @@ export async function chatWithArchitect(
   const rawQuestions = data.questions || data.clarifying_questions || []
   const normalizedQuestions: ClarifyingQuestion[] = rawQuestions.map((q: any) => ({
     ...q,
-    question_id: q.pillar || q.question_id,
+    id: q.id || q.question_id || q.pillar,
+    question_id: q.id || q.question_id || q.pillar,
   }))
 
   const rawBlueprint = data.blueprint_spec || data.blueprint || null
@@ -107,11 +113,78 @@ export async function chatWithArchitect(
     status: data.status,
     assistant_message: data.assistant_message || data.message || '',
     message: data.assistant_message || data.message || '',
+    conversation_id: data.conversation_id,
     questions: normalizedQuestions,
     clarifying_questions: normalizedQuestions,
     blueprint_spec: normalizedBlueprint,
     blueprint: normalizedBlueprint,
+    recommended_training_params: data.recommended_training_params,
   }
+}
+
+// -----------------------------------------------------------------------------
+// 2b. Conversation Management & Persistence
+// -----------------------------------------------------------------------------
+
+export async function fetchConversations(): Promise<ConversationSummary[]> {
+  const res = await fetch(`${API_V4}/conversations`)
+  if (!res.ok) {
+    throw new Error('Failed to fetch conversations')
+  }
+  return res.json()
+}
+
+export async function createConversation(
+  title: string = 'New Agent',
+  datasetId?: string | null,
+  trainingParams?: TrainingParams,
+): Promise<ConversationDetail> {
+  const res = await fetch(`${API_V4}/conversations`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      title,
+      dataset_id: datasetId,
+      training_params: trainingParams,
+    }),
+  })
+  if (!res.ok) {
+    throw new Error('Failed to create conversation')
+  }
+  return res.json()
+}
+
+export async function fetchConversation(conversationId: string): Promise<ConversationDetail> {
+  const res = await fetch(`${API_V4}/conversations/${conversationId}`)
+  if (!res.ok) {
+    throw new Error(`Failed to load conversation ${conversationId}`)
+  }
+  return res.json()
+}
+
+export async function updateConversationParams(
+  conversationId: string,
+  params: TrainingParams,
+): Promise<any> {
+  const res = await fetch(`${API_V4}/conversations/${conversationId}/params`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  })
+  if (!res.ok) {
+    throw new Error('Failed to update conversation parameters')
+  }
+  return res.json()
+}
+
+export async function deleteConversation(conversationId: string): Promise<any> {
+  const res = await fetch(`${API_V4}/conversations/${conversationId}`, {
+    method: 'DELETE',
+  })
+  if (!res.ok) {
+    throw new Error(`Failed to delete conversation ${conversationId}`)
+  }
+  return res.json()
 }
 
 // -----------------------------------------------------------------------------

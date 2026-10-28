@@ -77,9 +77,11 @@ class SessionState(BaseModel):
     current_metric: float = 0.0
     target_threshold: float = 85.0
     rounds_history: list[RoundSnapshot] = Field(default_factory=list)
+    episodes: list[dict[str, Any]] = Field(default_factory=list)
     env_module_code: str = ""
     arena_html: str = ""
     weights_path: str | None = None
+    latest_model_zip_path: str | None = None
     error_message: str | None = None
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
@@ -97,8 +99,9 @@ class SessionStateStore:
     def get_session(self, session_id: str) -> SessionState | None:
         return self._sessions.get(session_id)
 
-    def set_session(self, session: SessionState) -> None:
-        self._sessions[session.session_id] = session
+    def set_session(self, session: SessionState | None) -> None:
+        if session is not None:
+            self._sessions[session.session_id] = session
 
     def list_sessions(self) -> list[SessionState]:
         return list(self._sessions.values())
@@ -137,6 +140,12 @@ class SessionStateStore:
         weights_path = run_dir / "policy_weights.pt"
         torch.save(model.policy.state_dict(), str(weights_path))
 
+        model_zip_path = Path("runs") / session_id / "model.zip"
+        try:
+            model.save(str(model_zip_path))
+        except Exception:
+            pass
+
         snapshot = RoundSnapshot(
             round_num=round_num,
             metric=metric,
@@ -156,6 +165,8 @@ class SessionStateStore:
             session.rounds_history.append(snapshot)
             session.current_metric = metric
             session.weights_path = str(weights_path)
+            if model_zip_path.exists():
+                session.latest_model_zip_path = str(model_zip_path)
             session.env_module_code = env_code
 
         return snapshot
@@ -358,6 +369,7 @@ class AutonomousLoopController:
             )
             current_metric = eval_metric
             session.current_metric = current_metric
+            session.episodes.extend(eval_episodes)
 
             emit({
                 "event": "round_evaluated",
@@ -776,12 +788,13 @@ class AutonomousLoopController:
                     "is_success": bool(step_info.get("is_success", False)),
                 })
 
+                ep_id = f"r{round_num}_eval_{ep_idx}"
                 # Stream top deterministic evaluation episodes to the UI Arena
                 if emit_fn and ep_idx <= 5:
                     emit_fn({
                         "event": "episode_step",
                         "round": round_num,
-                        "episode_id": f"eval_{ep_idx}",
+                        "episode_id": ep_id,
                         "step": step_idx,
                         "total_reward": round(ep_reward, 2),
                         "reward_breakdown": step_info.get("reward_breakdown", {}),
@@ -799,7 +812,7 @@ class AutonomousLoopController:
                 success_count += 1
 
             eval_episodes.append({
-                "episode_id": f"eval_{ep_idx}",
+                "episode_id": ep_id,
                 "round": round_num,
                 "total_reward": ep_reward,
                 "steps": ep_steps,
@@ -935,12 +948,13 @@ class AutonomousLoopController:
                     "is_success": bool(step_info.get("is_success", False)),
                 })
 
+                ep_id = f"r{round_num}_train_{ep_idx}"
                 # Stream throttled live frame over WebSocket / callback
                 if should_stream and (step_idx % 2 == 1 or done):
                     emit_fn({
                         "event": "episode_step",
                         "round": round_num,
-                        "episode_id": ep_idx,
+                        "episode_id": ep_id,
                         "step": step_idx,
                         "total_reward": round(ep_reward, 2),
                         "reward_breakdown": step_info.get("reward_breakdown", {}),
@@ -955,7 +969,7 @@ class AutonomousLoopController:
             # Final success check for episode
             is_success = any(s.get("is_success", False) for s in ep_steps)
             collected_episodes.append({
-                "episode_id": ep_idx,
+                "episode_id": ep_id,
                 "round": round_num,
                 "total_reward": ep_reward,
                 "steps": ep_steps,

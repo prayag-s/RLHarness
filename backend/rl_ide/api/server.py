@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 import numpy as np
 import torch
+from stable_baselines3 import PPO
 from fastapi import FastAPI, File, UploadFile, WebSocket, WebSocketDisconnect, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, FileResponse
@@ -20,6 +21,12 @@ from pydantic import BaseModel, Field
 
 from rl_ide.architect.models import AgentBlueprintSpec, IntakeResponse
 from rl_ide.architect.intake import IntakeArchitectAgent
+from rl_ide.state.conversation_store import (
+    ConversationStore,
+    get_conversation_store,
+    generate_title_from_prompt,
+    utc_now_iso,
+)
 from rl_ide.autopilot.loop_controller import (
     AutonomousLoopController,
     SessionStateStore,
@@ -182,10 +189,12 @@ def ingest_sql(req: SQLIngestRequest):
 
 class ArchitectChatRequest(BaseModel):
     user_prompt: str
+    conversation_id: str | None = None
     dataset_id: str | None = None
-    user_answers: dict[str, str] = Field(default_factory=dict)
+    user_answers: dict[str, Any] = Field(default_factory=dict)
     force_smart_defaults: bool = False
     conversation_history: list[dict[str, str]] = Field(default_factory=list)
+    training_params: dict[str, Any] | None = None
 
 
 @app.post("/api/v4/architect/chat", response_model=IntakeResponse)
@@ -200,7 +209,72 @@ def architect_chat(req: ArchitectChatRequest):
         user_answers=req.user_answers,
         force_smart_defaults=req.force_smart_defaults,
         conversation_history=req.conversation_history,
+        training_params=req.training_params,
     )
+
+    import uuid
+    cid = req.conversation_id or f"conv_{uuid.uuid4().hex[:8]}"
+    resp.conversation_id = cid
+
+    conv_store = get_conversation_store()
+    existing_conv = conv_store.get_conversation(cid)
+
+    chat_history = list(existing_conv["chat_history"]) if existing_conv else []
+    chat_history.append({
+        "role": "user",
+        "content": req.user_prompt,
+        "timestamp": utc_now_iso(),
+    })
+    if req.user_answers:
+        chat_history.append({
+            "role": "user_answers",
+            "answers": req.user_answers,
+            "timestamp": utc_now_iso(),
+        })
+
+    title = existing_conv["title"] if existing_conv else generate_title_from_prompt(req.user_prompt)
+
+    if resp.status == "needs_clarification":
+        chat_history.append({
+            "role": "assistant",
+            "content": resp.assistant_message,
+            "questions": [q.model_dump() for q in resp.questions],
+            "timestamp": utc_now_iso(),
+        })
+        conv_store.save_or_update(
+            conversation_id=cid,
+            title=title,
+            status="clarifying",
+            chat_history=chat_history,
+            dataset_id=req.dataset_id,
+            training_params=req.training_params or resp.recommended_training_params,
+        )
+    else:
+        chat_history.append({
+            "role": "assistant",
+            "content": resp.assistant_message,
+            "blueprint": resp.blueprint_spec.model_dump() if resp.blueprint_spec else None,
+            "timestamp": utc_now_iso(),
+        })
+        t_params = req.training_params or (
+            {
+                "max_auto_tune_rounds": resp.blueprint_spec.max_auto_tune_rounds,
+                "episodes_per_round": resp.blueprint_spec.episodes_per_round,
+                "target_metric_threshold": resp.blueprint_spec.target_metric_threshold,
+            }
+            if resp.blueprint_spec
+            else resp.recommended_training_params
+        )
+        conv_store.save_or_update(
+            conversation_id=cid,
+            title=title,
+            status="ready_to_build",
+            chat_history=chat_history,
+            dataset_id=req.dataset_id,
+            blueprint_spec=resp.blueprint_spec.model_dump() if resp.blueprint_spec else None,
+            training_params=t_params,
+        )
+
     return resp
 
 
@@ -275,6 +349,24 @@ async def start_session(req: SessionStartRequest):
             arena_html=html_str,
         )
         global_store.set_session(session)
+
+        # Update ConversationStore
+        conv_store = get_conversation_store()
+        t_params = {
+            "max_auto_tune_rounds": req.blueprint.max_auto_tune_rounds,
+            "episodes_per_round": req.blueprint.episodes_per_round,
+            "target_metric_threshold": req.blueprint.target_metric_threshold,
+        }
+        conv_store.save_or_update(
+            conversation_id=sid,
+            title=req.blueprint.task_title or generate_title_from_prompt(req.blueprint.domain_summary),
+            status="training",
+            blueprint_spec=req.blueprint.model_dump(),
+            dataset_id=req.dataset_id,
+            env_code=healed_code,
+            arena_html=html_str,
+            training_params=t_params,
+        )
     except HTTPException:
         raise
     except Exception as exc:
@@ -298,6 +390,19 @@ async def start_session(req: SessionStartRequest):
 
     def sync_event_emitter(event_data: dict[str, Any]):
         asyncio.run_coroutine_threadsafe(manager.broadcast(sid, event_data), loop)
+        if event_data.get("event") in ("round_evaluated", "target_achieved", "budget_exhausted", "auto_tuned"):
+            sess = global_store.get_session(sid)
+            if sess:
+                conv_store.save_or_update(
+                    conversation_id=sid,
+                    status=sess.status,
+                    current_round=sess.current_round,
+                    best_metric=sess.current_metric,
+                    rounds_history=[r.model_dump() for r in sess.rounds_history],
+                    episodes=sess.episodes,
+                    env_code=sess.env_module_code,
+                    latest_model_zip_path=sess.latest_model_zip_path,
+                )
 
     if req.run_sync:
         # Run synchronously for test suites
@@ -309,13 +414,23 @@ async def start_session(req: SessionStartRequest):
             on_event_callback=sync_event_emitter,
             max_rounds=req.blueprint.max_auto_tune_rounds,
         )
+        conv_store.save_or_update(
+            conversation_id=sid,
+            status=final_session.status,
+            current_round=final_session.current_round,
+            best_metric=final_session.current_metric,
+            rounds_history=[r.model_dump() for r in final_session.rounds_history],
+            episodes=final_session.episodes,
+            env_code=final_session.env_module_code,
+            latest_model_zip_path=final_session.latest_model_zip_path,
+        )
         return final_session
     else:
         # Launch background task in a worker thread so event loop is never blocked
         async def _run_background():
             await asyncio.sleep(0.3)  # Brief pause to ensure client WebSocket connects
             try:
-                await asyncio.to_thread(
+                final_sess = await asyncio.to_thread(
                     global_controller.run_loop,
                     session_id=sid,
                     blueprint=req.blueprint,
@@ -323,6 +438,16 @@ async def start_session(req: SessionStartRequest):
                     dataset=dataset,
                     on_event_callback=sync_event_emitter,
                     max_rounds=req.blueprint.max_auto_tune_rounds,
+                )
+                conv_store.save_or_update(
+                    conversation_id=sid,
+                    status=final_sess.status,
+                    current_round=final_sess.current_round,
+                    best_metric=final_sess.current_metric,
+                    rounds_history=[r.model_dump() for r in final_sess.rounds_history],
+                    episodes=final_sess.episodes,
+                    env_code=final_sess.env_module_code,
+                    latest_model_zip_path=final_sess.latest_model_zip_path,
                 )
             except Exception as loop_err:
                 print(f"[server._run_background] Session {sid} loop error: {loop_err}")
@@ -341,6 +466,144 @@ async def start_session(req: SessionStartRequest):
             "status": "training",
             "message": "Autonomous JIT Synthesis & Closed-Loop Training initiated in background.",
         }
+
+
+class CreateConversationRequest(BaseModel):
+    title: str = "New Agent"
+    dataset_id: str | None = None
+    training_params: dict[str, Any] | None = None
+
+
+class UpdateConversationParamsRequest(BaseModel):
+    max_auto_tune_rounds: int | None = None
+    episodes_per_round: int | None = None
+    target_metric_threshold: float | None = None
+
+
+@app.get("/api/v4/conversations")
+def list_conversations():
+    """Returns list of all saved conversations sorted by updated_at DESC."""
+    conv_store = get_conversation_store()
+    return conv_store.list_conversations()
+
+
+@app.post("/api/v4/conversations")
+def create_conversation(req: CreateConversationRequest = CreateConversationRequest()):
+    """Creates a new blank conversation and returns its conversation_id."""
+    conv_store = get_conversation_store()
+    return conv_store.create_conversation(
+        title=req.title,
+        dataset_id=req.dataset_id,
+        training_params=req.training_params,
+    )
+
+
+@app.get("/api/v4/conversations/{conversation_id}")
+def get_conversation(conversation_id: str):
+    """Loads full conversation state from disk/SQLite, re-instantiates SynthesizedGymEnv and reloads saved SB3 model."""
+    conv_store = get_conversation_store()
+    conv = conv_store.get_conversation(conversation_id)
+    if not conv:
+        raise HTTPException(status_code=404, detail=f"Conversation '{conversation_id}' not found.")
+
+    # Re-instantiate SynthesizedGymEnv and reload saved SB3 model into global_store
+    ws_dir = global_store.base_dir / conversation_id
+    env_file = ws_dir / "env_module.py"
+    if env_file.exists():
+        try:
+            from rl_ide.synthesizer.env_builder import load_synthesized_env_class, instantiate_env
+            env_cls = load_synthesized_env_class(env_file)
+            dataset = ingested_datasets_store.get(conv.get("dataset_id")) if conv.get("dataset_id") else None
+            records = dataset.df.to_dict(orient="records") if (dataset and hasattr(dataset, "df")) else None
+            env = instantiate_env(env_cls, dataset_records=records)
+            global_store.set_env(conversation_id, env)
+
+            # Check if model zip or weights exist
+            model_zip = conv.get("latest_model_zip_path") or (Path("runs") / conversation_id / "model.zip")
+            if model_zip and Path(str(model_zip)).exists():
+                try:
+                    loaded_model = PPO.load(str(model_zip), env=env, device="cpu")
+                    global_store.set_model(conversation_id, loaded_model)
+                except Exception as m_err:
+                    print(f"Warning: Failed to load PPO model from {model_zip}: {m_err}")
+            elif conv.get("rounds_history"):
+                latest_round = conv["rounds_history"][-1]
+                weights_path = Path(latest_round.get("weights_path", ""))
+                if weights_path.exists():
+                    try:
+                        temp_model = PPO("MlpPolicy", env, device="cpu", verbose=0)
+                        state_dict = torch.load(str(weights_path), map_location="cpu", weights_only=True)
+                        temp_model.policy.load_state_dict(state_dict)
+                        global_store.set_model(conversation_id, temp_model)
+                    except Exception as w_err:
+                        print(f"Warning: Failed to load weights from {weights_path}: {w_err}")
+        except Exception as e:
+            print(f"Warning: Failed to re-instantiate environment for conversation {conversation_id}: {e}")
+
+    # Reconstitute SessionState in global_store if not present
+    existing_session = global_store.get_session(conversation_id)
+    if not existing_session and conv.get("blueprint_spec"):
+        try:
+            bp = AgentBlueprintSpec.model_validate(conv["blueprint_spec"])
+            t_params = conv.get("training_params", {}) or {}
+            session = SessionState(
+                session_id=conversation_id,
+                blueprint=bp,
+                dataset_id=conv.get("dataset_id"),
+                status=conv.get("status", "created"),
+                current_round=conv.get("current_round", 1),
+                max_rounds=t_params.get("max_auto_tune_rounds", bp.max_auto_tune_rounds or 5),
+                current_metric=conv.get("best_metric", 0.0),
+                target_threshold=t_params.get("target_metric_threshold", bp.target_metric_threshold or 90.0),
+                rounds_history=[RoundSnapshot.model_validate(r) for r in conv.get("rounds_history", [])],
+                episodes=conv.get("episodes", []),
+                env_module_code=conv.get("env_code", ""),
+                arena_html=conv.get("arena_html", ""),
+                latest_model_zip_path=conv.get("latest_model_zip_path"),
+            )
+            global_store.set_session(session)
+        except Exception as s_err:
+            print(f"Warning: Failed to reconstruct SessionState: {s_err}")
+
+    return conv
+
+
+@app.patch("/api/v4/conversations/{conversation_id}/params")
+def update_conversation_params(conversation_id: str, req: UpdateConversationParamsRequest):
+    """Updates max_auto_tune_rounds, episodes_per_round, and target_metric_threshold."""
+    conv_store = get_conversation_store()
+    params = {}
+    if req.max_auto_tune_rounds is not None:
+        params["max_auto_tune_rounds"] = req.max_auto_tune_rounds
+    if req.episodes_per_round is not None:
+        params["episodes_per_round"] = req.episodes_per_round
+    if req.target_metric_threshold is not None:
+        params["target_metric_threshold"] = req.target_metric_threshold
+
+    try:
+        updated = conv_store.update_params(conversation_id, params)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Conversation '{conversation_id}' not found.")
+
+    sess = global_store.get_session(conversation_id)
+    if sess:
+        if req.max_auto_tune_rounds is not None:
+            sess.max_rounds = req.max_auto_tune_rounds
+        if req.target_metric_threshold is not None:
+            sess.target_threshold = req.target_metric_threshold
+
+    return updated
+
+
+@app.delete("/api/v4/conversations/{conversation_id}")
+def delete_conversation(conversation_id: str):
+    """Deletes a conversation and its workspace files."""
+    conv_store = get_conversation_store()
+    conv = conv_store.get_conversation(conversation_id)
+    if not conv:
+        raise HTTPException(status_code=404, detail=f"Conversation '{conversation_id}' not found.")
+    conv_store.delete(conversation_id)
+    return {"success": True, "conversation_id": conversation_id}
 
 
 @app.get("/api/v4/sessions/{session_id}")

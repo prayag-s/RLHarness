@@ -23,6 +23,7 @@ import {
   AgentBlueprintSpec,
   IngestedDatasetSummary,
   ActivityTimelineItem,
+  TrainingParams,
 } from '../types'
 
 interface ArchitectPanelProps {
@@ -31,6 +32,7 @@ interface ArchitectPanelProps {
     prompt: string,
     answers?: Record<string, string>,
     forceSmartDefaults?: boolean,
+    trainingParams?: TrainingParams,
   ) => Promise<IntakeResponse>
   onNudge: (feedbackText: string) => Promise<void>
   onOpenSQLModal: () => void
@@ -43,6 +45,8 @@ interface ArchitectPanelProps {
   activeSessionId?: string
   isLLMVerified?: boolean
   onOpenSettings?: () => void
+  trainingParams?: TrainingParams
+  onUpdateTrainingParams?: (params: TrainingParams) => void
 }
 
 export const ArchitectPanel: React.FC<ArchitectPanelProps> = ({
@@ -59,6 +63,8 @@ export const ArchitectPanel: React.FC<ArchitectPanelProps> = ({
   activeSessionId,
   isLLMVerified = false,
   onOpenSettings,
+  trainingParams,
+  onUpdateTrainingParams,
 }) => {
   // Intake Chat State
   const [userPrompt, setUserPrompt] = useState('')
@@ -69,6 +75,18 @@ export const ArchitectPanel: React.FC<ArchitectPanelProps> = ({
   const [architectMessage, setArchitectMessage] = useState<string>(
     'Describe the agent you want to synthesize or drop a dataset to get started.',
   )
+
+  // Explicit Training Configuration State
+  const [rounds, setRounds] = useState<number>(trainingParams?.max_auto_tune_rounds || 5)
+  const [episodesPerRound, setEpisodesPerRound] = useState<number>(trainingParams?.episodes_per_round || 200)
+  const [targetGoal, setTargetGoal] = useState<number>(trainingParams?.target_metric_threshold || 90.0)
+
+  // Sync if external trainingParams change
+  useEffect(() => {
+    if (trainingParams?.max_auto_tune_rounds) setRounds(trainingParams.max_auto_tune_rounds)
+    if (trainingParams?.episodes_per_round) setEpisodesPerRound(trainingParams.episodes_per_round)
+    if (trainingParams?.target_metric_threshold) setTargetGoal(trainingParams.target_metric_threshold)
+  }, [trainingParams])
 
   // Nudge State
   const [nudgeText, setNudgeText] = useState('')
@@ -94,16 +112,34 @@ export const ArchitectPanel: React.FC<ArchitectPanelProps> = ({
 
     setIsAskingArchitect(true)
     try {
-      const resp = await onChatWithArchitect(userPrompt, selectedAnswers, false)
+      const explicitParams: TrainingParams = {
+        max_auto_tune_rounds: rounds,
+        episodes_per_round: episodesPerRound,
+        target_metric_threshold: targetGoal,
+      }
+      const resp = await onChatWithArchitect(userPrompt, selectedAnswers, false, explicitParams)
       setArchitectMessage(resp.message)
       if (resp.status === 'needs_clarification') {
-        setClarifyingQuestions(resp.clarifying_questions)
+        const questionsList = resp.questions || resp.clarifying_questions || []
+        setClarifyingQuestions(questionsList)
         // Initialize default answers
         const initAnswers: Record<string, string> = {}
-        resp.clarifying_questions.forEach((q) => {
-          initAnswers[q.question_id] = q.default_option
+        questionsList.forEach((q) => {
+          const qId = q.id || q.question_id || q.pillar
+          initAnswers[qId] = q.default_option
         })
         setSelectedAnswers(initAnswers)
+        if (resp.recommended_training_params) {
+          if (resp.recommended_training_params.max_auto_tune_rounds) {
+            setRounds(resp.recommended_training_params.max_auto_tune_rounds)
+          }
+          if (resp.recommended_training_params.episodes_per_round) {
+            setEpisodesPerRound(resp.recommended_training_params.episodes_per_round)
+          }
+          if (resp.recommended_training_params.target_metric_threshold) {
+            setTargetGoal(resp.recommended_training_params.target_metric_threshold)
+          }
+        }
         setStagedBlueprint(null)
       } else if (resp.status === 'ready_to_build' && resp.blueprint) {
         setClarifyingQuestions([])
@@ -125,6 +161,13 @@ export const ArchitectPanel: React.FC<ArchitectPanelProps> = ({
     }))
   }
 
+  const handleCustomAnswerChange = (questionId: string, val: string) => {
+    setSelectedAnswers((prev) => ({
+      ...prev,
+      [questionId]: val,
+    }))
+  }
+
   const handleUseSmartDefaults = async () => {
     if (!isLLMVerified) {
       if (onOpenSettings) onOpenSettings()
@@ -132,8 +175,15 @@ export const ArchitectPanel: React.FC<ArchitectPanelProps> = ({
     }
     setIsAskingArchitect(true)
     try {
-      const promptToUse = userPrompt.trim() || (attachedDataset ? `Train agent on ${attachedDataset.name}` : 'Train an unbeatable Tic-Tac-Toe agent')
-      const resp = await onChatWithArchitect(promptToUse, selectedAnswers, true)
+      const promptToUse =
+        userPrompt.trim() ||
+        (attachedDataset ? `Train agent on ${attachedDataset.name}` : 'Train an unbeatable Tic-Tac-Toe agent')
+      const explicitParams: TrainingParams = {
+        max_auto_tune_rounds: rounds,
+        episodes_per_round: episodesPerRound,
+        target_metric_threshold: targetGoal,
+      }
+      const resp = await onChatWithArchitect(promptToUse, selectedAnswers, true, explicitParams)
       setArchitectMessage(resp.message)
       if (resp.blueprint) {
         setClarifyingQuestions([])
@@ -154,7 +204,15 @@ export const ArchitectPanel: React.FC<ArchitectPanelProps> = ({
     }
     setIsAskingArchitect(true)
     try {
-      const resp = await onChatWithArchitect(userPrompt, selectedAnswers, false)
+      const explicitParams: TrainingParams = {
+        max_auto_tune_rounds: rounds,
+        episodes_per_round: episodesPerRound,
+        target_metric_threshold: targetGoal,
+      }
+      if (onUpdateTrainingParams) {
+        onUpdateTrainingParams(explicitParams)
+      }
+      const resp = await onChatWithArchitect(userPrompt, selectedAnswers, false, explicitParams)
       if (resp.blueprint) {
         setClarifyingQuestions([])
         setStagedBlueprint(resp.blueprint)
@@ -294,57 +352,162 @@ export const ArchitectPanel: React.FC<ArchitectPanelProps> = ({
 
         {/* Clarifying Questions Card (Rendered when needs_clarification) */}
         {clarifyingQuestions.length > 0 && (
-          <div className="p-3 rounded-xl bg-gradient-to-b from-indigo-950/40 to-purple-950/30 border border-indigo-700/50 space-y-3">
+          <div className="p-3.5 rounded-xl bg-gradient-to-b from-indigo-950/60 to-purple-950/40 border border-indigo-700/60 space-y-3.5 shadow-lg">
             <div className="flex items-center justify-between">
               <span className="text-xs font-bold text-indigo-300 flex items-center space-x-1.5">
-                <Target className="h-3.5 w-3.5" />
+                <Target className="h-4 w-4 text-indigo-400" />
                 <span>Pillars Alignment ({clarifyingQuestions.length})</span>
               </span>
-            </div>
-
-            {clarifyingQuestions.map((q) => (
-              <div key={q.question_id} className="space-y-1.5">
-                <p className="text-xs font-semibold text-gray-200">{q.question}</p>
-                <div className="flex flex-wrap gap-1.5">
-                  {q.suggested_options.map((opt) => {
-                    const isSelected = selectedAnswers[q.question_id] === opt
-                    return (
-                      <button
-                        key={opt}
-                        onClick={() => handleOptionSelect(q.question_id, opt)}
-                        className={`text-[11px] px-2.5 py-1 rounded-full font-medium transition border ${
-                          isSelected
-                            ? 'bg-indigo-600 border-indigo-400 text-white shadow-sm'
-                            : 'bg-gray-800/90 border-gray-700 text-gray-300 hover:border-gray-500 hover:text-white'
-                        }`}
-                      >
-                        {opt}
-                      </button>
-                    )
-                  })}
-                </div>
-              </div>
-            ))}
-
-            {/* Smart Defaults & Confirm Buttons */}
-            <div className="pt-2 flex items-center space-x-2">
               <button
                 onClick={handleUseSmartDefaults}
                 disabled={isAskingArchitect}
-                className="flex-1 py-1.5 px-3 rounded-lg bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-gray-950 text-xs font-extrabold flex items-center justify-center space-x-1.5 shadow-md transition"
-                title="Immediately build with optimal smart defaults"
+                className="text-[10px] text-amber-400 hover:text-amber-300 flex items-center space-x-1 font-semibold"
+                title="Populate with smart defaults"
               >
-                <Zap className="h-3.5 w-3.5 fill-current" />
-                <span>⚡ Use Smart Defaults & Build</span>
+                <Zap className="h-3 w-3 fill-current" />
+                <span>Smart Defaults</span>
               </button>
+            </div>
+
+            {clarifyingQuestions.map((q, qIdx) => {
+              const qId = q.id || q.question_id || q.pillar || `q_${qIdx}`
+              const currentVal = selectedAnswers[qId] || ''
+              return (
+                <div key={qId} className="space-y-2 p-2.5 rounded-lg bg-gray-950/60 border border-gray-800">
+                  <div className="flex items-center justify-between">
+                    <p className="text-xs font-semibold text-gray-200">
+                      <span className="text-indigo-400 mr-1.5">#{qIdx + 1}</span>
+                      {q.question}
+                    </p>
+                  </div>
+
+                  {/* Clickable Option Pills */}
+                  <div className="flex flex-wrap gap-1.5">
+                    {q.suggested_options.map((opt, optIdx) => {
+                      const isSelected = currentVal === opt
+                      return (
+                        <button
+                          type="button"
+                          key={`${qId}_opt_${optIdx}`}
+                          onClick={() => handleOptionSelect(qId, opt)}
+                          className={`text-[11px] px-2.5 py-1 rounded-full font-medium transition border text-left ${
+                            isSelected
+                              ? 'bg-indigo-600 border-indigo-400 text-white shadow-sm ring-1 ring-indigo-300/40'
+                              : 'bg-gray-900 border-gray-700 text-gray-300 hover:border-gray-500 hover:text-white'
+                          }`}
+                        >
+                          {opt}
+                        </button>
+                      )
+                    })}
+                  </div>
+
+                  {/* Inline Custom Answer Input */}
+                  <div className="pt-1">
+                    <input
+                      type="text"
+                      value={currentVal}
+                      onChange={(e) => handleCustomAnswerChange(qId, e.target.value)}
+                      placeholder="Or type a custom answer..."
+                      className="w-full bg-gray-900/90 border border-gray-800 focus:border-indigo-500 rounded px-2 py-1 text-[11px] text-gray-200 focus:outline-none placeholder-gray-600 font-sans"
+                    />
+                  </div>
+                </div>
+              )
+            })}
+
+            {/* Explicit Training Configuration Bar */}
+            <div className="p-3 rounded-lg bg-gray-950/80 border border-gray-800/90 space-y-2.5">
+              <div className="flex items-center justify-between text-xs font-bold text-gray-300">
+                <span className="flex items-center space-x-1.5">
+                  <Cpu className="h-3.5 w-3.5 text-cyan-400" />
+                  <span>Training Parameters</span>
+                </span>
+                <span className="text-[10px] text-gray-500 font-mono">Explicit Control</span>
+              </div>
+
+              <div className="grid grid-cols-3 gap-2 text-[11px]">
+                {/* Rounds Stepper */}
+                <div className="space-y-1">
+                  <label className="text-gray-400 text-[10px] block">Rounds (1-100)</label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={100}
+                    value={rounds}
+                    onChange={(e) => setRounds(Math.max(1, Math.min(100, parseInt(e.target.value) || 1)))}
+                    className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1 text-gray-200 text-center font-mono font-bold focus:border-cyan-500 focus:outline-none"
+                  />
+                </div>
+
+                {/* Episodes / Round Selector */}
+                <div className="space-y-1">
+                  <label className="text-gray-400 text-[10px] block">Episodes / Round</label>
+                  <select
+                    value={episodesPerRound}
+                    onChange={(e) => setEpisodesPerRound(parseInt(e.target.value))}
+                    className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-gray-200 text-center font-mono font-bold focus:border-cyan-500 focus:outline-none"
+                  >
+                    <option value={50}>50</option>
+                    <option value={100}>100</option>
+                    <option value={200}>200</option>
+                    <option value={250}>250</option>
+                    <option value={500}>500</option>
+                    <option value={1000}>1000</option>
+                  </select>
+                </div>
+
+                {/* Target Goal Slider / Input */}
+                <div className="space-y-1">
+                  <label className="text-gray-400 text-[10px] block">Target Goal (%)</label>
+                  <div className="flex items-center space-x-1">
+                    <input
+                      type="number"
+                      min={50}
+                      max={100}
+                      step={1}
+                      value={targetGoal}
+                      onChange={(e) => setTargetGoal(Math.max(50, Math.min(100, parseFloat(e.target.value) || 90)))}
+                      className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-gray-200 text-center font-mono font-bold focus:border-cyan-500 focus:outline-none"
+                    />
+                    <span className="text-gray-500 font-mono text-[10px]">%</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Range slider for Target Goal */}
+              <div className="pt-0.5">
+                <input
+                  type="range"
+                  min={50}
+                  max={100}
+                  step={1}
+                  value={targetGoal}
+                  onChange={(e) => setTargetGoal(parseFloat(e.target.value))}
+                  className="w-full h-1 bg-gray-800 rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                />
+              </div>
+            </div>
+
+            {/* Single Primary Action Button */}
+            <div className="pt-1">
               <button
+                type="button"
                 onClick={handleConfirmAndBuild}
                 disabled={isAskingArchitect}
-                className="py-1.5 px-3 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold flex items-center space-x-1 transition"
-                title="Build with selected options"
+                className="w-full py-2.5 px-4 rounded-xl bg-gradient-to-r from-indigo-600 via-purple-600 to-pink-600 hover:from-indigo-500 hover:via-purple-500 hover:to-pink-500 text-white text-xs font-black flex items-center justify-center space-x-2 shadow-lg shadow-indigo-950/60 transition active:scale-[0.98] disabled:opacity-50"
               >
-                <Play className="h-3.5 w-3.5" />
-                <span>Build</span>
+                {isAskingArchitect ? (
+                  <>
+                    <RefreshCw className="h-4 w-4 animate-spin" />
+                    <span>Synthesizing Agent Blueprint...</span>
+                  </>
+                ) : (
+                  <>
+                    <Play className="h-4 w-4 fill-current text-white" />
+                    <span>🚀 Confirm Selections & Build Agent</span>
+                  </>
+                )}
               </button>
             </div>
           </div>
@@ -365,7 +528,7 @@ export const ArchitectPanel: React.FC<ArchitectPanelProps> = ({
             </div>
 
             <div className="space-y-2">
-              {timeline.map((item) => {
+              {timeline.map((item, itemIdx) => {
                 const getStatusStyle = () => {
                   switch (item.status) {
                     case 'success':
@@ -380,7 +543,7 @@ export const ArchitectPanel: React.FC<ArchitectPanelProps> = ({
 
                 return (
                   <div
-                    key={item.id}
+                    key={`${item.id}_${itemIdx}`}
                     className={`p-2.5 rounded-lg border text-xs shadow-sm transition ${getStatusStyle()}`}
                   >
                     <div className="flex items-center justify-between mb-1">

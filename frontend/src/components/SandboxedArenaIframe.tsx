@@ -168,11 +168,23 @@ export const SandboxedArenaIframe: React.FC<SandboxedArenaIframeProps> = ({
           <div className="flex items-center space-x-1">
             {episodes.slice(-20).map((ep, idx) => {
               const isSelected = selectedEpisodeIdx === idx
+              const epIdStr = String(ep.episode_id ?? idx + 1)
+              let chipLabel = `#${epIdStr}`
+              const match = epIdStr.match(/^r(\d+)_(eval|train)_(\d+)$/)
+              if (match) {
+                const rNum = match[1]
+                const type = match[2] === 'eval' ? 'Eval' : 'Train'
+                const epNum = match[3]
+                chipLabel = `R${rNum} • ${type} #${epNum}`
+              } else if (ep.round) {
+                chipLabel = `R${ep.round} • #${epIdStr}`
+              }
+
               return (
                 <button
-                  key={ep.episode_id || idx}
+                  key={`${ep.round || 0}_${ep.episode_id}_${idx}`}
                   onClick={() => handleSelectEpisode(ep, idx)}
-                  className={`px-2 py-0.5 rounded font-mono text-[10px] transition border ${
+                  className={`px-2 py-0.5 rounded font-mono text-[10px] whitespace-nowrap transition border ${
                     isSelected
                       ? 'bg-indigo-600 border-indigo-400 text-white'
                       : ep.is_success
@@ -181,7 +193,7 @@ export const SandboxedArenaIframe: React.FC<SandboxedArenaIframeProps> = ({
                   }`}
                   title={`Episode #${ep.episode_id}: Return ${ep.total_reward.toFixed(2)}`}
                 >
-                  #{ep.episode_id || idx + 1}
+                  {chipLabel}
                 </button>
               )
             })}

@@ -108,11 +108,11 @@ export const TelemetryPanel: React.FC<TelemetryPanelProps> = ({
           </div>
         ) : (
           <div className="space-y-3">
-            {roundHistory.map((snap) => {
+            {roundHistory.map((snap, idx) => {
               const isMet = snap.target_achieved || snap.metric >= targetThreshold
               return (
                 <div
-                  key={snap.round_num}
+                  key={`round_${snap.round_num}_${idx}`}
                   className="p-3 rounded-xl bg-gray-950/70 border border-gray-800 hover:border-gray-700 transition space-y-2 text-xs"
                 >
                   <div className="flex items-center justify-between">
@@ -158,9 +158,9 @@ export const TelemetryPanel: React.FC<TelemetryPanelProps> = ({
                   {/* Term Rewards Breakdown if available */}
                   {snap.term_rewards && Object.keys(snap.term_rewards).length > 0 && (
                     <div className="pt-1 border-t border-gray-800/60 flex flex-wrap gap-1">
-                      {Object.entries(snap.term_rewards).map(([term, val]) => (
+                      {Object.entries(snap.term_rewards).map(([term, val], termIdx) => (
                         <span
-                          key={term}
+                          key={`term_${snap.round_num}_${term}_${termIdx}`}
                           className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-gray-900 text-gray-400 border border-gray-800"
                         >
                           {term}: {val > 0 ? `+${val.toFixed(2)}` : val.toFixed(2)}
@@ -189,11 +189,11 @@ export const TelemetryPanel: React.FC<TelemetryPanelProps> = ({
           </div>
 
           <div className="flex items-end space-x-2 h-14 bg-gray-900 rounded-lg p-2 border border-gray-800">
-            {roundHistory.map((snap) => {
+            {roundHistory.map((snap, sparkIdx) => {
               const heightPct = Math.max(10, Math.min(100, snap.metric))
               const isMet = snap.metric >= targetThreshold
               return (
-                <div key={snap.round_num} className="flex-1 flex flex-col items-center h-full justify-end group relative">
+                <div key={`sparkline_${snap.round_num}_${sparkIdx}`} className="flex-1 flex flex-col items-center h-full justify-end group relative">
                   <div
                     className={`w-full rounded-t transition-all ${
                       isMet ? 'bg-emerald-500' : 'bg-indigo-500 group-hover:bg-indigo-400'

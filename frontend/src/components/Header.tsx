@@ -7,6 +7,7 @@ import {
   CheckCircle2,
   AlertTriangle,
   Zap,
+  History,
 } from 'lucide-react'
 import { LLMSettings } from '../types'
 
@@ -20,6 +21,8 @@ interface HeaderProps {
   isExporting: boolean
   hasActivePolicy: boolean
   driftStatus?: string
+  onOpenConversations: () => void
+  conversationCount?: number
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -32,6 +35,8 @@ export const Header: React.FC<HeaderProps> = ({
   isExporting,
   hasActivePolicy,
   driftStatus = 'healthy',
+  onOpenConversations,
+  conversationCount = 0,
 }) => {
   const getProviderLabel = () => {
     switch (llmSettings.provider) {
@@ -64,7 +69,7 @@ export const Header: React.FC<HeaderProps> = ({
               RL-NATIVE AGENT STUDIO
             </span>
             <span className="text-[11px] font-mono font-bold px-2 py-0.5 rounded-full bg-gradient-to-r from-indigo-500/20 to-purple-500/20 border border-indigo-500/30 text-indigo-300">
-              v4.0 Autonomous JIT
+              v4.1 Autonomous JIT
             </span>
           </div>
           <div className="text-[11px] text-gray-400">
@@ -75,6 +80,20 @@ export const Header: React.FC<HeaderProps> = ({
 
       {/* Center / Right Control Cluster */}
       <div className="flex items-center space-x-3">
+        {/* Past Conversations / Agents Switcher Button */}
+        <button
+          onClick={onOpenConversations}
+          className="flex items-center space-x-1.5 px-3 py-1 rounded-lg bg-gray-900 border border-gray-700 hover:border-gray-500 text-gray-200 text-xs font-semibold transition"
+          title="Browse and switch between past conversations and trained agents"
+        >
+          <History className="h-3.5 w-3.5 text-indigo-400" />
+          <span>Agents</span>
+          {conversationCount > 0 && (
+            <span className="px-1.5 py-0.2 rounded-full bg-indigo-900/80 border border-indigo-700/60 text-indigo-300 text-[10px] font-mono">
+              {conversationCount}
+            </span>
+          )}
+        </button>
         {/* Drift Status Indicator */}
         <div
           className={`flex items-center space-x-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border ${

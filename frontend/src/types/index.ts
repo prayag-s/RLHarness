@@ -78,6 +78,7 @@ export interface AgentBlueprintSpec {
 }
 
 export interface ClarifyingQuestion {
+  id?: string
   pillar: string
   question: string
   suggested_options: string[]
@@ -85,18 +86,27 @@ export interface ClarifyingQuestion {
   question_id: string
 }
 
+export interface TrainingParams {
+  max_auto_tune_rounds?: number
+  episodes_per_round?: number
+  target_metric_threshold?: number
+}
+
 export interface IntakeResponse {
   status: 'needs_clarification' | 'ready_to_build'
   assistant_message: string
   message: string
+  conversation_id?: string | null
   questions: ClarifyingQuestion[]
   clarifying_questions: ClarifyingQuestion[]
   blueprint_spec?: AgentBlueprintSpec | null
   blueprint?: AgentBlueprintSpec | null
+  recommended_training_params?: TrainingParams
 }
 
 export interface EpisodeLog {
-  episode_id: number
+  episode_id: string | number
+  round?: number
   total_reward: number
   reward_breakdown: Record<string, number>
   is_success: boolean
@@ -138,8 +148,39 @@ export interface SessionState {
   arena_html?: string
   round_history?: RoundSnapshot[]
   rounds_history?: RoundSnapshot[]
+  episodes?: EpisodeLog[]
   latest_frame?: Record<string, any>
   total_episodes_trained?: number
+}
+
+export interface ConversationSummary {
+  conversation_id: string
+  title: string
+  status: string
+  best_metric: number
+  target_metric_threshold: number
+  current_round: number
+  max_auto_tune_rounds: number
+  updated_at: string
+}
+
+export interface ConversationDetail {
+  conversation_id: string
+  title: string
+  status: string
+  created_at: string
+  updated_at: string
+  chat_history: any[]
+  dataset_id?: string | null
+  blueprint_spec?: AgentBlueprintSpec | null
+  training_params?: TrainingParams
+  current_round: number
+  best_metric: number
+  rounds_history: RoundSnapshot[]
+  episodes: EpisodeLog[]
+  env_code?: string | null
+  arena_html?: string | null
+  latest_model_zip_path?: string | null
 }
 
 export interface IngestedDatasetSummary {

@@ -1,4 +1,4 @@
-"""Data models for Conversational Intake Architect (v4.0)."""
+"""Data models for Conversational Intake Architect (v4.1)."""
 
 from __future__ import annotations
 from typing import Any
@@ -14,18 +14,22 @@ PILLAR_INTERACTION = "interaction"
 
 class ClarifyingQuestion(BaseModel):
     """A concise, high-impact question targeting an underspecified Pillar."""
+    id: str = "q_objective"
+    question_id: str = "q_objective"
     pillar: str = "objective"    # "objective" | "data" | "arena_ui" | "expectations" | "interaction"
     question: str                # Friendly 1-sentence question
     suggested_options: list[str] = Field(default_factory=list) # 3-4 clickable pills in the UI
     default_option: str = ""     # Used if user clicks "Use Smart Defaults"
-    question_id: str | None = None
 
     @model_validator(mode="before")
     @classmethod
     def normalize_question(cls, data: Any) -> Any:
         if isinstance(data, dict):
-            if "pillar" not in data and "question_id" in data:
-                data["pillar"] = data["question_id"]
+            qid = data.get("id") or data.get("question_id") or data.get("pillar") or "q_objective"
+            data["id"] = qid
+            data["question_id"] = qid
+            if "pillar" not in data:
+                data["pillar"] = qid
             if not data.get("suggested_options") and "options" in data:
                 data["suggested_options"] = data["options"]
             if not data.get("default_option") and data.get("suggested_options"):
@@ -33,8 +37,10 @@ class ClarifyingQuestion(BaseModel):
         return data
 
     def model_post_init(self, __context: Any) -> None:
+        if not self.id:
+            self.id = self.question_id or self.pillar or "q_objective"
         if not self.question_id:
-            self.question_id = self.pillar
+            self.question_id = self.id
 
 
 class AgentBlueprintSpec(BaseModel):
@@ -48,8 +54,9 @@ class AgentBlueprintSpec(BaseModel):
     arena_visual_description: str
     interactive_mode_description: str
     success_metric_name: str     # e.g., "Non-Loss Rate (%)", "Target Docking Rate (%)", "Audit Accuracy (%)"
-    target_metric_threshold: float # e.g., 85.0 ( meaning 85% )
+    target_metric_threshold: float = 85.0 # e.g., 85.0 ( meaning 85% )
     max_auto_tune_rounds: int = 4
+    episodes_per_round: int = 200
     initial_reward_components: list[dict[str, Any]] = Field(default_factory=list)
 
 
@@ -57,8 +64,16 @@ class IntakeResponse(BaseModel):
     """Response returned by the Intake Architect Agent."""
     status: str                  # "needs_clarification" | "ready_to_build"
     assistant_message: str = ""
+    conversation_id: str | None = None
     questions: list[ClarifyingQuestion] = Field(default_factory=list)
     blueprint_spec: AgentBlueprintSpec | None = None
+    recommended_training_params: dict[str, Any] = Field(
+        default_factory=lambda: {
+            "max_auto_tune_rounds": 5,
+            "episodes_per_round": 200,
+            "target_metric_threshold": 90.0,
+        }
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -76,4 +91,10 @@ class IntakeResponse(BaseModel):
                 data["questions"] = data["clarifying_questions"]
             if "blueprint_spec" not in data and "blueprint" in data:
                 data["blueprint_spec"] = data["blueprint"]
+            if "recommended_training_params" not in data:
+                data["recommended_training_params"] = {
+                    "max_auto_tune_rounds": 5,
+                    "episodes_per_round": 200,
+                    "target_metric_threshold": 90.0,
+                }
         return data
