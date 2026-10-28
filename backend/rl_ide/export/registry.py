@@ -1,4 +1,4 @@
-"""RunBundle Registry & Sharing Engine.
+"""RunBundle Registry & Sharing Engine for RL-Native Agent IDE v4.0.
 
 Manages, catalogs, inspects, and imports self-contained .runbundle packages
 and zip archives for policy sharing across teams and environments.
@@ -14,8 +14,7 @@ import zipfile
 import yaml
 from pydantic import BaseModel, Field
 
-from rl_ide.compiler.models import TaskConfig
-from rl_ide.reward.dsl import RewardDSL
+from rl_ide.architect.models import AgentBlueprintSpec
 
 
 class BundleMetadata(BaseModel):
@@ -38,10 +37,11 @@ class BundleMetadata(BaseModel):
 class BundleDetails(BaseModel):
     """Deep inspection of a runbundle including configuration and baseline stats."""
     metadata: BundleMetadata
-    task_config: dict[str, Any]
-    reward_dsl: dict[str, Any]
-    drift_baseline: dict[str, Any]
-    onnx_summary: dict[str, Any]
+    blueprint_spec: dict[str, Any] = Field(default_factory=dict)
+    task_config: dict[str, Any] = Field(default_factory=dict)
+    reward_dsl: dict[str, Any] = Field(default_factory=dict)
+    drift_baseline: dict[str, Any] = Field(default_factory=dict)
+    onnx_summary: dict[str, Any] = Field(default_factory=dict)
     has_run_local_daemon: bool = False
 
 
@@ -104,7 +104,7 @@ class RunBundleRegistry:
         archive_or_dir_path: str | Path,
         target_dir: str | Path | None = None,
         overwrite: bool = True,
-    ) -> tuple[Path, TaskConfig]:
+    ) -> Path:
         """Imports an external bundle directory or zip file into the registry."""
         src = Path(archive_or_dir_path).resolve()
         if not src.exists():
@@ -114,7 +114,6 @@ class RunBundleRegistry:
         dest_base.mkdir(parents=True, exist_ok=True)
 
         if src.is_file() and zipfile.is_zipfile(src):
-            # Unpack zip
             raw_name = src.name.replace(".runbundle.zip", "").replace(".zip", "")
             target_bundle = dest_base / f"{raw_name}.runbundle"
             if target_bundle.exists() and overwrite:
@@ -122,25 +121,10 @@ class RunBundleRegistry:
             target_bundle.mkdir(parents=True, exist_ok=True)
 
             with zipfile.ZipFile(src, "r") as zf:
-                # Support archives where files are top-level or in a nested root folder
-                names = zf.namelist()
-                has_nested_root = any("/model.onnx" in n for n in names) and not any(n == "model.onnx" for n in names)
-                root_prefix = ""
-                if has_nested_root:
-                    for n in names:
-                        if n.endswith("model.onnx"):
-                            root_prefix = n.split("model.onnx")[0]
-                            break
-
                 for member in zf.infolist():
                     if member.is_dir():
                         continue
-                    m_name = member.filename
-                    if root_prefix and m_name.startswith(root_prefix):
-                        rel_name = m_name[len(root_prefix):]
-                    else:
-                        rel_name = Path(m_name).name
-                    dest_file = target_bundle / rel_name
+                    dest_file = target_bundle / Path(member.filename).name
                     dest_file.parent.mkdir(parents=True, exist_ok=True)
                     with zf.open(member) as source_f, open(dest_file, "wb") as target_f:
                         shutil.copyfileobj(source_f, target_f)
@@ -156,13 +140,7 @@ class RunBundleRegistry:
         else:
             raise ValueError(f"Unsupported bundle format at {src}")
 
-        # Validate bundle completeness
-        config_path = installed_dir / "task_config.yaml"
-        if not config_path.exists():
-            raise ValueError(f"Corrupt bundle: missing task_config.yaml in {installed_dir}")
-
-        task_config = TaskConfig.from_yaml(config_path.read_text(encoding="utf-8"))
-        return installed_dir, task_config
+        return installed_dir
 
     def delete_bundle(self, bundle_id: str) -> bool:
         """Deletes a bundle from the registry."""
@@ -179,41 +157,35 @@ class RunBundleRegistry:
     def _parse_dir_metadata(self, bundle_dir: Path, bundle_id: str) -> BundleMetadata:
         try:
             mtime = datetime.fromtimestamp(bundle_dir.stat().st_mtime, tz=timezone.utc).isoformat()
+            spec_file = bundle_dir / "blueprint_spec.json"
             config_file = bundle_dir / "task_config.yaml"
             onnx_file = bundle_dir / "model.onnx"
-            dsl_file = bundle_dir / "reward_dsl.yaml"
             baseline_file = bundle_dir / "drift_baseline.json"
 
-            if not config_file.exists():
-                return BundleMetadata(
-                    bundle_id=bundle_id,
-                    name=bundle_dir.name,
-                    task_id="unknown",
-                    adapter_name="unknown",
-                    archive_type="dir",
-                    bundle_path=str(bundle_dir),
-                    created_at=mtime,
-                    status="corrupt",
-                    error_message="Missing task_config.yaml",
-                )
+            name = bundle_id
+            task_id = bundle_id
+            adapter_name = "SynthesizedGymEnv"
+            feat_count = 0
+            dsl_terms = 0
 
-            config_data = yaml.safe_load(config_file.read_text(encoding="utf-8")) or {}
-            task_id = config_data.get("task_id", bundle_id)
-            name = config_data.get("name", task_id)
-            adapter_name = config_data.get("adapter_name", "Unknown")
+            if spec_file.exists():
+                spec_data = json.loads(spec_file.read_text(encoding="utf-8"))
+                name = spec_data.get("task_title", bundle_id)
+                task_id = name
+                feat_count = len(spec_data.get("observation_features", []))
+                dsl_terms = len(spec_data.get("initial_reward_components", []))
+            elif config_file.exists():
+                config_data = yaml.safe_load(config_file.read_text(encoding="utf-8")) or {}
+                task_id = config_data.get("task_id", bundle_id)
+                name = config_data.get("name", task_id)
+                adapter_name = config_data.get("adapter_name", "Unknown")
 
             onnx_size = onnx_file.stat().st_size if onnx_file.exists() else 0
-
-            dsl_terms = 0
-            if dsl_file.exists():
-                dsl_data = yaml.safe_load(dsl_file.read_text(encoding="utf-8")) or {}
-                dsl_terms = len(dsl_data.get("reward", {}).get("terms", []))
-
-            feat_count = 0
             quantiles_count = 0
             if baseline_file.exists():
                 base_data = json.loads(baseline_file.read_text(encoding="utf-8"))
-                feat_count = len(base_data.get("feature_names", []))
+                if not feat_count:
+                    feat_count = len(base_data.get("feature_names", []))
                 quantiles_count = len(base_data.get("quantiles_per_feature", {}))
 
             return BundleMetadata(
@@ -234,8 +206,8 @@ class RunBundleRegistry:
             return BundleMetadata(
                 bundle_id=bundle_id,
                 name=bundle_dir.name,
-                task_id="error",
-                adapter_name="error",
+                task_id="unknown",
+                adapter_name="unknown",
                 archive_type="dir",
                 bundle_path=str(bundle_dir),
                 created_at=datetime.now(timezone.utc).isoformat(),
@@ -248,51 +220,32 @@ class RunBundleRegistry:
             mtime = datetime.fromtimestamp(zip_path.stat().st_mtime, tz=timezone.utc).isoformat()
             with zipfile.ZipFile(zip_path, "r") as zf:
                 names = zf.namelist()
-                config_name = next((n for n in names if n.endswith("task_config.yaml")), None)
+                spec_name = next((n for n in names if n.endswith("blueprint_spec.json")), None)
                 onnx_name = next((n for n in names if n.endswith("model.onnx")), None)
-                dsl_name = next((n for n in names if n.endswith("reward_dsl.yaml")), None)
                 baseline_name = next((n for n in names if n.endswith("drift_baseline.json")), None)
 
-                if not config_name:
-                    return BundleMetadata(
-                        bundle_id=bundle_id,
-                        name=zip_path.name,
-                        task_id="unknown",
-                        adapter_name="unknown",
-                        archive_type="zip",
-                        bundle_path=str(zip_path),
-                        created_at=mtime,
-                        status="corrupt",
-                        error_message="task_config.yaml missing from zip",
-                    )
-
-                config_raw = zf.read(config_name).decode("utf-8")
-                config_data = yaml.safe_load(config_raw) or {}
-                task_id = config_data.get("task_id", bundle_id)
-                name = config_data.get("name", task_id)
-                adapter_name = config_data.get("adapter_name", "Unknown")
-
-                onnx_size = 0
-                if onnx_name:
-                    onnx_size = zf.getinfo(onnx_name).file_size
-
-                dsl_terms = 0
-                if dsl_name:
-                    dsl_data = yaml.safe_load(zf.read(dsl_name).decode("utf-8")) or {}
-                    dsl_terms = len(dsl_data.get("reward", {}).get("terms", []))
-
+                name = bundle_id
                 feat_count = 0
+                dsl_terms = 0
+
+                if spec_name:
+                    spec_data = json.loads(zf.read(spec_name).decode("utf-8"))
+                    name = spec_data.get("task_title", bundle_id)
+                    feat_count = len(spec_data.get("observation_features", []))
+                    dsl_terms = len(spec_data.get("initial_reward_components", []))
+
+                onnx_size = zf.getinfo(onnx_name).file_size if onnx_name else 0
+
                 quantiles_count = 0
                 if baseline_name:
                     base_data = json.loads(zf.read(baseline_name).decode("utf-8"))
-                    feat_count = len(base_data.get("feature_names", []))
                     quantiles_count = len(base_data.get("quantiles_per_feature", {}))
 
                 return BundleMetadata(
                     bundle_id=bundle_id,
                     name=name,
-                    task_id=task_id,
-                    adapter_name=adapter_name,
+                    task_id=name,
+                    adapter_name="SynthesizedGymEnv",
                     archive_type="zip",
                     bundle_path=str(zip_path),
                     created_at=mtime,
@@ -306,8 +259,8 @@ class RunBundleRegistry:
             return BundleMetadata(
                 bundle_id=bundle_id,
                 name=zip_path.name,
-                task_id="error",
-                adapter_name="error",
+                task_id="unknown",
+                adapter_name="unknown",
                 archive_type="zip",
                 bundle_path=str(zip_path),
                 created_at=datetime.now(timezone.utc).isoformat(),
@@ -316,52 +269,41 @@ class RunBundleRegistry:
             )
 
     def _inspect_dir(self, bundle_dir: Path, meta: BundleMetadata) -> BundleDetails:
-        config_data = yaml.safe_load((bundle_dir / "task_config.yaml").read_text(encoding="utf-8")) or {}
-        dsl_file = bundle_dir / "reward_dsl.yaml"
-        dsl_data = yaml.safe_load(dsl_file.read_text(encoding="utf-8")) if dsl_file.exists() else {}
-        baseline_file = bundle_dir / "drift_baseline.json"
-        base_data = json.loads(baseline_file.read_text(encoding="utf-8")) if baseline_file.exists() else {}
+        spec_data = {}
+        spec_f = bundle_dir / "blueprint_spec.json"
+        if spec_f.exists():
+            spec_data = json.loads(spec_f.read_text(encoding="utf-8"))
 
-        onnx_summary = {"exists": (bundle_dir / "model.onnx").exists(), "size_bytes": meta.onnx_size_bytes}
-        run_local_file = bundle_dir / "run_local.py"
-        has_daemon = False
-        if run_local_file.exists():
-            content = run_local_file.read_text(encoding="utf-8")
-            has_daemon = "--serve" in content or "HTTPServer" in content
+        base_data = {}
+        base_f = bundle_dir / "drift_baseline.json"
+        if base_f.exists():
+            base_data = json.loads(base_f.read_text(encoding="utf-8"))
+
+        has_daemon = (bundle_dir / "run_local.py").exists()
 
         return BundleDetails(
             metadata=meta,
-            task_config=config_data,
-            reward_dsl=dsl_data,
+            blueprint_spec=spec_data,
             drift_baseline=base_data,
-            onnx_summary=onnx_summary,
+            onnx_summary={"size_bytes": meta.onnx_size_bytes, "status": "ready"},
             has_run_local_daemon=has_daemon,
         )
 
     def _inspect_zip(self, zip_path: Path, meta: BundleMetadata) -> BundleDetails:
         with zipfile.ZipFile(zip_path, "r") as zf:
             names = zf.namelist()
-            cfg_n = next((n for n in names if n.endswith("task_config.yaml")), None)
-            dsl_n = next((n for n in names if n.endswith("reward_dsl.yaml")), None)
-            base_n = next((n for n in names if n.endswith("drift_baseline.json")), None)
-            run_n = next((n for n in names if n.endswith("run_local.py")), None)
+            spec_name = next((n for n in names if n.endswith("blueprint_spec.json")), None)
+            spec_data = json.loads(zf.read(spec_name).decode("utf-8")) if spec_name else {}
 
-            config_data = yaml.safe_load(zf.read(cfg_n).decode("utf-8")) if cfg_n else {}
-            dsl_data = yaml.safe_load(zf.read(dsl_n).decode("utf-8")) if dsl_n else {}
-            base_data = json.loads(zf.read(base_n).decode("utf-8")) if base_n else {}
+            base_name = next((n for n in names if n.endswith("drift_baseline.json")), None)
+            base_data = json.loads(zf.read(base_name).decode("utf-8")) if base_name else {}
 
-            has_daemon = False
-            if run_n:
-                content = zf.read(run_n).decode("utf-8")
-                has_daemon = "--serve" in content or "HTTPServer" in content
-
-            onnx_summary = {"exists": any(n.endswith("model.onnx") for n in names), "size_bytes": meta.onnx_size_bytes}
+            has_daemon = any(n.endswith("run_local.py") for n in names)
 
             return BundleDetails(
                 metadata=meta,
-                task_config=config_data,
-                reward_dsl=dsl_data,
+                blueprint_spec=spec_data,
                 drift_baseline=base_data,
-                onnx_summary=onnx_summary,
+                onnx_summary={"size_bytes": meta.onnx_size_bytes, "status": "ready"},
                 has_run_local_daemon=has_daemon,
             )

@@ -3,53 +3,38 @@ import {
   X,
   Archive,
   RefreshCw,
-  UploadCloud,
-  Check,
+  Download,
   Copy,
+  Check,
   Terminal,
-  Activity,
-  Layers,
   FileCode,
-  Trash2,
-  ExternalLink,
-  ChevronRight,
-  ChevronDown,
+  Layers,
+  Sparkles,
 } from 'lucide-react'
-import { BundleMetadata, BundleDetails } from '../types'
-import {
-  fetchBundles,
-  fetchBundleDetails,
-  importBundle,
-  deleteBundle,
-} from '../services/api'
+import { BundleMetadata } from '../types'
+import { fetchBundles } from '../services/api'
 
 interface RegistryModalProps {
   isOpen: boolean
   onClose: () => void
-  onLoadBundle: (taskConfig: any) => void
 }
 
-export const RegistryModal: React.FC<RegistryModalProps> = ({
-  isOpen,
-  onClose,
-  onLoadBundle,
-}) => {
+export const RegistryModal: React.FC<RegistryModalProps> = ({ isOpen, onClose }) => {
   const [bundles, setBundles] = useState<BundleMetadata[]>([])
   const [loading, setLoading] = useState(false)
-  const [selectedDetails, setSelectedDetails] = useState<BundleDetails | null>(null)
-  const [inspectingId, setInspectingId] = useState<string | null>(null)
-  const [importPath, setImportPath] = useState('')
-  const [isImporting, setIsImporting] = useState(false)
   const [copiedKey, setCopiedKey] = useState<string | null>(null)
-  const [feedbackMsg, setFeedbackMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
+  const [selectedBundle, setSelectedBundle] = useState<BundleMetadata | null>(null)
 
   const loadBundles = async () => {
     setLoading(true)
     try {
       const data = await fetchBundles()
       setBundles(data)
-    } catch (e: any) {
-      setFeedbackMsg({ type: 'error', text: 'Failed to load bundles: ' + e.message })
+      if (data.length > 0 && !selectedBundle) {
+        setSelectedBundle(data[0])
+      }
+    } catch (e) {
+      console.error('Failed to load bundles', e)
     } finally {
       setLoading(false)
     }
@@ -58,104 +43,37 @@ export const RegistryModal: React.FC<RegistryModalProps> = ({
   useEffect(() => {
     if (isOpen) {
       loadBundles()
-      setSelectedDetails(null)
-      setInspectingId(null)
-      setFeedbackMsg(null)
     }
   }, [isOpen])
 
   if (!isOpen) return null
 
-  const handleInspect = async (b: BundleMetadata) => {
-    if (inspectingId === b.bundle_id) {
-      setInspectingId(null)
-      setSelectedDetails(null)
-      return
-    }
-    setInspectingId(b.bundle_id)
-    try {
-      const details = await fetchBundleDetails(b.bundle_id)
-      setSelectedDetails(details)
-    } catch (e: any) {
-      setFeedbackMsg({ type: 'error', text: `Failed inspecting ${b.bundle_id}: ${e.message}` })
-    }
-  }
-
-  const handleImport = async () => {
-    if (!importPath.trim()) return
-    setIsImporting(true)
-    setFeedbackMsg(null)
-    try {
-      const res = await importBundle(importPath.trim(), false)
-      setFeedbackMsg({ type: 'success', text: `Successfully imported ${res.task_config.name || res.bundle_dir} into registry!` })
-      setImportPath('')
-      await loadBundles()
-    } catch (e: any) {
-      setFeedbackMsg({ type: 'error', text: `Import failed: ${e.message}` })
-    } finally {
-      setIsImporting(false)
-    }
-  }
-
-  const handleActivate = async (b: BundleMetadata) => {
-    try {
-      const res = await importBundle(b.bundle_path, true)
-      onLoadBundle(res.task_config)
-      onClose()
-    } catch (e: any) {
-      setFeedbackMsg({ type: 'error', text: `Failed to activate: ${e.message}` })
-    }
-  }
-
-  const handleDelete = async (bundleId: string, e: React.MouseEvent) => {
-    e.stopPropagation()
-    if (!confirm(`Are you sure you want to delete bundle '${bundleId}'?`)) return
-    try {
-      await deleteBundle(bundleId)
-      setBundles(bundles.filter((b) => b.bundle_id !== bundleId))
-      if (inspectingId === bundleId) {
-        setInspectingId(null)
-        setSelectedDetails(null)
-      }
-      setFeedbackMsg({ type: 'success', text: `Bundle '${bundleId}' deleted.` })
-    } catch (err: any) {
-      setFeedbackMsg({ type: 'error', text: `Delete failed: ${err.message}` })
-    }
-  }
-
-  const copyToClipboard = (text: string, key: string) => {
+  const handleCopy = (text: string, key: string) => {
     navigator.clipboard.writeText(text)
     setCopiedKey(key)
-    setTimeout(() => setCopiedKey(null), 1500)
+    setTimeout(() => setCopiedKey(null), 2000)
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
-      <div className="w-full max-w-4xl max-h-[90vh] bg-panel border border-panel-border rounded-2xl shadow-2xl overflow-hidden flex flex-col">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
+      <div className="w-full max-w-4xl h-[80vh] bg-gray-900 border border-gray-800 rounded-2xl shadow-2xl flex flex-col overflow-hidden text-gray-200">
         {/* Header */}
-        <div className="px-6 py-4 border-b border-panel-border flex items-center justify-between bg-gray-900/70">
+        <div className="h-14 border-b border-gray-800 bg-gray-950 px-5 flex items-center justify-between">
           <div className="flex items-center space-x-3">
-            <div className="p-2 rounded-xl bg-blue-950/80 border border-blue-800/50">
-              <Archive className="h-5 w-5 text-blue-400" />
+            <div className="h-8 w-8 rounded-lg bg-indigo-950/80 border border-indigo-700/50 flex items-center justify-center text-indigo-400">
+              <Archive className="h-4 w-4" />
             </div>
             <div>
-              <h2 className="text-sm font-bold text-gray-100 flex items-center space-x-2">
-                <span>Team Policy Registry & RunBundle Hub</span>
-                <span className="text-[10px] px-2 py-0.5 rounded-full bg-blue-900/50 text-blue-300 font-mono border border-blue-700/40">
-                  {bundles.length} Registered
-                </span>
-              </h2>
-              <p className="text-xs text-gray-400">
-                Shareable, zero-dependency policy archives with embedded ONNX runtime and live drift monitoring.
-              </p>
+              <h2 className="text-sm font-bold text-gray-100">Standalone RunBundle Registry</h2>
+              <p className="text-[11px] text-gray-400">Catalog of self-contained ONNX policy distributions</p>
             </div>
           </div>
+
           <div className="flex items-center space-x-2">
             <button
               onClick={loadBundles}
-              disabled={loading}
+              className="p-1.5 rounded-lg text-gray-400 hover:text-white hover:bg-gray-800 transition"
               title="Refresh Registry"
-              className="p-1.5 rounded-lg text-gray-400 hover:text-white hover:bg-gray-800 transition disabled:opacity-50"
             >
               <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
             </button>
@@ -163,240 +81,134 @@ export const RegistryModal: React.FC<RegistryModalProps> = ({
               onClick={onClose}
               className="p-1.5 rounded-lg text-gray-400 hover:text-white hover:bg-gray-800 transition"
             >
-              <X className="h-5 w-5" />
+              <X className="h-4 w-4" />
             </button>
           </div>
         </div>
 
-        {/* Feedback message banner */}
-        {feedbackMsg && (
-          <div
-            className={`px-6 py-2.5 text-xs font-medium flex items-center justify-between ${
-              feedbackMsg.type === 'success'
-                ? 'bg-emerald-950/60 border-b border-emerald-800/50 text-emerald-300'
-                : 'bg-rose-950/60 border-b border-rose-800/50 text-rose-300'
-            }`}
-          >
-            <span>{feedbackMsg.text}</span>
-            <button
-              onClick={() => setFeedbackMsg(null)}
-              className="text-gray-400 hover:text-white"
-            >
-              &times;
-            </button>
-          </div>
-        )}
-
-        {/* Import Bar */}
-        <div className="px-6 py-3 border-b border-panel-border bg-gray-950/60 flex items-center space-x-3">
-          <UploadCloud className="h-4 w-4 text-gray-400 flex-shrink-0" />
-          <input
-            type="text"
-            value={importPath}
-            onChange={(e) => setImportPath(e.target.value)}
-            placeholder="Import archive path (e.g. exported_bundles/csv_task.runbundle.zip or absolute path)..."
-            className="flex-1 bg-gray-900 border border-gray-800 rounded-lg px-3 py-1.5 text-xs text-gray-200 placeholder-gray-500 font-mono focus:outline-none focus:border-blue-500"
-          />
-          <button
-            onClick={handleImport}
-            disabled={isImporting || !importPath.trim()}
-            className="flex items-center space-x-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-medium transition disabled:opacity-50"
-          >
-            {isImporting ? (
-              <RefreshCw className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <UploadCloud className="h-3.5 w-3.5" />
-            )}
-            <span>Import</span>
-          </button>
-        </div>
-
-        {/* Bundle List */}
-        <div className="flex-1 overflow-y-auto p-6 space-y-3">
-          {bundles.length === 0 ? (
-            <div className="p-12 text-center text-gray-500 space-y-2">
-              <Archive className="h-10 w-10 mx-auto text-gray-600 stroke-1" />
-              <p className="text-sm">No exported bundles found in registry search paths.</p>
-              <p className="text-xs text-gray-600">
-                Click "Export Owned Policy" in the top bar to package your first .runbundle.
-              </p>
+        {/* Content Body */}
+        <div className="flex-1 flex overflow-hidden">
+          {/* Left: Bundle List */}
+          <div className="w-80 border-r border-gray-800 bg-gray-950/50 overflow-y-auto p-3 space-y-2">
+            <div className="text-[11px] font-bold uppercase tracking-wider text-gray-500 mb-2">
+              Packaged Bundles ({bundles.length})
             </div>
-          ) : (
-            bundles.map((b) => {
-              const isSelected = inspectingId === b.bundle_id
-              return (
-                <div
-                  key={b.bundle_id}
-                  className={`rounded-xl border transition overflow-hidden ${
-                    isSelected
-                      ? 'border-blue-500 bg-blue-950/20'
-                      : 'border-panel-border bg-gray-950/40 hover:border-gray-700'
-                  }`}
-                >
-                  {/* Summary Row */}
-                  <div className="p-4 flex items-center justify-between">
-                    <div className="space-y-1">
-                      <div className="flex items-center space-x-2.5">
-                        <span className="text-sm font-bold text-gray-100">{b.name}</span>
-                        <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-gray-800 text-gray-300 border border-gray-700">
-                          {b.task_id}
-                        </span>
-                        <span
-                          className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${
-                            b.adapter_name.includes('Text')
-                              ? 'bg-purple-950/60 text-purple-300 border border-purple-800/40'
-                              : 'bg-cyan-950/60 text-cyan-300 border border-cyan-800/40'
-                          }`}
-                        >
-                          {b.adapter_name}
-                        </span>
-                        <span className="text-[10px] uppercase font-mono px-1.5 py-0.5 rounded bg-gray-900 text-gray-400 border border-gray-800">
-                          {b.archive_type}
-                        </span>
-                      </div>
-                      <div className="flex items-center space-x-4 text-xs text-gray-400">
-                        <span>Created: {b.created_at.slice(0, 19).replace('T', ' ')}</span>
-                        <span>•</span>
-                        <span>ONNX: {(b.onnx_size_bytes / 1024).toFixed(1)} KB</span>
-                        <span>•</span>
-                        <span>DSL Terms: {b.dsl_terms_count}</span>
-                        <span>•</span>
-                        <span>Features: {b.feature_count}</span>
-                      </div>
+
+            {bundles.length === 0 ? (
+              <div className="p-4 text-center text-xs text-gray-500 border border-dashed border-gray-800 rounded-xl">
+                No exported bundles cataloged yet. Train and export a policy first!
+              </div>
+            ) : (
+              bundles.map((b) => {
+                const isSelected = selectedBundle?.bundle_id === b.bundle_id
+                const sizeMb = (b.onnx_size_bytes / 1024).toFixed(1)
+                return (
+                  <button
+                    key={b.bundle_id}
+                    onClick={() => setSelectedBundle(b)}
+                    className={`w-full text-left p-3 rounded-xl border transition flex flex-col space-y-1 ${
+                      isSelected
+                        ? 'bg-indigo-950/60 border-indigo-500 text-white shadow-md'
+                        : 'bg-gray-900/60 border-gray-800 text-gray-400 hover:border-gray-700 hover:text-gray-200'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="font-semibold text-xs text-gray-200 truncate">{b.name}</span>
+                      <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-emerald-950 border border-emerald-800/40 text-emerald-400">
+                        {b.status}
+                      </span>
                     </div>
-
-                    <div className="flex items-center space-x-2">
-                      <button
-                        onClick={() => handleInspect(b)}
-                        className="flex items-center space-x-1 px-3 py-1.5 rounded-lg border border-gray-800 bg-gray-900 hover:bg-gray-800 text-xs text-gray-300 transition"
-                      >
-                        {isSelected ? (
-                          <ChevronDown className="h-3.5 w-3.5 text-blue-400" />
-                        ) : (
-                          <ChevronRight className="h-3.5 w-3.5 text-gray-400" />
-                        )}
-                        <span>{isSelected ? 'Collapse' : 'Inspect'}</span>
-                      </button>
-
-                      <button
-                        onClick={() => handleActivate(b)}
-                        className="flex items-center space-x-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold shadow-md shadow-emerald-600/20 transition"
-                      >
-                        <ExternalLink className="h-3.5 w-3.5" />
-                        <span>Load into Workbench</span>
-                      </button>
-
-                      <button
-                        onClick={(e) => handleDelete(b.bundle_id, e)}
-                        title="Delete Bundle"
-                        className="p-1.5 text-gray-500 hover:text-rose-400 hover:bg-rose-950/30 rounded-lg transition"
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </button>
+                    <div className="text-[10px] text-gray-500 font-mono truncate">
+                      {b.task_id} • {sizeMb} KB ONNX
                     </div>
+                    <div className="text-[10px] text-gray-500">{new Date(b.created_at).toLocaleString()}</div>
+                  </button>
+                )
+              })
+            )}
+          </div>
+
+          {/* Right: Selected Bundle Inspector */}
+          <div className="flex-1 p-5 overflow-y-auto bg-gray-900 space-y-4">
+            {selectedBundle ? (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="text-base font-bold text-gray-100">{selectedBundle.name}</h3>
+                    <p className="text-xs font-mono text-indigo-400">{selectedBundle.task_id}</p>
                   </div>
 
-                  {/* Expanded Inspection Drawer */}
-                  {isSelected && selectedDetails && (
-                    <div className="border-t border-panel-border bg-gray-950/80 p-5 space-y-4 text-xs">
-                      <div className="grid grid-cols-2 gap-4">
-                        {/* Task Config & DSL Summary */}
-                        <div className="space-y-2 p-3 bg-gray-900/60 rounded-xl border border-gray-800">
-                          <div className="flex items-center space-x-2 text-gray-300 font-semibold">
-                            <FileCode className="h-4 w-4 text-indigo-400" />
-                            <span>Compiled Reward DSL Terms ({selectedDetails.metadata.dsl_terms_count})</span>
-                          </div>
-                          <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
-                            {((selectedDetails.reward_dsl as any)?.reward?.terms || []).map((term: any, idx: number) => (
-                              <div key={idx} className="p-2 rounded bg-gray-950 border border-gray-800/80 text-[11px] font-mono">
-                                <div className="flex justify-between items-center text-gray-300">
-                                  <span className="font-semibold text-blue-300">{term.name}</span>
-                                  <span className={term.value >= 0 ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}>
-                                    {term.value > 0 ? `+${term.value}` : term.value}
-                                  </span>
-                                </div>
-                                <div className="text-gray-400 text-[10px] truncate mt-0.5">
-                                  when: {String(term.when)}
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-
-                        {/* Drift Baseline Summary */}
-                        <div className="space-y-2 p-3 bg-gray-900/60 rounded-xl border border-gray-800">
-                          <div className="flex items-center space-x-2 text-gray-300 font-semibold">
-                            <Activity className="h-4 w-4 text-emerald-400" />
-                            <span>Unsupervised Drift Baseline</span>
-                          </div>
-                          <div className="text-[11px] space-y-1.5 text-gray-300 font-mono">
-                            <div className="flex justify-between">
-                              <span className="text-gray-500">Baseline Entropy Mean:</span>
-                              <span>{(selectedDetails.drift_baseline as any)?.entropy_mean?.toFixed(4) || 'N/A'}</span>
-                            </div>
-                            <div className="flex justify-between">
-                              <span className="text-gray-500">Entropy Std:</span>
-                              <span>{(selectedDetails.drift_baseline as any)?.entropy_std?.toFixed(4) || 'N/A'}</span>
-                            </div>
-                            <div className="flex justify-between">
-                              <span className="text-gray-500">Quantile Features:</span>
-                              <span>{selectedDetails.metadata.baseline_quantiles_count} tracked</span>
-                            </div>
-                            <div className="flex justify-between">
-                              <span className="text-gray-500">Standalone Daemon Support:</span>
-                              <span className="text-emerald-400 font-semibold">Ready (--serve)</span>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* Standalone Daemon Serve Command */}
-                      <div className="space-y-1.5 p-3 rounded-xl bg-gray-900/90 border border-gray-800">
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center space-x-2 text-xs font-semibold text-gray-300">
-                            <Terminal className="h-3.5 w-3.5 text-amber-400" />
-                            <span>Production Zero-SB3 Microservice Command</span>
-                          </div>
-                          <button
-                            onClick={() =>
-                              copyToClipboard(
-                                `python run_local.py --serve --port 9000`,
-                                `daemon-${b.bundle_id}`
-                              )
-                            }
-                            className="flex items-center space-x-1 text-[11px] text-gray-400 hover:text-white"
-                          >
-                            {copiedKey === `daemon-${b.bundle_id}` ? (
-                              <Check className="h-3.5 w-3.5 text-emerald-400" />
-                            ) : (
-                              <Copy className="h-3.5 w-3.5" />
-                            )}
-                            <span>{copiedKey === `daemon-${b.bundle_id}` ? 'Copied' : 'Copy'}</span>
-                          </button>
-                        </div>
-                        <div className="p-2 rounded bg-black border border-gray-800 font-mono text-emerald-400 text-xs">
-                          python run_local.py --serve --port 9000
-                        </div>
-                      </div>
-                    </div>
-                  )}
+                  <a
+                    href={`/api/v4/sessions/${selectedBundle.task_id}/download`}
+                    download
+                    className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition shadow-md"
+                  >
+                    <Download className="h-3.5 w-3.5" />
+                    <span>Download .zip</span>
+                  </a>
                 </div>
-              )
-            })
-          )}
-        </div>
 
-        {/* Footer */}
-        <div className="px-6 py-3 border-t border-panel-border bg-gray-900/70 flex items-center justify-between text-xs text-gray-400">
-          <span>
-            Policies run standalone with pure Python + ONNX Runtime. Zero token fees.
-          </span>
-          <button
-            onClick={onClose}
-            className="px-4 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-200 transition"
-          >
-            Close
-          </button>
+                {/* Bundle Spec Cards */}
+                <div className="grid grid-cols-3 gap-3">
+                  <div className="p-3 rounded-xl bg-gray-950 border border-gray-800">
+                    <span className="text-[11px] text-gray-500 block">ONNX Runtime Size</span>
+                    <span className="text-sm font-bold font-mono text-cyan-400">
+                      {(selectedBundle.onnx_size_bytes / 1024).toFixed(1)} KB
+                    </span>
+                  </div>
+                  <div className="p-3 rounded-xl bg-gray-950 border border-gray-800">
+                    <span className="text-[11px] text-gray-500 block">Distribution Format</span>
+                    <span className="text-sm font-bold font-mono text-purple-400">
+                      .runbundle ({selectedBundle.archive_type})
+                    </span>
+                  </div>
+                  <div className="p-3 rounded-xl bg-gray-950 border border-gray-800">
+                    <span className="text-[11px] text-gray-500 block">Created At</span>
+                    <span className="text-xs font-mono text-gray-300">
+                      {new Date(selectedBundle.created_at).toLocaleDateString()}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Standalone Daemon CLI Commands */}
+                <div className="p-4 rounded-xl bg-gray-950 border border-gray-800 space-y-2">
+                  <div className="flex items-center space-x-2 text-xs font-bold text-gray-300">
+                    <Terminal className="h-4 w-4 text-emerald-400" />
+                    <span>Local Zero-Dependency Execution</span>
+                  </div>
+                  <p className="text-xs text-gray-400">
+                    Extract the runbundle and run inference without Python virtualenv or backend server:
+                  </p>
+
+                  <div className="p-2.5 rounded-lg bg-gray-900 border border-gray-800 flex items-center justify-between font-mono text-xs text-gray-300">
+                    <code>python run_local.py --sample</code>
+                    <button
+                      onClick={() => handleCopy('python run_local.py --sample', 'sample')}
+                      className="p-1 text-gray-400 hover:text-white"
+                      title="Copy command"
+                    >
+                      {copiedKey === 'sample' ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
+                    </button>
+                  </div>
+
+                  <div className="p-2.5 rounded-lg bg-gray-900 border border-gray-800 flex items-center justify-between font-mono text-xs text-gray-300">
+                    <code>python run_local.py --serve --port 9000</code>
+                    <button
+                      onClick={() => handleCopy('python run_local.py --serve --port 9000', 'serve')}
+                      className="p-1 text-gray-400 hover:text-white"
+                      title="Copy command"
+                    >
+                      {copiedKey === 'serve' ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="h-full flex items-center justify-center text-xs text-gray-500">
+                Select a bundle from the list to view its architecture and CLI runner.
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </div>

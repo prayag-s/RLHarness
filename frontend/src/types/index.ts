@@ -1,244 +1,186 @@
-export interface AdapterMeta {
+// =============================================================================
+// RL-Native Agent Studio v4.0 Type Definitions
+// Autonomous JIT Agent Synthesis, Conversational Architect & Closed-Loop Training
+// =============================================================================
+
+export interface ObsSpec {
+  vector_dim: number
+  feature_names: string[]
+  horizon_type?: string
+  default_gamma?: number
+}
+
+export interface ActionSpec {
+  action_type: string
+  labels: string[]
+}
+
+export interface RewardTermSpec {
   name: string
-  event_schema: Record<string, string>
-  observations: {
-    vector_dim: number
-    feature_names: string[]
-    horizon_type: string
-    default_gamma: number
-  }
-  actions: {
-    action_type: string
-    labels: string[]
-  }
-}
-
-export interface RewardTerm {
-  name: string
-  when: string | boolean
-  value: number | string
-}
-
-export interface PinnedEpisode {
-  episode_id: number
-  forbid_action: string
-  penalty: number
-}
-
-export interface RewardDSL {
-  version: string
-  horizon: {
-    gamma: number
-    critic_warmup_epochs_on_diff: number
-    kl_coef: number
-  }
-  reward: {
-    terms: RewardTerm[]
-    pinned_episodes: PinnedEpisode[]
-    aggregate: string
-    clamp: [number, number]
-  }
-}
-
-export interface TaskConfig {
-  task_id: string
-  name: string
+  weight: number
   description: string
-  adapter_name: string
-  adapter_config: Record<string, any>
-  hyperparameters: Record<string, any>
-  reward_dsl: RewardDSL
 }
 
-export interface StepEvents {
-  obs: Record<string, any>
-  action: {
-    action_idx: number
-    label: string
-  }
-  state: Record<string, any>
-  truth?: {
-    has_label: boolean
-    label: string
-    true_anomaly?: boolean
-  }
+export interface RewardSpec {
+  terms: RewardTermSpec[]
+  target_metric_name: string
+  target_metric_threshold: number
 }
 
-export interface StepResult {
-  obs_vector: number[]
-  events: StepEvents
-  terminated: boolean
-  truncated: boolean
-  info: Record<string, any>
+export interface ArenaElementSpec {
+  name: string
+  type: string
+  description: string
+}
+
+export interface ArenaSpec {
+  arena_type: string
+  title: string
+  theme: string
+  elements: ArenaElementSpec[]
+}
+
+export interface InteractiveControlSpec {
+  name: string
+  type: string
+  label: string
+}
+
+export interface InteractiveSpec {
+  enabled: boolean
+  controls: InteractiveControlSpec[]
+}
+
+export interface AgentBlueprintSpec {
+  task_title: string
+  domain_summary: string
+  data_source_type: string
+  dataset_id?: string | null
+  observation_features: string[]
+  action_labels: string[]
+  arena_visual_description: string
+  interactive_mode_description: string
+  success_metric_name: string
+  target_metric_threshold: number
+  max_auto_tune_rounds?: number
+  initial_reward_components?: Array<Record<string, any>>
+
+  // Legacy / UI aliases
+  task_id?: string
+  objective?: string
+  data_source?: string
+  target_metric_name?: string
+  obs_spec?: ObsSpec
+  action_spec?: ActionSpec
+  reward_spec?: RewardSpec
+  arena_spec?: ArenaSpec
+  interactive_spec?: InteractiveSpec
+}
+
+export interface ClarifyingQuestion {
+  pillar: string
+  question: string
+  suggested_options: string[]
+  default_option: string
+  question_id: string
+}
+
+export interface IntakeResponse {
+  status: 'needs_clarification' | 'ready_to_build'
+  assistant_message: string
+  message: string
+  questions: ClarifyingQuestion[]
+  clarifying_questions: ClarifyingQuestion[]
+  blueprint_spec?: AgentBlueprintSpec | null
+  blueprint?: AgentBlueprintSpec | null
 }
 
 export interface EpisodeLog {
   episode_id: number
-  steps: StepResult[]
   total_reward: number
-  breakdown: Record<string, number>
-  step_rewards: number[]
-  step_breakdowns: Record<string, number>[]
-  locked?: boolean
+  reward_breakdown: Record<string, number>
+  is_success: boolean
+  steps?: any[]
 }
 
-export interface TermDiff {
-  action: 'added' | 'modified' | 'removed'
-  term_name: string
-  old_term?: Record<string, any>
-  new_term?: Record<string, any>
-  rationale: string
+export interface RoundSnapshot {
+  round_num: number
+  metric: number
+  target_threshold: number
+  target_achieved: boolean
+  env_code_snapshot: string
+  diagnosis?: string | null
+  changes_summary?: string | null
+  avg_return?: number
+  term_rewards?: Record<string, number>
+  episodes?: EpisodeLog[]
 }
 
-export interface ConflictWarning {
-  term_name: string
-  message: string
-  severity: string
+export interface TuningResult {
+  round_num: number
+  diagnosis: string
+  changes_summary: string
+  updated_code: string
+  verified: boolean
 }
 
-export interface Stage1Preview {
-  target_episode_id: number
-  before_score: number
-  after_score: number
-  score_delta: number
-  recent_scores_before: number[]
-  recent_scores_after: number[]
-  summary: string
-}
-
-export interface Stage2Preview {
-  target_episode_id: number
-  target_action_before: string
-  target_action_after: string
-  target_flipped: boolean
-  total_episodes_evaluated: number
-  total_actions_flipped: number
-  flip_rate: number
-  locked_episodes_preserved: number
-  summary: string
-}
-
-export interface RewardDiffProposal {
-  new_dsl: RewardDSL
-  diff_yaml: string
-  term_diffs: TermDiff[]
-  rationale: Record<string, string>
-  conflicts: ConflictWarning[]
-  stage1_counterfactual_preview?: Stage1Preview
-  stage2_forked_behavior_preview?: Stage2Preview
-}
-
-export interface ExportResponse {
-  status: string
-  bundle_dir: string
-  zip_path: string
-  parity_max_diff: number
-  parity_passed: boolean
-}
-
-export interface VersionRecord {
-  version: number
-  timestamp: string
-  description?: string
-  critique_text?: string
-}
-
-export interface DriftReport {
-  is_drifted: boolean
-  max_psi: number
-  entropy_zscore: number
-  action_shift_zscore: number
-  recommendation: string
-  feature_psis?: Record<string, number>
-}
-
-export interface LLMSettings {
-  provider: 'mock' | 'deepseek' | 'openai' | 'anthropic' | 'ollama'
-  deepseekApiKey?: string
-  deepseekBaseUrl?: string
-  openaiApiKey: string
-  anthropicApiKey: string
-  ollamaBaseUrl: string
-  modelName: string
-}
-
-export interface BundleMetadata {
-  bundle_id: string
-  name: string
-  task_id: string
-  adapter_name: string
-  archive_type: 'dir' | 'zip'
-  bundle_path: string
-  created_at: string
-  onnx_size_bytes: number
-  dsl_terms_count: number
-  feature_count: number
-  baseline_quantiles_count: number
-  status: 'ready' | 'corrupt'
-  error_message?: string
-}
-
-export interface BundleDetails {
-  metadata: BundleMetadata
-  task_config: Record<string, any>
-  reward_dsl: Record<string, any>
-  drift_baseline: Record<string, any>
-  onnx_summary: Record<string, any>
-  has_run_local_daemon: boolean
-}
-
-// =============================================================================
-// Phase 3D: Vibe Studio Polymorphic Types
-// =============================================================================
-
-export interface PlainRuleCard {
-  id: string
-  title: string
-  description: string
-  importance: 'Must Do' | 'High Priority' | 'Bonus' | 'Avoid' | 'Strict Ban' | string
-  badge_variant: 'emerald' | 'blue' | 'indigo' | 'amber' | 'rose' | string
-  weight: number
-  expression: string
-  direction: 'reward' | 'penalty' | string
-  category: string
-  icon?: string
-}
-
-export interface SkillSummary {
-  mastery_score: number
-  status_badge: string
-  badge_variant: string
-  win_rate: number
-  total_episodes: number
-  key_insights: string[]
-}
-
-export interface VibeSessionData {
+export interface SessionState {
   session_id: string
-  task_id: string
-  adapter_name: string
-  ui_mode: 'board_grid' | 'robot_canvas' | 'document_reader' | 'tabular_inspector' | 'time_series' | 'ticket_card' | string
-  mastery_score: number
-  status_badge: string
-  win_rate: number
-  rules: PlainRuleCard[]
-  recent_episodes: EpisodeLog[]
-  latest_frame: Record<string, any>
-  coach_message: string
+  blueprint: AgentBlueprintSpec
+  dataset_id?: string | null
+  status: 'synthesized' | 'training' | 'completed' | 'error' | string
+  current_round: number
+  max_rounds: number
+  target_threshold: number
+  current_metric: number
+  drift_status?: 'healthy' | 'drifted' | string
+  env_module_code?: string
+  arena_html?: string
+  round_history?: RoundSnapshot[]
+  rounds_history?: RoundSnapshot[]
+  latest_frame?: Record<string, any>
+  total_episodes_trained?: number
 }
 
 export interface IngestedDatasetSummary {
   dataset_id: string
   name: string
   format: string
-  role: string
-  total_rows: number
+  source_type?: string
+  role?: string
   columns: string[]
-  column_types: Record<string, string>
-  sample_records: Record<string, any>[]
-  extracted_rules: any[]
-  profile_summary?: Record<string, any>
+  num_rows: number
+  extracted_rules_count?: number
 }
 
+export interface BundleMetadata {
+  bundle_id: string
+  name: string
+  task_id: string
+  adapter_name?: string
+  archive_type: 'dir' | 'zip' | string
+  bundle_path: string
+  created_at: string
+  onnx_size_bytes: number
+  dsl_terms_count?: number
+  feature_count?: number
+  status: 'ready' | 'corrupt' | string
+  error_message?: string
+}
 
+export interface LLMSettings {
+  provider: 'deepseek' | 'openai' | 'anthropic' | 'ollama' | 'fallback'
+  apiKey?: string
+  baseUrl?: string
+  modelName?: string
+}
 
+export interface ActivityTimelineItem {
+  id: string
+  type: 'synthesis' | 'smoke_test' | 'arena' | 'round' | 'auto_tune' | 'mastery' | 'nudge' | 'error' | 'info'
+  title: string
+  description: string
+  timestamp: string
+  status: 'pending' | 'success' | 'warning' | 'info'
+  data?: any
+}

@@ -1,195 +1,134 @@
 import React from 'react'
 import {
-  Cpu,
-  Download,
-  Settings,
-  RotateCcw,
-  Activity,
-  Layers,
-  Archive,
   Sparkles,
+  Settings,
+  Archive,
+  Download,
+  CheckCircle2,
+  AlertTriangle,
+  Zap,
 } from 'lucide-react'
+import { LLMSettings } from '../types'
 
 interface HeaderProps {
-  viewMode: 'vibe' | 'pro'
-  onViewModeChange: (mode: 'vibe' | 'pro') => void
-  adapter: string
-  onAdapterChange: (adapter: string) => void
-  currentVersion: number
-  availableVersions: number[]
-  onRollback: (version: number) => void
-  driftStatus: 'healthy' | 'drifted'
+  llmSettings: LLMSettings
   onOpenSettings: () => void
   onOpenRegistry: () => void
-  registryCount?: number
+  registryCount: number
   onExport: () => void
   isExporting: boolean
+  hasActivePolicy: boolean
+  driftStatus?: string
 }
 
 export const Header: React.FC<HeaderProps> = ({
-  viewMode,
-  onViewModeChange,
-  adapter,
-  onAdapterChange,
-  currentVersion,
-  availableVersions,
-  onRollback,
-  driftStatus,
+  llmSettings,
   onOpenSettings,
   onOpenRegistry,
-  registryCount = 0,
+  registryCount,
   onExport,
   isExporting,
+  hasActivePolicy,
+  driftStatus = 'healthy',
 }) => {
-  return (
-    <header className="h-14 border-b border-panel-border bg-panel px-4 flex items-center justify-between">
-      {/* Brand & Mode Switch */}
-      <div className="flex items-center space-x-4">
-        <div className="flex items-center space-x-3">
-          <div className="h-8 w-8 rounded-lg bg-gradient-to-tr from-purple-600 via-indigo-600 to-blue-500 flex items-center justify-center shadow-lg shadow-purple-500/20">
-            <Sparkles className="h-4 w-4 text-white" />
-          </div>
-          <div>
-            <span className="font-bold text-sm tracking-wide bg-gradient-to-r from-gray-100 to-gray-400 bg-clip-text text-transparent">
-              RL-NATIVE AGENT IDE
-            </span>
-            <span className="ml-2 text-xs text-purple-400 font-mono px-1.5 py-0.5 rounded bg-purple-950/60 border border-purple-800/40">
-              v3.0 Vibe Studio
-            </span>
-          </div>
-        </div>
+  const getProviderLabel = () => {
+    switch (llmSettings.provider) {
+      case 'deepseek':
+        return { name: 'DeepSeek V3 / R1', color: 'bg-blue-950/80 text-blue-400 border-blue-800/60' }
+      case 'anthropic':
+        return { name: 'Claude 3.7 Sonnet', color: 'bg-amber-950/80 text-amber-400 border-amber-800/60' }
+      case 'openai':
+        return { name: 'GPT-4o', color: 'bg-emerald-950/80 text-emerald-400 border-emerald-800/60' }
+      case 'ollama':
+        return { name: 'Ollama (Local)', color: 'bg-purple-950/80 text-purple-400 border-purple-800/60' }
+      case 'fallback':
+      default:
+        return { name: 'Offline Synthesizer', color: 'bg-gray-800 text-gray-300 border-gray-700' }
+    }
+  }
 
-        {/* Mode Switch: Vibe Studio (Default) | Pro RL Workbench */}
-        <div className="flex items-center bg-gray-900 border border-gray-800 rounded-xl p-0.5 text-xs shadow-inner">
-          <button
-            onClick={() => onViewModeChange('vibe')}
-            className={`px-3 py-1.5 rounded-lg font-semibold flex items-center space-x-1.5 transition ${
-              viewMode === 'vibe'
-                ? 'bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow-md shadow-purple-950/50'
-                : 'text-gray-400 hover:text-gray-200'
-            }`}
-          >
-            <Sparkles className="h-3.5 w-3.5" />
-            <span>✨ Vibe Studio</span>
-          </button>
-          <button
-            onClick={() => onViewModeChange('pro')}
-            className={`px-3 py-1.5 rounded-lg font-semibold flex items-center space-x-1.5 transition ${
-              viewMode === 'pro'
-                ? 'bg-gray-800 text-white shadow-md'
-                : 'text-gray-400 hover:text-gray-200'
-            }`}
-          >
-            <Cpu className="h-3.5 w-3.5" />
-            <span>🛠️ Pro RL Workbench</span>
-          </button>
+  const provider = getProviderLabel()
+
+  return (
+    <header className="h-14 border-b border-gray-800 bg-gray-950/95 backdrop-blur px-4 flex items-center justify-between z-20">
+      {/* Brand & Subtitle */}
+      <div className="flex items-center space-x-3">
+        <div className="h-9 w-9 rounded-xl bg-gradient-to-tr from-cyan-500 via-indigo-600 to-fuchsia-500 flex items-center justify-center shadow-lg shadow-indigo-500/25 ring-1 ring-white/10">
+          <Zap className="h-5 w-5 text-white" />
+        </div>
+        <div>
+          <div className="flex items-center space-x-2">
+            <span className="font-extrabold text-sm tracking-wide bg-gradient-to-r from-white via-gray-200 to-gray-400 bg-clip-text text-transparent">
+              RL-NATIVE AGENT STUDIO
+            </span>
+            <span className="text-[11px] font-mono font-bold px-2 py-0.5 rounded-full bg-gradient-to-r from-indigo-500/20 to-purple-500/20 border border-indigo-500/30 text-indigo-300">
+              v4.0 Autonomous JIT
+            </span>
+          </div>
+          <div className="text-[11px] text-gray-400">
+            Zero-Adapter Code Synthesis • Custom Arenas • Autonomous Self-Tuning
+          </div>
         </div>
       </div>
 
-      {/* Controls */}
+      {/* Center / Right Control Cluster */}
       <div className="flex items-center space-x-3">
-        {/* Adapter Selector */}
-        <div className="flex items-center space-x-2 bg-gray-900/80 border border-gray-800 rounded-lg px-2.5 py-1 text-xs">
-          <Layers className="h-3.5 w-3.5 text-gray-400" />
-          <span className="text-gray-400 font-medium">Adapter:</span>
-          <select
-            value={adapter}
-            onChange={(e) => onAdapterChange(e.target.value)}
-            className="bg-transparent text-gray-200 font-semibold focus:outline-none cursor-pointer"
-          >
-            <option value="DynamicSimAdapter" className="bg-gray-900">
-              Dynamic Sim (Tic-Tac-Toe & Robotics)
-            </option>
-            <option value="AutoDataAdapter" className="bg-gray-900">
-              Auto Data (Universal SQL / Docs)
-            </option>
-            <option value="CSVStreamAdapter" className="bg-gray-900">
-              CSV Stream (Time-Series Anomaly)
-            </option>
-            <option value="TextClassifyAdapter" className="bg-gray-900">
-              Text Triage (Support / Spam)
-            </option>
-          </select>
-        </div>
-
-        {/* Version Badge & Rollback */}
-        <div className="flex items-center space-x-1.5 bg-gray-900/80 border border-gray-800 rounded-lg px-2.5 py-1 text-xs">
-          <span className="text-gray-400 font-medium">Version:</span>
-          <span className="text-emerald-400 font-mono font-bold">
-            v{currentVersion}
-          </span>
-          {availableVersions.length > 1 && (
-            <div className="relative group ml-1">
-              <button
-                title="Rollback version"
-                className="hover:text-blue-400 text-gray-400 p-0.5"
-              >
-                <RotateCcw className="h-3 w-3" />
-              </button>
-              <div className="absolute right-0 top-full mt-1 hidden group-hover:flex flex-col bg-gray-900 border border-gray-800 rounded shadow-xl py-1 z-50 w-28">
-                <span className="px-2 py-0.5 text-[10px] text-gray-500 uppercase font-bold">
-                  Rollback to:
-                </span>
-                {availableVersions
-                  .filter((v) => v !== currentVersion)
-                  .map((v) => (
-                    <button
-                      key={v}
-                      onClick={() => onRollback(v)}
-                      className="px-2 py-1 text-left hover:bg-gray-800 text-xs text-gray-300 font-mono"
-                    >
-                      v{v}
-                    </button>
-                  ))}
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* Model Drift Monitor Badge */}
+        {/* Drift Status Indicator */}
         <div
-          className={`flex items-center space-x-1.5 px-2.5 py-1 rounded-lg border text-xs font-semibold ${
+          className={`flex items-center space-x-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border ${
             driftStatus === 'healthy'
-              ? 'bg-emerald-950/60 border-emerald-800/50 text-emerald-400'
-              : 'bg-rose-950/60 border-rose-800/50 text-rose-400'
+              ? 'bg-emerald-950/40 border-emerald-800/50 text-emerald-400'
+              : 'bg-amber-950/40 border-amber-800/50 text-amber-400'
           }`}
+          title={driftStatus === 'healthy' ? 'Drift monitor: policy aligned' : 'Drift detected: re-tuning suggested'}
         >
-          <Activity className="h-3.5 w-3.5" />
-          <span>{driftStatus === 'healthy' ? 'Drift: None' : 'Drift Alert'}</span>
+          {driftStatus === 'healthy' ? (
+            <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
+          ) : (
+            <AlertTriangle className="h-3.5 w-3.5 text-amber-400" />
+          )}
+          <span className="capitalize font-mono">{driftStatus}</span>
         </div>
 
-        {/* RunBundle Policy Registry Catalog Button */}
+        {/* LLM Engine Badge + Settings Button */}
+        <button
+          onClick={onOpenSettings}
+          className={`flex items-center space-x-1.5 px-3 py-1 rounded-lg text-xs font-semibold border transition hover:opacity-90 ${provider.color}`}
+          title="Click to configure LLM provider & API keys"
+        >
+          <Sparkles className="h-3.5 w-3.5" />
+          <span>{provider.name}</span>
+          <Settings className="h-3.5 w-3.5 ml-1 opacity-70" />
+        </button>
+
+        {/* Policy Registry Button */}
         <button
           onClick={onOpenRegistry}
-          title="Open RunBundle Catalog"
-          className="flex items-center space-x-1.5 bg-gray-900/80 hover:bg-gray-800 border border-gray-800 rounded-lg px-2.5 py-1 text-xs text-gray-300 font-medium transition cursor-pointer"
+          className="flex items-center space-x-1.5 px-3 py-1 rounded-lg bg-gray-900 border border-gray-700 hover:border-gray-600 text-gray-200 text-xs font-medium transition"
+          title="Open Catalog of Packaged .runbundle Policies"
         >
-          <Archive className="h-3.5 w-3.5 text-blue-400" />
-          <span>Bundles</span>
+          <Archive className="h-3.5 w-3.5 text-gray-400" />
+          <span>Policy Registry</span>
           {registryCount > 0 && (
-            <span className="px-1.5 py-0.2 rounded-full bg-blue-950 border border-blue-800 text-blue-300 font-mono text-[10px] font-bold">
+            <span className="px-1.5 py-0.2 rounded-full bg-indigo-900/80 border border-indigo-700/60 text-indigo-300 text-[10px] font-mono">
               {registryCount}
             </span>
           )}
         </button>
 
-        {/* BYOK Settings Modal Button */}
-        <button
-          onClick={onOpenSettings}
-          title="Configure BYOK LLM Provider"
-          className="p-1.5 bg-gray-900/80 hover:bg-gray-800 border border-gray-800 rounded-lg text-gray-400 hover:text-gray-200 transition cursor-pointer"
-        >
-          <Settings className="h-4 w-4" />
-        </button>
-
-        {/* Export .runbundle Button */}
+        {/* Export Owned Policy (.onnx) CTA Button */}
         <button
           onClick={onExport}
-          disabled={isExporting}
-          className="flex items-center space-x-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg px-3 py-1 text-xs font-semibold shadow-lg shadow-blue-600/20 transition cursor-pointer disabled:opacity-50"
+          disabled={isExporting || !hasActivePolicy}
+          className={`flex items-center space-x-2 px-3.5 py-1.5 rounded-lg text-xs font-bold transition shadow-md ${
+            hasActivePolicy
+              ? 'bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white shadow-emerald-950/40 ring-1 ring-emerald-400/30'
+              : 'bg-gray-800 text-gray-500 border border-gray-700 cursor-not-allowed opacity-60'
+          }`}
+          title={hasActivePolicy ? 'Package policy to standalone ONNX .runbundle' : 'Train an agent first to export'}
         >
-          <Download className="h-3.5 w-3.5" />
-          <span>{isExporting ? 'Exporting...' : 'Export Bundle'}</span>
+          <Download className={`h-4 w-4 ${isExporting ? 'animate-bounce' : ''}`} />
+          <span>{isExporting ? 'Packaging .runbundle...' : 'Export Owned Policy (.onnx)'}</span>
         </button>
       </div>
     </header>

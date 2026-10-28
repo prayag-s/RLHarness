@@ -49,6 +49,7 @@ yarn-error.log*
 
 # Local Runtime Data & Checkpoints
 runs/
+workspaces/
 exported_bundles/
 *.onnx.data
 deepseek_text_*.txt

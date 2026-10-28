@@ -135,10 +135,45 @@ def list_sql_tables(uri: str) -> list[str]:
         connector.close()
 
 
-def load_sql_dataset(uri: str, query_or_table: str, limit: int = 2000) -> pd.DataFrame:
-    """Helper to execute a read-only query and return a pandas DataFrame."""
-    connector = SQLConnector(uri)
+def load_sql_dataset(
+    uri: str | None = None,
+    query_or_table: str | None = None,
+    limit: int = 2000,
+    *,
+    connection_uri: str | None = None,
+    query: str | None = None,
+    name: str = "sql_dataset",
+) -> Any:
+    """Helper to execute a read-only query and return an IngestedDataset."""
+    resolved_uri = connection_uri or uri
+    resolved_query = query or query_or_table
+    if not resolved_uri:
+        raise ValueError("Database connection URI must be provided.")
+    if not resolved_query:
+        raise ValueError("SQL query or table name must be provided.")
+
+    connector = SQLConnector(resolved_uri)
     try:
-        return connector.load_dataset(query_or_table, limit=limit)
+        df = connector.load_dataset(resolved_query, limit=limit)
     finally:
         connector.close()
+
+    from rl_ide.ingest.profiler import SchemaProfiler
+    from rl_ide.ingest.loader import IngestedDataset
+
+    profiler = SchemaProfiler()
+    profile = profiler.profile(df)
+
+    return IngestedDataset(
+        name=name,
+        source_type="sql",
+        format="sql",
+        df=df,
+        profile=profile,
+        role="tabular",
+        metadata={
+            "connection_uri": resolved_uri,
+            "query": resolved_query,
+            "num_rows": len(df),
+        },
+    )

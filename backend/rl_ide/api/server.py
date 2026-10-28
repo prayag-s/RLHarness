@@ -1,642 +1,454 @@
-"""FastAPI Application and WebSocket Telemetry Server."""
+"""Clean v4.0 FastAPI Server for RL-Native Agent IDE.
+
+Provides REST and WebSocket endpoints for Conversational Architect intake,
+JIT code synthesis, live training streaming, sandboxed arena interaction,
+mid-flight feedback nudges, and ONNX .runbundle packaging.
+"""
 
 from __future__ import annotations
 import asyncio
-import math
+import json
 import os
-import tempfile
 from pathlib import Path
 from typing import Any
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, File, UploadFile, Form
+import numpy as np
+import torch
+from fastapi import FastAPI, File, UploadFile, WebSocket, WebSocketDisconnect, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, FileResponse
 from pydantic import BaseModel, Field
 
-from rl_ide.contracts.adapter import EpisodeLog
-from rl_ide.adapters.stream_adapter import CSVStreamAdapter
-from rl_ide.adapters.dynamic_sim_adapter import DynamicSimAdapter
-from rl_ide.adapters.auto_data_adapter import AutoDataAdapter
-from rl_ide.compiler.models import TaskConfig, RewardDiffProposal
-from rl_ide.compiler.nl_to_config import NLToConfigCompiler, ADAPTER_REGISTRY
-from rl_ide.compiler.critique_engine import CritiqueEngine
-from rl_ide.compiler.llm_client import LLMConfig, validate_connection, create_llm_client
-from rl_ide.reward.dsl import RewardDSL
-from rl_ide.state.store import TaskStateStore
-from rl_ide.trainer.runner import TrainingRunner
+from rl_ide.architect.models import AgentBlueprintSpec, IntakeResponse
+from rl_ide.architect.intake import IntakeArchitectAgent
+from rl_ide.autopilot.loop_controller import (
+    AutonomousLoopController,
+    SessionStateStore,
+    SessionState,
+    RoundSnapshot,
+)
+from rl_ide.autopilot.auto_tuner import TuningResult
 from rl_ide.export.exporter import PolicyExporter
 from rl_ide.export.registry import RunBundleRegistry, BundleMetadata, BundleDetails
-from rl_ide.ingest.loader import load_file, IngestedDataset
-from rl_ide.ingest.profiler import SchemaProfiler
-from rl_ide.ingest.sql_connector import validate_read_only_sql, load_sql_dataset
-from rl_ide.vibe.orchestrator import (
-    VibeOrchestrator,
-    VibeSessionResponse,
-    VibeCoachResponse,
-    compute_skill_summary,
+from rl_ide.ingest.loader import IngestedDataset, load_bytes
+from rl_ide.ingest.sql_connector import test_sql_connection, load_sql_dataset
+from rl_ide.llm.client import LLMConfig, validate_llm_connection, create_llm_client
+from rl_ide.synthesizer.env_builder import JITEnvironmentSynthesizer, load_synthesized_env_class
+from rl_ide.synthesizer.verifier import SandboxSmokeTester
+from rl_ide.synthesizer.arena_builder import JITArenaSynthesizer
+
+app = FastAPI(
+    title="RL-Native Agent Studio v4.0 API",
+    description="Autonomous JIT Agent Synthesis, Conversational Architect & Closed-Loop Training",
+    version="4.0.0",
 )
-from rl_ide.vibe.translator import dsl_to_plain_rules
-
-
-class ValidateSettingsRequest(BaseModel):
-    llm_config: LLMConfig
-
-
-class CompileTaskRequest(BaseModel):
-    prompt: str
-    adapter_name: str = "CSVStreamAdapter"
-    task_id: str | None = None
-    llm_config: LLMConfig | None = None
-
-
-class TrainBurstRequest(BaseModel):
-    task_id: str = "default_task"
-    n_episodes: int = 10
-
-
-class CritiquePreviewRequest(BaseModel):
-    task_id: str = "default_task"
-    target_episode_id: int
-    critique_text: str
-    llm_config: LLMConfig | None = None
-
-
-class CritiqueApplyRequest(BaseModel):
-    task_id: str = "default_task"
-    new_dsl: dict[str, Any]
-    critique_text: str | None = None
-    run_burst_after: bool = False
-    burst_episodes: int = 10
-
-
-class RollbackRequest(BaseModel):
-    task_id: str = "default_task"
-    target_version: int
-
-
-class ExportRequest(BaseModel):
-    task_id: str = "default_task"
-    output_dir: str = "exported_bundles"
-
-
-class ImportBundleRequest(BaseModel):
-    bundle_path: str
-    load_active: bool = False
-
-
-class SQLIngestRequest(BaseModel):
-    connection_uri: str
-    query_or_table: str
-    limit: int = 2000
-
-
-class VibeCreateRequest(BaseModel):
-    prompt: str
-    dataset_id: str | None = None
-    task_id: str | None = None
-    llm_config: LLMConfig | None = None
-    burst_episodes: int = 25
-
-
-class VibeCoachRequest(BaseModel):
-    session_id: str
-    critique_text: str | None = None
-    feedback_type: str | None = None  # "thumbs_up" | "thumbs_down" | "text" | "rule_boost" | "rule_reduce"
-    target_episode_id: int | None = None
-    burst_episodes: int = 20
-    term_name: str | None = None
-    new_importance: str | None = None
-    llm_config: LLMConfig | None = None
-
-
-class SimInteractRequest(BaseModel):
-    session_id: str | None = None
-    adapter_name: str | None = None
-    board_state: list[int] | None = None
-    human_cell_idx: int | None = None
-    robot_state: dict[str, float] | None = None
-    target_xy: tuple[float, float] | list[float] | None = None
-    obstacles_list: list[dict[str, float]] | None = None
-    n_frames: int = 4
-
-
-class AppState:
-    def __init__(self):
-        self.state_store = TaskStateStore(base_dir="runs")
-        self.compiler = NLToConfigCompiler()
-        self.registry = RunBundleRegistry()
-        self.vibe_orchestrator = VibeOrchestrator(compiler=self.compiler)
-        self.dataset_registry: dict[str, IngestedDataset] = {}
-        self.runner: TrainingRunner | None = None
-        self.active_task_config: TaskConfig | None = None
-        self.locked_episodes: set[int] = set()
-        self.active_websockets: list[WebSocket] = []
-
-    async def broadcast(self, message: dict[str, Any]) -> None:
-        disconnected: list[WebSocket] = []
-        for ws in self.active_websockets:
-            try:
-                await ws.send_json(message)
-            except Exception:
-                disconnected.append(ws)
-        for ws in disconnected:
-            if ws in self.active_websockets:
-                self.active_websockets.remove(ws)
-
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="RL-Native Agent IDE Backend", version="2.0.0")
+    """Returns the FastAPI application instance."""
+    return app
 
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+app.add_middleware(
+    CORSMiddleware,
+    allow_origin_regex=r".*",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-    state = AppState()
-    app.state.app_state = state
+# Global State
+global_store = SessionStateStore()
+global_controller = AutonomousLoopController(global_store)
+global_registry = RunBundleRegistry()
+ingested_datasets_store: dict[str, IngestedDataset] = {}
 
-    @app.get("/api/adapters")
-    def get_adapters():
-        """Lists registered adapters, event schemas, observation and action specifications."""
-        adapters_data = []
-        for name, cls in ADAPTER_REGISTRY.items():
-            instance = cls()
-            adapters_data.append({
-                "name": name,
-                "event_schema": instance.event_schema(),
-                "observations": instance.observations().model_dump(),
-                "actions": instance.actions().model_dump(),
-            })
-        return {"adapters": adapters_data}
 
-    @app.post("/api/settings/validate")
-    def validate_llm_settings(req: ValidateSettingsRequest):
-        """Validates BYOK provider connectivity and API credentials."""
-        valid, message = validate_connection(req.llm_config)
-        return {"valid": valid, "message": message, "provider": req.llm_config.provider}
+# WebSocket Connection Manager
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: dict[str, list[WebSocket]] = {}
 
-    @app.post("/api/tasks/compile")
-    def compile_task(req: CompileTaskRequest):
-        """Compiles user prose into validated TaskConfig, warms up policy, and stores v1 snapshot."""
-        task_id = req.task_id or f"task_{req.adapter_name.lower()}"
-        adapter_cls = ADAPTER_REGISTRY.get(req.adapter_name)
-        if not adapter_cls:
-            raise HTTPException(status_code=400, detail=f"Unknown adapter {req.adapter_name}")
+    async def connect(self, session_id: str, websocket: WebSocket):
+        await websocket.accept()
+        if session_id not in self.active_connections:
+            self.active_connections[session_id] = []
+        self.active_connections[session_id].append(websocket)
 
-        adapter = adapter_cls()
+    def disconnect(self, session_id: str, websocket: WebSocket):
+        if session_id in self.active_connections:
+            if websocket in self.active_connections[session_id]:
+                self.active_connections[session_id].remove(websocket)
 
-        # Support user BYOK compiler client
-        compiler = state.compiler
-        if req.llm_config:
-            compiler = NLToConfigCompiler(llm_client=create_llm_client(req.llm_config))
-
-        task_config = compiler.compile(
-            user_prompt=req.prompt,
-            adapter_name=req.adapter_name,
-            adapter=adapter,
-            task_id=task_id,
-        )
-
-        # Initialize runner & execute warm-start pass
-        runner = TrainingRunner(
-            adapter=adapter,
-            reward_dsl=task_config.reward_dsl,
-            state_store=state.state_store,
-            task_id=task_id,
-            hyperparameters=task_config.hyperparameters,
-        )
-        warmstart_metrics = runner.warmstart_policy(epochs=12, n_samples=100)
-
-        # Save v1
-        v1 = state.state_store.save_version(
-            task_id=task_id,
-            task_config=task_config,
-            reward_dsl=task_config.reward_dsl,
-            applied_critique="Initial compilation from natural language",
-        )
-
-        state.runner = runner
-        state.active_task_config = task_config
-
-        return {
-            "status": "compiled",
-            "task_id": task_id,
-            "version": v1.version,
-            "version_tag": v1.version_tag,
-            "task_config": task_config.model_dump(),
-            "warmstart_metrics": warmstart_metrics,
-        }
-
-    @app.post("/api/train/burst")
-    async def train_burst(req: TrainBurstRequest):
-        """Runs a training micro-burst, streaming episode metrics and frames."""
-        if not state.runner:
-            raise HTTPException(status_code=400, detail="No active training task. Compile a task first.")
-
-        loop = asyncio.get_event_loop()
-
-        def _on_episode(ep_log: EpisodeLog):
-            msg = {
-                "type": "episode",
-                "episode_id": ep_log.episode_id,
-                "total_reward": ep_log.total_reward,
-                "breakdown": ep_log.breakdown,
-                "steps_count": len(ep_log.steps),
-                "last_step": ep_log.steps[-1].events if ep_log.steps else {},
-            }
-            asyncio.run_coroutine_threadsafe(state.broadcast(msg), loop)
-
-        episodes = state.runner.run_burst(
-            n_episodes=req.n_episodes,
-            on_episode_callback=_on_episode,
-        )
-
-        return {
-            "status": "burst_completed",
-            "episodes_count": len(episodes),
-            "episodes": [ep.model_dump() for ep in episodes],
-        }
-
-    @app.post("/api/episodes/{ep_id}/lock")
-    def toggle_lock_episode(ep_id: int):
-        """Locks or unlocks a golden episode to protect against behavioral regressions."""
-        if ep_id in state.locked_episodes:
-            state.locked_episodes.remove(ep_id)
-            is_locked = False
-        else:
-            state.locked_episodes.add(ep_id)
-            is_locked = True
-        return {
-            "episode_id": ep_id,
-            "locked": is_locked,
-            "locked_episodes": sorted(list(state.locked_episodes)),
-        }
-
-    @app.post("/api/critique/preview")
-    def preview_critique(req: CritiquePreviewRequest):
-        """Evaluates critique and runs Stage 1 (counterfactual) and Stage 2 (speculative) previews."""
-        if not state.runner:
-            raise HTTPException(status_code=400, detail="No active runner.")
-
-        target_ep = state.runner.buffer.get_by_id(req.target_episode_id)
-        if not target_ep:
-            recent = state.runner.buffer.get_recent(1)
-            target_ep = recent[0] if recent else None
-
-        if not target_ep:
-            raise HTTPException(status_code=404, detail=f"Episode #{req.target_episode_id} not found in buffer")
-
-        llm_client = create_llm_client(req.llm_config) if req.llm_config else None
-        engine = CritiqueEngine(
-            schema=state.runner.adapter.event_schema(),
-            action_labels=state.runner.adapter.actions().labels,
-            llm_client=llm_client,
-        )
-
-        proposal = engine.propose_diff(
-            current_dsl=state.runner.reward_dsl,
-            target_episode=target_ep,
-            recent_episodes=state.runner.buffer.get_recent(20),
-            locked_episodes=list(state.locked_episodes),
-            critique_text=req.critique_text,
-            policy=state.runner.model,
-        )
-
-        return proposal.model_dump()
-
-    @app.post("/api/critique/apply")
-    def apply_critique(req: CritiqueApplyRequest):
-        """Applies validated diff, updates state store, and performs Critic Warmup."""
-        if not state.runner:
-            raise HTTPException(status_code=400, detail="No active runner.")
-
-        new_dsl = RewardDSL.from_dict(req.new_dsl)
-        version_snap = state.runner.apply_reward_diff(
-            new_dsl=new_dsl,
-            critique_text=req.critique_text,
-        )
-
-        burst_episodes: list[EpisodeLog] = []
-        if req.run_burst_after:
-            burst_episodes = state.runner.run_burst(n_episodes=req.burst_episodes)
-
-        return {
-            "status": "applied",
-            "version": version_snap.version if version_snap else None,
-            "version_tag": version_snap.version_tag if version_snap else "updated",
-            "episodes_after": len(burst_episodes),
-        }
-
-    @app.post("/api/tasks/rollback")
-    def rollback_task(req: RollbackRequest):
-        """Reverts active task configuration and weights to a prior version."""
-        restored = state.state_store.rollback(
-            task_id=req.task_id,
-            target_version=req.target_version,
-        )
-
-        # Re-initialize runner with restored configuration
-        if state.runner:
-            state.runner.reward_dsl = restored.reward_dsl
-            state.runner.evaluator = state.runner.gym_env.evaluator = None
-            from rl_ide.reward.evaluator import RewardEvaluator
-            new_ev = RewardEvaluator(restored.reward_dsl, state.runner.adapter.event_schema())
-            state.runner.evaluator = new_ev
-            state.runner.gym_env.set_evaluator(new_ev)
-
-        return {
-            "status": "rolled_back",
-            "restored_version": req.target_version,
-            "new_version_tag": restored.version_tag,
-        }
-
-    @app.post("/api/export")
-    def export_policy(req: ExportRequest):
-        """Exports standalone ONNX bundle with parity check and drift baseline."""
-        if not state.runner or not state.active_task_config:
-            raise HTTPException(status_code=400, detail="No policy available for export.")
-
-        bundle_dir, zip_path, max_diff = PolicyExporter.create_runbundle(
-            task_config=state.active_task_config,
-            reward_dsl=state.runner.reward_dsl,
-            model=state.runner.model,
-            episodes=state.runner.buffer.all(),
-            output_dir=req.output_dir,
-            bundle_name=req.task_id,
-        )
-
-        return {
-            "status": "exported",
-            "bundle_dir": str(bundle_dir),
-            "zip_path": str(zip_path),
-            "parity_max_diff": max_diff,
-            "parity_passed": (max_diff < 1e-5),
-        }
-
-    # RunBundle Policy Registry Endpoints
-    @app.get("/api/bundles")
-    def list_bundles():
-        """Lists all exported and registered runbundles available across teams."""
-        bundles = state.registry.list_bundles()
-        return {"bundles": [b.model_dump() for b in bundles]}
-
-    @app.get("/api/bundles/{bundle_id}")
-    def get_bundle_details(bundle_id: str):
-        """Retrieves full configuration, ONNX details, and drift baseline for a specific bundle."""
-        try:
-            details = state.registry.get_bundle(bundle_id)
-            return details.model_dump()
-        except FileNotFoundError:
-            raise HTTPException(status_code=404, detail=f"Bundle '{bundle_id}' not found.")
-
-    @app.post("/api/bundles/import")
-    def import_bundle(req: ImportBundleRequest):
-        """Imports an external bundle archive into the registry and optionally activates it."""
-        try:
-            installed_dir, task_config = state.registry.import_bundle(req.bundle_path)
-            
-            if req.load_active:
-                adapter_cls = ADAPTER_REGISTRY.get(task_config.adapter_name)
-                if not adapter_cls:
-                    raise HTTPException(status_code=400, detail=f"Unknown adapter '{task_config.adapter_name}' in bundle.")
-                adapter = adapter_cls()
-                runner = TrainingRunner(
-                    adapter=adapter,
-                    reward_dsl=task_config.reward_dsl,
-                    state_store=state.state_store,
-                    task_id=task_config.task_id,
-                    hyperparameters=task_config.hyperparameters,
-                )
-                runner.warmstart_policy(epochs=5, n_samples=50)
-                state.runner = runner
-                state.active_task_config = task_config
-
-            return {
-                "status": "imported",
-                "bundle_dir": str(installed_dir),
-                "task_config": task_config.model_dump(),
-                "is_active": req.load_active,
-            }
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Import failed: {str(e)}")
-
-    @app.delete("/api/bundles/{bundle_id}")
-    def delete_bundle(bundle_id: str):
-        """Deletes a bundle from the registry."""
-        success = state.registry.delete_bundle(bundle_id)
-        if not success:
-            raise HTTPException(status_code=404, detail=f"Bundle '{bundle_id}' not found.")
-        return {"status": "deleted", "bundle_id": bundle_id}
-
-    # ==========================================================================
-    # Phase 3C: Universal Ingestion & Vibe Autopilot Endpoints
-    # ==========================================================================
-
-    @app.post("/api/ingest/upload")
-    async def ingest_upload(
-        file: UploadFile = File(...),
-        role: str = Form("tabular"),
-        target_col: str | None = Form(None),
-    ):
-        """Universal file uploader for .csv, .xlsx, .json, .sqlite, .pdf, .docx, .txt, .md."""
-        filename = file.filename or "uploaded_dataset"
-        contents = await file.read()
-
-        suffix = os.path.splitext(filename)[1]
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-            tmp.write(contents)
-            tmp_path = Path(tmp.name)
-
-        try:
-            dataset = load_file(
-                tmp_path,
-                filename=filename,
-                role=role,
-                target_col=target_col,
-            )
-            state.dataset_registry[dataset.dataset_id] = dataset
-
-            sample_records = dataset.df.head(10).to_dict(orient="records")
-            for row in sample_records:
-                for k, v in row.items():
-                    if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
-                        row[k] = None
-
-            cols = list(dataset.df.columns)
-            col_types = {col: str(dataset.df[col].dtype) for col in cols}
-            if dataset.profile:
-                for col_name, c_type in dataset.profile.column_types.items():
-                    col_types[col_name] = c_type
-
-            extracted_rules_summary = [r.model_dump() for r in dataset.extracted_rules]
-
-            return {
-                "dataset_id": dataset.dataset_id,
-                "name": dataset.name,
-                "format": dataset.format,
-                "role": dataset.role,
-                "total_rows": len(dataset.df),
-                "columns": cols,
-                "column_types": col_types,
-                "sample_records": sample_records,
-                "extracted_rules": extracted_rules_summary,
-                "profile_summary": dataset.profile.model_dump() if dataset.profile else None,
-            }
-        finally:
-            if tmp_path.exists():
+    async def broadcast(self, session_id: str, message: dict[str, Any]):
+        if session_id in self.active_connections:
+            dead_sockets = []
+            for connection in self.active_connections[session_id]:
                 try:
-                    os.unlink(tmp_path)
+                    await connection.send_json(message)
                 except Exception:
-                    pass
+                    dead_sockets.append(connection)
+            for dead in dead_sockets:
+                self.disconnect(session_id, dead)
 
-    @app.post("/api/ingest/sql")
-    def ingest_sql(req: SQLIngestRequest):
-        """Connects to live SQL DB, enforces read-only query guardrails, and loads rows."""
-        try:
-            if req.query_or_table.strip().upper().startswith(("SELECT", "WITH")) or " " in req.query_or_table.strip():
-                validate_read_only_sql(req.query_or_table)
-        except ValueError as ve:
-            raise HTTPException(status_code=400, detail=str(ve))
 
-        try:
-            df = load_sql_dataset(req.connection_uri, req.query_or_table, limit=req.limit)
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Database query failed: {str(e)}")
+manager = ConnectionManager()
 
-        profiler = SchemaProfiler()
-        profile = profiler.profile(df)
 
-        dataset = IngestedDataset(
-            name=req.query_or_table if not req.query_or_table.strip().upper().startswith("SELECT") else "sql_query_result",
-            source_type="sql",
-            format="sql",
-            df=df,
-            profile=profile,
-            role="tabular",
-            metadata={"connection_uri": req.connection_uri, "query": req.query_or_table},
+# -----------------------------------------------------------------------------
+# 1. Ingestion Endpoints
+# -----------------------------------------------------------------------------
+
+@app.post("/api/v4/ingest/upload")
+async def upload_file(
+    file: UploadFile = File(...),
+    role: str = "tabular",
+):
+    """Universal file ingestion (.csv, .xlsx, .pdf, .docx, .json, .txt)."""
+    try:
+        content = await file.read()
+        dataset = load_bytes(
+            filename=file.filename or "uploaded_data.csv",
+            content=content,
+            role=role,
         )
-        state.dataset_registry[dataset.dataset_id] = dataset
-
-        sample_records = df.head(10).to_dict(orient="records")
-        for row in sample_records:
-            for k, v in row.items():
-                if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
-                    row[k] = None
+        ingested_datasets_store[dataset.dataset_id] = dataset
 
         return {
             "dataset_id": dataset.dataset_id,
             "name": dataset.name,
             "format": dataset.format,
+            "source_type": dataset.source_type,
             "role": dataset.role,
-            "total_rows": len(df),
-            "columns": list(df.columns),
-            "column_types": profile.column_types,
-            "sample_records": sample_records,
-            "extracted_rules": [],
-            "profile_summary": profile.model_dump(),
+            "columns": list(dataset.df.columns) if hasattr(dataset, "df") and dataset.df is not None else [],
+            "num_rows": len(dataset.df) if hasattr(dataset, "df") and dataset.df is not None else 0,
+            "extracted_rules_count": len(dataset.extracted_rules),
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+class SQLIngestRequest(BaseModel):
+    connection_uri: str
+    query: str
+    name: str = "sql_dataset"
+
+
+@app.post("/api/v4/ingest/sql")
+def ingest_sql(req: SQLIngestRequest):
+    """Ingests read-only query results from live SQLite / PostgreSQL / MySQL."""
+    try:
+        dataset = load_sql_dataset(
+            connection_uri=req.connection_uri,
+            query=req.query,
+            name=req.name,
+        )
+        ingested_datasets_store[dataset.dataset_id] = dataset
+
+        return {
+            "dataset_id": dataset.dataset_id,
+            "name": dataset.name,
+            "format": dataset.format,
+            "columns": list(dataset.df.columns),
+            "num_rows": len(dataset.df),
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+# -----------------------------------------------------------------------------
+# 2. Conversational Intake Architect Endpoints
+# -----------------------------------------------------------------------------
+
+class ArchitectChatRequest(BaseModel):
+    user_prompt: str
+    dataset_id: str | None = None
+    user_answers: dict[str, str] = Field(default_factory=dict)
+    force_smart_defaults: bool = False
+    conversation_history: list[dict[str, str]] = Field(default_factory=list)
+
+
+@app.post("/api/v4/architect/chat", response_model=IntakeResponse)
+def architect_chat(req: ArchitectChatRequest):
+    """Conversational Intake interview evaluating user intent across the 5 Pillars."""
+    dataset = ingested_datasets_store.get(req.dataset_id) if req.dataset_id else None
+    architect = IntakeArchitectAgent()
+    resp = architect.interview(
+        user_prompt=req.user_prompt,
+        dataset=dataset,
+        user_answers=req.user_answers,
+        force_smart_defaults=req.force_smart_defaults,
+        conversation_history=req.conversation_history,
+    )
+    return resp
+
+
+# -----------------------------------------------------------------------------
+# 3. Session Synthesis & Autonomous Loop Endpoints
+# -----------------------------------------------------------------------------
+
+class SessionStartRequest(BaseModel):
+    blueprint: AgentBlueprintSpec
+    session_id: str | None = None
+    dataset_id: str | None = None
+    run_sync: bool = False
+
+
+@app.post("/api/v4/sessions/start")
+async def start_session(req: SessionStartRequest):
+    """Synthesizes env_module.py + arena.html, verifies via smoke tester, and runs autonomous loop."""
+    import uuid
+    sid = req.session_id or f"sess_{uuid.uuid4().hex[:8]}"
+    ws_dir = global_store.base_dir / sid
+    ws_dir.mkdir(parents=True, exist_ok=True)
+
+    dataset = ingested_datasets_store.get(req.dataset_id) if req.dataset_id else None
+
+    # 1. Synthesize Environment & Arena
+    env_builder = JITEnvironmentSynthesizer()
+    code_str, env_path, env_cls = env_builder.synthesize(
+        blueprint=req.blueprint,
+        dataset=dataset,
+        workspace_dir=ws_dir,
+    )
+
+    verifier = SandboxSmokeTester()
+    records = dataset.df.to_dict(orient="records") if (dataset and hasattr(dataset, "df")) else None
+    verified, healed_code, logs = verifier.verify_and_heal(
+        code_str=code_str,
+        blueprint=req.blueprint,
+        dataset=dataset,
+        workspace_dir=ws_dir,
+    )
+
+    if not verified:
+        raise HTTPException(status_code=500, detail="Environment code failed sandbox verification checks.")
+
+    # Synthesize Arena HTML
+    dummy_env = env_cls(dataset_records=records)
+    dummy_obs, dummy_info = dummy_env.reset()
+    arena_builder = JITArenaSynthesizer()
+    html_str, arena_path = arena_builder.synthesize(
+        blueprint=req.blueprint,
+        sample_arena_state=dummy_info.get("arena_state", {}),
+        workspace_dir=ws_dir,
+    )
+
+    # Initialize Session in store
+    session = SessionState(
+        session_id=sid,
+        blueprint=req.blueprint,
+        dataset_id=req.dataset_id,
+        status="synthesized",
+        max_rounds=req.blueprint.max_auto_tune_rounds or 4,
+        target_threshold=req.blueprint.target_metric_threshold,
+        env_module_code=healed_code,
+        arena_html=html_str,
+    )
+    global_store.set_session(session)
+
+    # Event emitter helper
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.get_event_loop()
+
+    def sync_event_emitter(event_data: dict[str, Any]):
+        asyncio.run_coroutine_threadsafe(manager.broadcast(sid, event_data), loop)
+
+    if req.run_sync:
+        # Run synchronously for test suites
+        final_session = global_controller.run_loop(
+            session_id=sid,
+            blueprint=req.blueprint,
+            env_cls=env_cls,
+            dataset=dataset,
+            on_event_callback=sync_event_emitter,
+            max_rounds=req.blueprint.max_auto_tune_rounds,
+        )
+        return final_session
+    else:
+        # Launch background task in a worker thread so event loop is never blocked
+        async def _run_background():
+            await asyncio.sleep(0.3)  # Brief pause to ensure client WebSocket connects
+            await asyncio.to_thread(
+                global_controller.run_loop,
+                session_id=sid,
+                blueprint=req.blueprint,
+                env_cls=env_cls,
+                dataset=dataset,
+                on_event_callback=sync_event_emitter,
+                max_rounds=req.blueprint.max_auto_tune_rounds,
+            )
+
+        asyncio.create_task(_run_background())
+        return {
+            "session_id": sid,
+            "status": "training",
+            "message": "Autonomous JIT Synthesis & Closed-Loop Training initiated in background.",
         }
 
-    @app.post("/api/vibe/create")
-    def vibe_create(req: VibeCreateRequest):
-        """One-click Vibe autopilot initialization."""
-        dataset = state.dataset_registry.get(req.dataset_id) if req.dataset_id else None
 
-        try:
-            session, response = state.vibe_orchestrator.create_session(
-                prompt=req.prompt,
-                dataset_id=req.dataset_id,
-                dataset=dataset,
-                task_id=req.task_id,
-                llm_config=req.llm_config,
-                burst_episodes=req.burst_episodes,
-            )
-            state.runner = session.runner
-            state.active_task_config = session.task_config
-
-            return response.model_dump()
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Vibe creation failed: {str(e)}")
-
-    @app.post("/api/vibe/coach")
-    def vibe_coach(req: VibeCoachRequest):
-        """Conversational coaching or rule card priority adjustment."""
-        try:
-            response = state.vibe_orchestrator.coach_session(
-                session_id=req.session_id,
-                critique_text=req.critique_text,
-                feedback_type=req.feedback_type,
-                target_episode_id=req.target_episode_id,
-                burst_episodes=req.burst_episodes,
-                term_name=req.term_name,
-                new_importance=req.new_importance,
-                llm_config=req.llm_config,
-            )
-            session = state.vibe_orchestrator.sessions.get(req.session_id)
-            if session:
-                state.runner = session.runner
-                state.active_task_config = session.task_config
-
-            return response.model_dump()
-        except KeyError as ke:
-            raise HTTPException(status_code=404, detail=str(ke))
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Coaching failed: {str(e)}")
-
-    @app.post("/api/sim/interact")
-    def sim_interact(req: SimInteractRequest):
-        """Interactive live testing API for Tic-Tac-Toe moves and 2D Robot waypoint/obstacle dragging."""
-        target_adapter = None
-        target_policy = None
-
-        if req.session_id and req.session_id in state.vibe_orchestrator.sessions:
-            session = state.vibe_orchestrator.sessions[req.session_id]
-            target_adapter = session.adapter
-            target_policy = session.runner.model.policy if session.runner and session.runner.model else None
-        elif state.runner:
-            target_adapter = state.runner.adapter
-            target_policy = state.runner.model.policy if state.runner.model else None
-        elif req.adapter_name:
-            adapter_cls = ADAPTER_REGISTRY.get(req.adapter_name)
-            if adapter_cls:
-                target_adapter = adapter_cls()
-
-        if not target_adapter or not hasattr(target_adapter, "play_interactive_step"):
-            target_adapter = DynamicSimAdapter(mode="tictactoe")
-
-        target_coords = None
-        if req.target_xy:
-            target_coords = (float(req.target_xy[0]), float(req.target_xy[1]))
-
-        try:
-            res = target_adapter.play_interactive_step(
-                policy=target_policy,
-                board_state=req.board_state,
-                human_cell_idx=req.human_cell_idx,
-                robot_state=req.robot_state,
-                target_xy=target_coords,
-                obstacles_list=req.obstacles_list,
-                n_frames=req.n_frames,
-            )
-            return res
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Simulation interaction failed: {str(e)}")
-
-    @app.websocket("/ws/stream")
-    async def websocket_stream(websocket: WebSocket):
-        """Streams real-time episode frames and reward telemetry."""
-        await websocket.accept()
-        state.active_websockets.append(websocket)
-        try:
-            while True:
-                data = await websocket.receive_text()
-                if data == "ping":
-                    await websocket.send_text("pong")
-        except WebSocketDisconnect:
-            if websocket in state.active_websockets:
-                state.active_websockets.remove(websocket)
-
-    return app
+@app.get("/api/v4/sessions/{session_id}")
+def get_session(session_id: str):
+    """Retrieves current session state, round history, metrics, and synthesized code."""
+    session = global_store.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found.")
+    return session
 
 
-app = create_app()
+@app.get("/api/v4/sessions/{session_id}/arena", response_class=HTMLResponse)
+def get_session_arena(session_id: str):
+    """Serves the raw synthesized arena.html document for the sandboxed iframe."""
+    session = global_store.get_session(session_id)
+    if not session or not session.arena_html:
+        ws_arena = global_store.base_dir / session_id / "arena.html"
+        if ws_arena.exists():
+            return HTMLResponse(content=ws_arena.read_text(encoding="utf-8"))
+        raise HTTPException(status_code=404, detail="Arena HTML not found.")
+    return HTMLResponse(content=session.arena_html)
+
+
+class InteractRequest(BaseModel):
+    payload: dict[str, Any]
+
+
+@app.post("/api/v4/sessions/{session_id}/interact")
+def session_interact(session_id: str, req: InteractRequest):
+    """Executes live human play/inspection against the agent inside arena.html."""
+    env = global_store.get_env(session_id)
+    model = global_store.get_model(session_id)
+    if not env:
+        raise HTTPException(status_code=404, detail=f"Active environment not found for session '{session_id}'.")
+
+    def policy_predict(obs):
+        if model:
+            obs_t = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
+            with torch.no_grad():
+                features = model.policy.extract_features(obs_t)
+                latent_pi, _ = model.policy.mlp_extractor(features)
+                logits = model.policy.action_net(latent_pi)
+                probs = torch.softmax(logits, dim=-1).squeeze(0).numpy()
+                action = int(np.argmax(probs))
+                return action, probs.tolist()
+        else:
+            n_acts = env.action_space.n
+            return 0, [1.0 / n_acts] * n_acts
+
+    res = env.interactive_step(req.payload, policy_predict)
+    return res
+
+
+class NudgeRequest(BaseModel):
+    feedback: str
+
+
+@app.post("/api/v4/sessions/{session_id}/nudge")
+def session_nudge(session_id: str, req: NudgeRequest):
+    """Applies human feedback prose and runs an extra targeted tuning round."""
+    try:
+        tuning_res = global_controller.nudge_session(session_id, req.feedback)
+        return tuning_res
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+class RollbackRequest(BaseModel):
+    round_num: int
+
+
+@app.post("/api/v4/sessions/{session_id}/rollback")
+def session_rollback(session_id: str, req: RollbackRequest):
+    """Rolls back model weights and env_module.py to a previous round snapshot."""
+    try:
+        snapshot = global_store.rollback_to_round(session_id, req.round_num)
+        return {
+            "session_id": session_id,
+            "status": "rolled_back",
+            "restored_round": snapshot.round_num,
+            "restored_metric": snapshot.metric,
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+# -----------------------------------------------------------------------------
+# 4. Export & Registry Endpoints
+# -----------------------------------------------------------------------------
+
+@app.post("/api/v4/sessions/{session_id}/export")
+def session_export(session_id: str):
+    """Exports SB3 policy to ONNX with parity check and packages standalone .runbundle."""
+    session = global_store.get_session(session_id)
+    model = global_store.get_model(session_id)
+    env = global_store.get_env(session_id)
+
+    if not session or not model:
+        raise HTTPException(status_code=404, detail="Session or trained policy model not found.")
+
+    ws_dir = global_store.base_dir / session_id
+    env_path = ws_dir / "env_module.py"
+    arena_path = ws_dir / "arena.html"
+
+    bundle_dir, zip_path, max_diff = PolicyExporter.package_runbundle(
+        session_id=session_id,
+        blueprint=session.blueprint,
+        model=model,
+        env_module_path=env_path,
+        arena_html_path=arena_path,
+    )
+
+    return {
+        "session_id": session_id,
+        "bundle_dir": str(bundle_dir),
+        "zip_path": str(zip_path),
+        "onnx_parity_diff": max_diff,
+        "download_url": f"/api/v4/sessions/{session_id}/download",
+    }
+
+
+@app.get("/api/v4/sessions/{session_id}/download")
+def download_runbundle(session_id: str):
+    """Downloads the packaged .runbundle.zip archive."""
+    import re
+    safe_sid = re.sub(r"[^a-zA-Z0-9_\-]", "", session_id)
+    zip_path = Path("exported_bundles") / f"{safe_sid}.runbundle.zip"
+    if not zip_path.exists():
+        raise HTTPException(status_code=404, detail="Runbundle zip archive not found. Call export first.")
+    return FileResponse(
+        path=str(zip_path),
+        filename=f"{safe_sid}.runbundle.zip",
+        media_type="application/zip",
+    )
+
+
+@app.get("/api/v4/bundles", response_model=list[BundleMetadata])
+def list_bundles():
+    """Lists cataloged exported runbundles."""
+    return global_registry.list_bundles()
+
+
+# -----------------------------------------------------------------------------
+# 5. Settings Validation & WebSocket Telemetry
+# -----------------------------------------------------------------------------
+
+@app.post("/api/v4/settings/validate")
+def validate_settings(config: LLMConfig):
+    """Tests connectivity to DeepSeek, OpenAI, Anthropic, Ollama, or Fallback."""
+    return validate_llm_connection(config)
+
+
+@app.websocket("/ws/v4/{session_id}")
+async def websocket_telemetry(websocket: WebSocket, session_id: str):
+    """Streams live training frames, round metrics, and auto-tuner events."""
+    await manager.connect(session_id, websocket)
+    try:
+        while True:
+            # Keep alive and listen for client commands
+            data = await websocket.receive_text()
+            try:
+                msg = json.loads(data)
+                if msg.get("action") == "ping":
+                    await websocket.send_json({"event": "pong", "session_id": session_id})
+            except Exception:
+                pass
+    except WebSocketDisconnect:
+        manager.disconnect(session_id, websocket)
