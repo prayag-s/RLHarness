@@ -16,7 +16,13 @@ from pydantic import BaseModel, Field
 from rl_ide.architect.models import AgentBlueprintSpec
 from rl_ide.architect.intake import is_tictactoe_spec
 from rl_ide.ingest.loader import IngestedDataset
-from rl_ide.llm.client import BaseLLMClient, create_llm_client, FallbackCodeSynthesizer
+from rl_ide.llm.client import (
+    BaseLLMClient,
+    create_llm_client,
+    FallbackCodeSynthesizer,
+    get_active_llm_client,
+    UnconfiguredLLMClient,
+)
 from rl_ide.synthesizer.verifier import SandboxSmokeTester
 
 
@@ -49,8 +55,20 @@ class AutoTunerAgent:
     """Diagnoses failure modes and autonomously rewrites reward logic across rounds."""
 
     def __init__(self, llm_client: BaseLLMClient | None = None):
-        self.client = llm_client or create_llm_client()
-        self.verifier = SandboxSmokeTester(self.client)
+        self._llm_client = llm_client
+        self._verifier = SandboxSmokeTester(llm_client) if llm_client else None
+
+    @property
+    def client(self) -> BaseLLMClient:
+        if self._llm_client:
+            return self._llm_client
+        return get_active_llm_client()
+
+    @property
+    def verifier(self) -> SandboxSmokeTester:
+        if self._verifier:
+            return self._verifier
+        return SandboxSmokeTester(self.client)
 
     def tune(
         self,
@@ -190,7 +208,7 @@ class AutoTunerAgent:
     ) -> str:
         """Applies reward evolution using LLM or deterministic template rewrite."""
         # Try LLM rewrite if available
-        if not isinstance(self.client, FallbackCodeSynthesizer):
+        if not isinstance(self.client, (FallbackCodeSynthesizer, UnconfiguredLLMClient)):
             try:
                 prompt = (
                     f"Autonomous Tuning Round {round_num} for '{blueprint.task_title}':\n"
@@ -205,7 +223,7 @@ class AutoTunerAgent:
                 if match:
                     return match.group(1).strip()
             except Exception as exc:
-                raise RuntimeError(f"LLM auto-tuning reward rewrite failed: {exc}")
+                print(f"[AutoTunerAgent] LLM reward rewrite notice ({exc}); applying deterministic reward scaling.")
 
         # Deterministic Rewrite (used for offline Fallback in test mode)
         code = current_code

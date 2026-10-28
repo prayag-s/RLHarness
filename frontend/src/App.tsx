@@ -201,8 +201,11 @@ export const App: React.FC = () => {
             changes_summary: r.changes_summary,
           })))
         }
-        if (fresh.status === 'completed' || fresh.status === 'target_achieved') {
+        if (fresh.status === 'completed' || fresh.status === 'target_achieved' || fresh.status === 'error') {
           setIsTraining(false)
+          if (fresh.status === 'error') {
+            addTimelineItem('Training Error', 'Autonomous loop stopped with error.', 'error', 'warning')
+          }
         }
       } catch (e) {
         // Silent poll error
@@ -478,6 +481,14 @@ export const App: React.FC = () => {
         event.message || `Completed all auto-tuning rounds. Final metric: ${metric.toFixed(1)}%.`,
         'round',
         'info',
+      )
+    } else if (eventType === 'training_error' || eventType === 'error') {
+      setIsTraining(false)
+      addTimelineItem(
+        'Training Error ⚠️',
+        event.message || 'An error occurred during autonomous training.',
+        'error',
+        'warning',
       )
     }
   }

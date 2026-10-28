@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field
 from rl_ide.architect.models import AgentBlueprintSpec
 from rl_ide.autopilot.auto_tuner import AutoTunerAgent, TuningResult
 from rl_ide.ingest.loader import IngestedDataset
-from rl_ide.llm.client import BaseLLMClient, create_llm_client
+from rl_ide.llm.client import BaseLLMClient, create_llm_client, get_active_llm_client
 from rl_ide.synthesizer.env_builder import JITEnvironmentSynthesizer, load_synthesized_env_class
 from rl_ide.synthesizer.verifier import SandboxSmokeTester
 
@@ -185,8 +185,20 @@ class AutonomousLoopController:
         llm_client: BaseLLMClient | None = None,
     ):
         self.store = store or SessionStateStore()
-        self.client = llm_client or create_llm_client()
-        self.auto_tuner = AutoTunerAgent(self.client)
+        self._llm_client = llm_client
+        self._auto_tuner = AutoTunerAgent(llm_client) if llm_client else None
+
+    @property
+    def client(self) -> BaseLLMClient:
+        if self._llm_client:
+            return self._llm_client
+        return get_active_llm_client()
+
+    @property
+    def auto_tuner(self) -> AutoTunerAgent:
+        if self._auto_tuner:
+            return self._auto_tuner
+        return AutoTunerAgent(self.client)
 
     def run_loop(
         self,

@@ -20,7 +20,7 @@ import numpy as np
 
 from rl_ide.architect.models import AgentBlueprintSpec
 from rl_ide.ingest.loader import IngestedDataset
-from rl_ide.llm.client import BaseLLMClient, create_llm_client, FallbackCodeSynthesizer
+from rl_ide.llm.client import BaseLLMClient, create_llm_client, FallbackCodeSynthesizer, get_active_llm_client
 from rl_ide.synthesizer.env_builder import load_synthesized_env_class
 
 
@@ -74,7 +74,13 @@ class SandboxSmokeTester:
     """Verifies synthesized Gymnasium environments and repairs code via self-healing loop."""
 
     def __init__(self, llm_client: BaseLLMClient | None = None):
-        self.client = llm_client or create_llm_client()
+        self._llm_client = llm_client
+
+    @property
+    def client(self) -> BaseLLMClient:
+        if self._llm_client:
+            return self._llm_client
+        return get_active_llm_client()
 
     def run_smoke_test(
         self,

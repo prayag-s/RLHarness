@@ -293,15 +293,26 @@ async def start_session(req: SessionStartRequest):
         # Launch background task in a worker thread so event loop is never blocked
         async def _run_background():
             await asyncio.sleep(0.3)  # Brief pause to ensure client WebSocket connects
-            await asyncio.to_thread(
-                global_controller.run_loop,
-                session_id=sid,
-                blueprint=req.blueprint,
-                env_cls=env_cls,
-                dataset=dataset,
-                on_event_callback=sync_event_emitter,
-                max_rounds=req.blueprint.max_auto_tune_rounds,
-            )
+            try:
+                await asyncio.to_thread(
+                    global_controller.run_loop,
+                    session_id=sid,
+                    blueprint=req.blueprint,
+                    env_cls=env_cls,
+                    dataset=dataset,
+                    on_event_callback=sync_event_emitter,
+                    max_rounds=req.blueprint.max_auto_tune_rounds,
+                )
+            except Exception as loop_err:
+                print(f"[server._run_background] Session {sid} loop error: {loop_err}")
+                sess = global_store.get_session(sid)
+                if sess:
+                    sess.status = "error"
+                sync_event_emitter({
+                    "event": "training_error",
+                    "session_id": sid,
+                    "message": f"Training loop error: {loop_err}",
+                })
 
         asyncio.create_task(_run_background())
         return {

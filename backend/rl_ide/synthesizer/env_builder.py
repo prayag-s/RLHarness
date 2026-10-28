@@ -18,7 +18,7 @@ import gymnasium as gym
 from rl_ide.architect.models import AgentBlueprintSpec
 from rl_ide.architect.intake import is_tictactoe_spec
 from rl_ide.ingest.loader import IngestedDataset
-from rl_ide.llm.client import BaseLLMClient, create_llm_client, FallbackCodeSynthesizer
+from rl_ide.llm.client import BaseLLMClient, create_llm_client, FallbackCodeSynthesizer, get_active_llm_client
 
 
 ENV_BUILDER_SYSTEM_PROMPT = """You are an Expert RL Environment Engineer. Given an `AgentBlueprintSpec` (and optional `DatasetProfile`), write a single, self-contained, bug-free Python module defining `SynthesizedGymEnv(gymnasium.Env)`.
@@ -59,7 +59,13 @@ class JITEnvironmentSynthesizer:
     """Synthesizes custom Gym environments tailored to an AgentBlueprintSpec."""
 
     def __init__(self, llm_client: BaseLLMClient | None = None):
-        self.client = llm_client or create_llm_client()
+        self._llm_client = llm_client
+
+    @property
+    def client(self) -> BaseLLMClient:
+        if self._llm_client:
+            return self._llm_client
+        return get_active_llm_client()
 
     def synthesize(
         self,
