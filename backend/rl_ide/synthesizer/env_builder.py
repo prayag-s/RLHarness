@@ -140,6 +140,9 @@ class JITEnvironmentSynthesizer:
         dataset: IngestedDataset | None = None,
     ) -> str:
         """Synthesizes python code via live LLM or deterministic fallback."""
+        if is_tictactoe_spec(blueprint):
+            return self._build_tictactoe_code(blueprint)
+
         if not isinstance(self.client, FallbackCodeSynthesizer):
             try:
                 code = self._call_llm_code_gen(blueprint, dataset)

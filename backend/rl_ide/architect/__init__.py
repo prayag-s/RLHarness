@@ -14,12 +14,6 @@ from rl_ide.architect.intake import (
     IntakeArchitectAgent,
     ARCHITECT_SYSTEM_PROMPT,
 )
-from rl_ide.architect.omni_agent import (
-    StudioOmniAgent,
-    StudioActionType,
-    StudioChatRequest,
-    StudioChatResponse,
-)
 
 __all__ = [
     "ClarifyingQuestion",
@@ -37,3 +31,11 @@ __all__ = [
     "PILLAR_EXPECTATIONS",
     "PILLAR_INTERACTION",
 ]
+
+
+def __getattr__(name: str):
+    if name in ("StudioOmniAgent", "StudioActionType", "StudioChatRequest", "StudioChatResponse"):
+        import rl_ide.architect.omni_agent as _oa
+        return getattr(_oa, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+

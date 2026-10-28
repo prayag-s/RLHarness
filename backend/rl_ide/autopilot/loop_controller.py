@@ -38,10 +38,12 @@ def parse_nudge_meta_command(text: str) -> dict[str, Any] | None:
       'target 90%'
     """
     text_lower = text.lower()
-    rounds_match = re.search(r'(?:tune|train|run)?\s*(\d+)\s*(?:more\s*)?rounds?', text_lower)
+    rounds_match = re.search(r'(?:tune|train|run|for)?\s*(\d+)\s*(?:more\s*)?rounds?', text_lower)
     eval_match = re.search(r'eval(?:uate)?\s*(?:every)?\s*(\d+)\s*rounds?', text_lower)
     episodes_match = re.search(r'(\d+)\s*episodes?', text_lower)
-    target_match = re.search(r'target\s*(?:metric|threshold|rate)?\s*[:=]?\s*(\d+(?:\.\d+)?)\s*%', text_lower)
+    target_match = re.search(r'(?:target|for|reach|achieve|to)?\s*(?:metric|threshold|rate|goal)?\s*[:=]?\s*(\d+(?:\.\d+)?)\s*%', text_lower)
+    if not target_match:
+        target_match = re.search(r'\b(?:target|goal|rate)\s*[:=]?\s*(\d+(?:\.\d+)?)\b', text_lower)
 
     if rounds_match or eval_match or episodes_match or target_match:
         return {

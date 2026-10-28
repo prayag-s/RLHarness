@@ -604,7 +604,7 @@ export const ArchitectPanel: React.FC<ArchitectPanelProps> = ({
                 <span className="text-[10px] text-gray-500">Fine-tune training budget</span>
                 <button
                   type="button"
-                  onClick={() => handleUnifiedSend(`Train for ${rounds} rounds with ${episodesPerRound} episodes per round`)}
+                  onClick={() => handleUnifiedSend(`Train for ${rounds} rounds with ${episodesPerRound} episodes per round and target ${targetGoal}%`)}
                   disabled={isAskingArchitect}
                   className="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded text-[10px] flex items-center space-x-1 transition active:scale-95 disabled:opacity-50"
                 >

@@ -661,7 +661,8 @@ async def conversation_omni_chat(conversation_id: str, req: UnifiedConversationC
     def sync_broadcast(event_data: dict[str, Any]):
         asyncio.run_coroutine_threadsafe(manager.broadcast(conversation_id, event_data), loop)
 
-    response = global_omni_agent.process_message(
+    response = await asyncio.to_thread(
+        global_omni_agent.process_message,
         conversation_id=conversation_id,
         user_message=msg,
         selected_options=req.get_effective_answers(),
@@ -670,6 +671,48 @@ async def conversation_omni_chat(conversation_id: str, req: UnifiedConversationC
         broadcast_callback=sync_broadcast,
         run_sync=req.run_sync,
     )
+
+    # Launch asynchronous background training if training action was triggered
+    if StudioActionType.RUN_OR_CONTINUE_TRAINING in response.action_types and not req.run_sync:
+        conv_store = get_conversation_store()
+        conv = conv_store.get_conversation(conversation_id)
+        if conv and conv.get("blueprint_spec"):
+            bp = AgentBlueprintSpec.model_validate(conv["blueprint_spec"])
+            ws_dir = global_store.base_dir / conversation_id
+            env_file = ws_dir / "env_module.py"
+            if env_file.exists():
+                env_cls = load_synthesized_env_class(env_file)
+                eps_per_burst = int(response.training_params.get("episodes_per_round") or bp.episodes_per_round or 200)
+                add_rounds = int(response.training_params.get("max_auto_tune_rounds") or bp.max_auto_tune_rounds or 5)
+
+                async def _run_training_background():
+                    try:
+                        trained_session = await asyncio.to_thread(
+                            global_controller.run_loop,
+                            session_id=conversation_id,
+                            blueprint=bp,
+                            env_cls=env_cls,
+                            on_event_callback=sync_broadcast,
+                            max_rounds=add_rounds,
+                            episodes_per_burst=eps_per_burst,
+                            continue_training=True,
+                        )
+                        c_store = get_conversation_store()
+                        c_store.save_or_update(
+                            conversation_id=conversation_id,
+                            status=trained_session.status,
+                            current_round=trained_session.current_round,
+                            best_metric=trained_session.current_metric,
+                            rounds_history=[r.model_dump() for r in trained_session.rounds_history],
+                            episodes=trained_session.episodes,
+                            latest_model_zip_path=trained_session.latest_model_zip_path,
+                        )
+                    except Exception as e:
+                        print(f"Error in continuous background training: {e}")
+                        sync_broadcast({"event": "error", "message": str(e)})
+
+                asyncio.create_task(_run_training_background())
+
     return response
 
 
@@ -746,7 +789,33 @@ def session_interact(session_id: str, req: InteractRequest):
     env = global_store.get_env(session_id)
     model = global_store.get_model(session_id)
     if not env:
-        raise HTTPException(status_code=404, detail=f"Active environment not found for session '{session_id}'.")
+        ws_env_file = global_store.base_dir / session_id / "env_module.py"
+        if ws_env_file.exists():
+            try:
+                env_cls = load_synthesized_env_class(ws_env_file)
+                env = instantiate_env(env_cls)
+                global_store.set_env(session_id, env)
+            except Exception as e:
+                print(f"Warning: could not instantiate env from {ws_env_file}: {e}")
+        if not env:
+            raise HTTPException(status_code=404, detail=f"Active environment not found for session '{session_id}'.")
+
+    if not model:
+        conv = get_conversation_store().get_conversation(session_id)
+        model_candidates = [
+            conv.get("latest_model_zip_path") if conv else None,
+            Path("runs") / session_id / "model.zip",
+            global_store.base_dir / session_id / "model.zip",
+        ]
+        for mc in model_candidates:
+            if mc and Path(str(mc)).exists():
+                try:
+                    from stable_baselines3 import PPO
+                    model = PPO.load(str(mc), env=env, device="cpu")
+                    global_store.set_model(session_id, model)
+                    break
+                except Exception as e:
+                    print(f"Warning: could not load model from {mc}: {e}")
 
     def policy_predict(obs):
         if model:
@@ -810,6 +879,43 @@ def session_export(session_id: str):
     session = global_store.get_session(session_id)
     model = global_store.get_model(session_id)
     env = global_store.get_env(session_id)
+
+    if not session:
+        conv = get_conversation_store().get_conversation(session_id)
+        if conv and conv.get("blueprint_spec"):
+            try:
+                bp = AgentBlueprintSpec.model_validate(conv["blueprint_spec"])
+                from rl_ide.autopilot.loop_controller import RoundSnapshot
+                session = SessionState(
+                    session_id=session_id,
+                    blueprint=bp,
+                    status=conv.get("status", "completed"),
+                    current_round=int(conv.get("current_round", 1)),
+                    current_metric=float(conv.get("best_metric", 0.0)),
+                    rounds_history=[RoundSnapshot.model_validate(r) for r in conv.get("rounds_history", [])],
+                    episodes=conv.get("episodes", []),
+                    latest_model_zip_path=conv.get("latest_model_zip_path"),
+                )
+                global_store.set_session(session_id, session)
+            except Exception as e:
+                print(f"Warning: could not reconstruct session for export {session_id}: {e}")
+
+    if not model:
+        conv = get_conversation_store().get_conversation(session_id)
+        model_candidates = [
+            conv.get("latest_model_zip_path") if conv else None,
+            Path("runs") / session_id / "model.zip",
+            global_store.base_dir / session_id / "model.zip",
+        ]
+        for mc in model_candidates:
+            if mc and Path(str(mc)).exists():
+                try:
+                    from stable_baselines3 import PPO
+                    model = PPO.load(str(mc), device="cpu")
+                    global_store.set_model(session_id, model)
+                    break
+                except Exception as e:
+                    print(f"Warning: could not load model for export from {mc}: {e}")
 
     if not session or not model:
         raise HTTPException(status_code=404, detail="Session or trained policy model not found.")

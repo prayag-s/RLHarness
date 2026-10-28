@@ -129,6 +129,9 @@ class JITArenaSynthesizer:
         visual_style: str | None = None,
     ) -> str:
         """Synthesizes HTML code using LLM or deterministic template."""
+        if is_tictactoe_spec(blueprint) and not visual_style:
+            return self._generate_deterministic_arena_html(blueprint, sample_arena_state, visual_style=visual_style)
+
         if not isinstance(self.client, FallbackCodeSynthesizer):
             try:
                 html = self._call_llm_arena_gen(blueprint, sample_arena_state)

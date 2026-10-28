@@ -135,11 +135,13 @@ class StudioOmniAgent:
 
         # 2. Arena Look / Restyling intent keywords
         arena_kws = [
-            "arena", "look", "theme", "color", "cell", "cells", "canvas", "board",
+            "look", "theme", "color", "cell", "cells", "canvas",
             "scoreboard", "victory badge", "badge", "gold", "arcade", "hud", "radar",
             "display", "visual", "larger", "restyle", "redesign", "bigger", "retro"
         ]
-        has_arena_intent = any(kw in text for kw in arena_kws)
+        has_arena_intent = any(kw in text for kw in arena_kws) and not any(
+            kw in text for kw in ["lock arena", "lock & start", "lock and start", "confirm and start", "start training"]
+        )
 
         # 3. Training / Continuing Training / Lock Arena keywords
         train_kws = [
@@ -225,6 +227,16 @@ class StudioOmniAgent:
         if training_params:
             t_params.update(training_params)
 
+        # Detect control directives (e.g. "for 100%", "train for 5 rounds", "200 episodes") directly from user message
+        meta_cmd = parse_nudge_meta_command(user_message)
+        if meta_cmd:
+            if meta_cmd.get("rounds") is not None:
+                t_params["max_auto_tune_rounds"] = meta_cmd["rounds"]
+            if meta_cmd.get("episodes") is not None:
+                t_params["episodes_per_round"] = meta_cmd["episodes"]
+            if meta_cmd.get("target") is not None:
+                t_params["target_metric_threshold"] = meta_cmd["target"]
+
         intents = self.classify_intents(user_message, conv, force_action=force_action)
 
         # Log user message
@@ -278,15 +290,23 @@ class StudioOmniAgent:
             if intake_resp.blueprint_spec:
                 blueprint = intake_resp.blueprint_spec
             else:
-                # Synthesize smart defaults blueprint so arena preview can generate instantly!
-                fallback_resp = intake_agent.interview(
-                    user_prompt=user_message,
+                # Fast deterministic blueprint so arena preview can generate instantly without duplicate LLM latency!
+                fallback_resp = intake_agent._deterministic_intake(
+                    prompt=user_message,
                     dataset=dataset,
-                    user_answers=selected_opts,
-                    force_smart_defaults=True,
+                    answers=selected_opts,
+                    wants_defaults=True,
                     training_params=t_params,
                 )
                 blueprint = fallback_resp.blueprint_spec
+
+            if blueprint and t_params:
+                if "target_metric_threshold" in t_params:
+                    blueprint.target_metric_threshold = float(t_params["target_metric_threshold"])
+                if "max_auto_tune_rounds" in t_params:
+                    blueprint.max_auto_tune_rounds = int(t_params["max_auto_tune_rounds"])
+                if "episodes_per_round" in t_params:
+                    blueprint.episodes_per_round = int(t_params["episodes_per_round"])
 
             if intake_resp.questions:
                 questions = intake_resp.questions
