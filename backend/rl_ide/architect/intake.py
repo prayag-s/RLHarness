@@ -123,8 +123,9 @@ class IntakeArchitectAgent:
                 )
                 if llm_response:
                     return llm_response
-            except Exception as exc:
-                raise RuntimeError(f"LLM Architect Intake failed: {exc}")
+            except Exception:
+                # Gracefully fall back to deterministic intake engine
+                pass
 
         # 2. Deterministic Intake Engine (used for offline Fallback in test mode)
         return self._deterministic_intake(
