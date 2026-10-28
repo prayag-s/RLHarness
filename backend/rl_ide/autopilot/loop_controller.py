@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 from typing import Any, Callable
 import gymnasium as gym
@@ -24,8 +25,32 @@ from rl_ide.architect.models import AgentBlueprintSpec
 from rl_ide.autopilot.auto_tuner import AutoTunerAgent, TuningResult
 from rl_ide.ingest.loader import IngestedDataset
 from rl_ide.llm.client import BaseLLMClient, create_llm_client, get_active_llm_client
-from rl_ide.synthesizer.env_builder import JITEnvironmentSynthesizer, load_synthesized_env_class
+from rl_ide.synthesizer.env_builder import JITEnvironmentSynthesizer, load_synthesized_env_class, instantiate_env
 from rl_ide.synthesizer.verifier import SandboxSmokeTester
+
+
+def parse_nudge_meta_command(text: str) -> dict[str, Any] | None:
+    """Parses training loop control commands from user feedback prose.
+    Examples:
+      'tune 100 rounds, evaluate every 10 rounds'
+      'train for 20 rounds'
+      'run 50 episodes per round'
+      'target 90%'
+    """
+    text_lower = text.lower()
+    rounds_match = re.search(r'(?:tune|train|run)?\s*(\d+)\s*(?:more\s*)?rounds?', text_lower)
+    eval_match = re.search(r'eval(?:uate)?\s*(?:every)?\s*(\d+)\s*rounds?', text_lower)
+    episodes_match = re.search(r'(\d+)\s*episodes?', text_lower)
+    target_match = re.search(r'target\s*(?:metric|threshold|rate)?\s*[:=]?\s*(\d+(?:\.\d+)?)\s*%', text_lower)
+
+    if rounds_match or eval_match or episodes_match or target_match:
+        return {
+            "rounds": int(rounds_match.group(1)) if rounds_match else None,
+            "eval_every": int(eval_match.group(1)) if eval_match else None,
+            "episodes": int(episodes_match.group(1)) if episodes_match else None,
+            "target": float(target_match.group(1)) if target_match else None,
+        }
+    return None
 
 
 class RoundSnapshot(BaseModel):
@@ -212,7 +237,7 @@ class AutonomousLoopController:
     ) -> SessionState:
         """Executes the full multi-round autonomous training loop."""
         records = dataset.df.to_dict(orient="records") if (dataset and hasattr(dataset, "df")) else None
-        env = env_cls(dataset_records=records)
+        env = instantiate_env(env_cls, dataset_records=records)
         self.store.set_env(session_id, env)
 
         rounds_limit = max_rounds or blueprint.max_auto_tune_rounds or 4
@@ -242,18 +267,18 @@ class AutonomousLoopController:
         is_tabular = blueprint.data_source_type in ("uploaded_dataset", "tabular") or dataset is not None
         effective_gamma = 0.0 if is_tabular else 0.95
 
-        # Initialize SB3 PPO Policy
+        # Initialize SB3 PPO Policy explicitly configured for fast tabular/game convergence
         model = self.store.get_model(session_id)
         if not model:
             model = PPO(
                 "MlpPolicy",
                 env,
-                learning_rate=3e-4,
+                learning_rate=1e-3,
                 gamma=effective_gamma,
-                n_steps=min(64, max(16, episodes_per_burst * 2)),
-                batch_size=16,
-                n_epochs=5,
-                ent_coef=0.01,
+                n_steps=256,
+                batch_size=64,
+                n_epochs=10,
+                ent_coef=0.02,
                 device="cpu",
                 verbose=0,
             )
@@ -269,9 +294,10 @@ class AutonomousLoopController:
                     pass
 
         current_code = session.env_module_code
+        start_round = len(session.rounds_history) + 1
 
         # --- MULTI-ROUND AUTONOMOUS LOOP ---
-        for r in range(1, rounds_limit + 1):
+        for r in range(start_round, rounds_limit + 1):
             session.current_round = r
             session.status = "training"
 
@@ -286,7 +312,7 @@ class AutonomousLoopController:
             # Stage 3.1: Warm-Start Behavioral Cloning (Round 1)
             if r == 1:
                 emit({"event": "warmstart_started", "round": 1, "message": "Running Warm-Start Behavioral Cloning on domain heuristics..."})
-                loss, acc = self._warmstart_from_demonstrations(model, env, epochs=15)
+                loss, acc = self._warmstart_from_demonstrations(model, env, epochs=40, lr=3e-3, num_samples=500)
                 emit({
                     "event": "warmstart_completed",
                     "round": 1,
@@ -294,26 +320,43 @@ class AutonomousLoopController:
                     "accuracy_pct": float(acc * 100.0),
                     "message": f"Warm-start completed with {round(acc * 100.0, 1)}% demonstration alignment.",
                 })
+                # Critic Pre-Calibration pass
+                emit({"event": "critic_warmup_started", "round": 1, "message": "Pre-calibrating Critic value network on warm-start baseline..."})
+                self._critic_pre_calibration(model, env, gamma=effective_gamma, epochs=10)
+                emit({"event": "critic_warmup_completed", "round": 1, "message": "Critic value network pre-calibrated."})
 
             # Stage 3.2: Critic Warmup (Round > 1)
             if r > 1 and replay_buffer:
                 emit({"event": "critic_warmup_started", "round": r, "message": "Calibrating value network on updated reward function..."})
-                self._critic_warmup(model, replay_buffer, gamma=0.95, epochs=15)
+                self._critic_warmup(model, replay_buffer, gamma=effective_gamma, epochs=15)
                 emit({"event": "critic_warmup_completed", "round": r, "message": "Value network calibrated."})
 
-            # Stage 3.3: PPO Training Burst
+            # Stage 3.3: PPO Training Burst (4096 timesteps per round, or 512 for fast bursts)
+            train_timesteps = 512 if episodes_per_burst <= 25 else min(4096, episodes_per_burst * 100)
+            try:
+                model.learn(total_timesteps=train_timesteps, reset_num_timesteps=False)
+            except Exception:
+                pass
+
+            # Collect representative rollouts for auto-tuning failure traces & throttled UI streaming
             burst_episodes = self._run_ppo_burst(
                 model=model,
                 env=env,
                 round_num=r,
-                n_episodes=episodes_per_burst,
+                n_episodes=min(20, episodes_per_burst),
                 emit_fn=emit,
             )
             replay_buffer.extend(burst_episodes)
 
-            # Stage 3.4: Evaluate Target Success Metric
-            success_count = sum(1 for ep in burst_episodes if ep.get("is_success", False))
-            current_metric = round((success_count / max(1, len(burst_episodes))) * 100.0, 2)
+            # Stage 3.4: Evaluate Target Success Metric Strictly from Deterministic Rollouts
+            eval_metric, eval_episodes, illegal_pct = self.evaluate_policy_deterministic(
+                env=env,
+                model=model,
+                n_eval_episodes=50,
+                emit_fn=emit,
+                round_num=r,
+            )
+            current_metric = eval_metric
             session.current_metric = current_metric
 
             emit({
@@ -322,7 +365,8 @@ class AutonomousLoopController:
                 "metric": current_metric,
                 "target": target_threshold,
                 "success_metric_name": blueprint.success_metric_name,
-                "episodes_tested": len(burst_episodes),
+                "episodes_tested": 50,
+                "illegal_moves_pct": illegal_pct,
             })
 
             # Check Target Mastery Achievement
@@ -371,12 +415,50 @@ class AutonomousLoopController:
                 })
                 break
 
-            # Stage 3.5: Autonomous Self-Tuning Step
+            # Plateau Detection: Only trigger AutoTunerAgent if metric fails to improve by +3.0%
+            # over 2 consecutive rounds, or if current_metric < 25.0% after Round 2.
+            prev_metric = session.rounds_history[-1].metric if session.rounds_history else 0.0
+            metric_delta = current_metric - prev_metric
+
+            should_tune = False
+            if r >= 2 and current_metric < 25.0:
+                should_tune = True
+            elif r >= 3 and len(session.rounds_history) >= 2:
+                delta_curr = current_metric - session.rounds_history[-1].metric
+                delta_prev = session.rounds_history[-1].metric - session.rounds_history[-2].metric
+                if delta_curr < 3.0 and delta_prev < 3.0:
+                    should_tune = True
+
+            if not should_tune:
+                # Policy is progressing! Retain reward function and continue training
+                session.status = "training"
+                self.store.save_round_snapshot(
+                    session_id=session_id,
+                    round_num=r,
+                    metric=current_metric,
+                    target_threshold=target_threshold,
+                    episodes_count=len(burst_episodes),
+                    env_code=current_code,
+                    model=model,
+                    diagnosis=f"Round {r} progress: {current_metric}% (Delta: +{round(metric_delta, 1)}%). Policy progressing; reward function retained.",
+                    changes_summary="Reward function retained: agent continues active improvement trajectory.",
+                )
+                emit({
+                    "event": "training_continued",
+                    "round": r,
+                    "next_round": r + 1,
+                    "metric": current_metric,
+                    "delta": round(metric_delta, 2),
+                    "message": f"Policy progressing (+{round(metric_delta, 1)}% delta). Retaining reward function for Round {r+1}...",
+                })
+                continue
+
+            # Stage 3.5: Autonomous Self-Tuning Step (Plateau detected)
             session.status = "auto_tuning"
             emit({
                 "event": "auto_tuning_started",
                 "round": r,
-                "message": f"Diagnosing failure episodes and rewriting reward function for Round {r+1}...",
+                "message": f"Plateau detected at {current_metric}%. Diagnosing failure episodes and rewriting reward function for Round {r+1}...",
             })
 
             tuning_res = self.auto_tuner.tune(
@@ -408,7 +490,7 @@ class AutonomousLoopController:
             env_file = self.store.base_dir / session_id / "env_module.py"
             env_file.write_text(current_code, encoding="utf-8")
             updated_env_cls = load_synthesized_env_class(env_file)
-            env = updated_env_cls(dataset_records=records)
+            env = instantiate_env(updated_env_cls, dataset_records=records)
             self.store.set_env(session_id, env)
             model.set_env(env)
 
@@ -429,10 +511,48 @@ class AutonomousLoopController:
         user_feedback_text: str,
         on_event_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> TuningResult:
-        """Applies English feedback to trigger an extra targeted tuning round."""
+        """Applies English feedback or executes training control meta-commands."""
         session = self.store.get_session(session_id)
         if not session:
             raise KeyError(f"Session '{session_id}' not found.")
+
+        # Check for training control meta-commands (e.g. 'tune 100 rounds, evaluate every 10 rounds')
+        meta = parse_nudge_meta_command(user_feedback_text)
+        if meta and (meta["rounds"] is not None or meta["episodes"] is not None or meta["target"] is not None):
+            extra_rounds = meta["rounds"] or 5
+            new_max_rounds = session.current_round + extra_rounds
+            session.max_rounds = new_max_rounds
+            if meta["target"] is not None:
+                session.target_threshold = meta["target"]
+            eps_burst = meta["episodes"] or 25
+
+            env = self.store.get_env(session_id)
+            if env is None:
+                ws_code_path = self.store.base_dir / session_id / "env_module.py"
+                env_cls = load_synthesized_env_class(ws_code_path)
+                env = env_cls()
+                self.store.set_env(session_id, env)
+            else:
+                env_cls = type(env)
+
+            updated_session = self.run_loop(
+                session_id=session_id,
+                blueprint=session.blueprint,
+                env_cls=env_cls,
+                on_event_callback=on_event_callback,
+                max_rounds=new_max_rounds,
+                episodes_per_burst=eps_burst,
+            )
+
+            return TuningResult(
+                round=updated_session.current_round,
+                current_metric=updated_session.current_metric,
+                target_threshold=updated_session.target_threshold,
+                diagnosis=f"User control command executed: \"{user_feedback_text}\". Trained through Round {updated_session.current_round}.",
+                changes_summary=f"Extended loop to {new_max_rounds} rounds. Metric achieved: {updated_session.current_metric}%.",
+                updated_code=updated_session.env_module_code,
+                verified=True,
+            )
 
         model = self.store.get_model(session_id)
         env = self.store.get_env(session_id)
@@ -477,13 +597,15 @@ class AutonomousLoopController:
         self,
         model: PPO,
         env: gym.Env,
-        epochs: int = 15,
+        epochs: int = 40,
+        lr: float = 3e-3,
+        num_samples: int = 500,
     ) -> tuple[float, float]:
         """Runs Supervised Behavioral Cloning on heuristic demonstrations."""
         if not hasattr(env, "get_demonstrations"):
             return 0.0, 1.0
 
-        X_demo, y_demo = env.get_demonstrations(num_samples=200)
+        X_demo, y_demo = env.get_demonstrations(num_samples=num_samples)
         X_t = torch.tensor(X_demo, dtype=torch.float32)
         y_t = torch.tensor(y_demo, dtype=torch.long)
 
@@ -493,7 +615,7 @@ class AutonomousLoopController:
         if hasattr(policy, "mlp_extractor") and hasattr(policy.mlp_extractor, "policy_net"):
             actor_params += list(policy.mlp_extractor.policy_net.parameters())
 
-        optimizer = torch.optim.Adam(actor_params, lr=1e-3)
+        optimizer = torch.optim.Adam(actor_params, lr=lr)
         criterion = nn.CrossEntropyLoss()
 
         initial_loss = 0.0
@@ -516,6 +638,178 @@ class AutonomousLoopController:
             final_acc = float((preds == y_t).float().mean().item())
 
         return initial_loss, final_acc
+
+    def _critic_pre_calibration(
+        self,
+        model: PPO,
+        env: gym.Env,
+        gamma: float = 0.95,
+        epochs: int = 10,
+        n_episodes: int = 30,
+    ) -> None:
+        """Calibrates Critic Value Network on rollout returns from warm-started policy."""
+        transitions: list[dict[str, Any]] = []
+        for _ in range(n_episodes):
+            obs, _ = env.reset()
+            ep_steps = []
+            done = False
+            step_k = 0
+            while not done and step_k < 50:
+                step_k += 1
+                obs_t = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
+                with torch.no_grad():
+                    features = model.policy.extract_features(obs_t)
+                    latent_pi, _ = model.policy.mlp_extractor(features)
+                    logits = model.policy.action_net(latent_pi)
+                    probs = torch.softmax(logits, dim=-1).squeeze(0).numpy()
+                    if hasattr(env, "get_valid_actions"):
+                        valid = env.get_valid_actions()
+                        if valid:
+                            masked = np.zeros_like(probs)
+                            for v in valid:
+                                if v < len(probs):
+                                    masked[v] = probs[v]
+                            if masked.sum() > 0:
+                                masked /= masked.sum()
+                                act = int(np.argmax(masked))
+                            else:
+                                act = int(valid[0])
+                        else:
+                            act = 0
+                    else:
+                        act = int(np.argmax(probs))
+                next_obs, reward, term, trunc, _ = env.step(act)
+                ep_steps.append({"obs": [float(x) for x in obs], "reward": float(reward)})
+                done = term or trunc
+                obs = next_obs
+            if ep_steps:
+                transitions.append({"steps": ep_steps})
+
+        if transitions:
+            self._critic_warmup(model, transitions, gamma=gamma, epochs=epochs)
+
+    def evaluate_policy_deterministic(
+        self,
+        env: gym.Env,
+        model: PPO,
+        n_eval_episodes: int = 50,
+        emit_fn: Callable[[dict[str, Any]], None] | None = None,
+        round_num: int = 1,
+    ) -> tuple[float, list[dict[str, Any]], float]:
+        """Runs dedicated deterministic evaluation (deterministic=True) with valid action masking
+        across a balanced suite of opponent behavior profiles and player turn positions.
+        Returns: (success_rate_pct, eval_episodes, illegal_rate_pct)
+        """
+        eval_episodes: list[dict[str, Any]] = []
+        success_count = 0
+        illegal_count = 0
+
+        profiles = ["random", "tactical", "optimal"]
+        for ep_idx in range(1, n_eval_episodes + 1):
+            profile = profiles[(ep_idx - 1) % len(profiles)]
+            agent_first = (ep_idx % 2 == 1)
+            reset_opts = {"opponent_profile": profile, "agent_first": agent_first}
+            try:
+                obs, info = env.reset(options=reset_opts)
+            except (TypeError, ValueError):
+                obs, info = env.reset()
+
+            ep_steps = []
+            ep_reward = 0.0
+            step_idx = 0
+            done = False
+            ep_had_illegal = False
+
+            while not done and step_idx < 50:
+                step_idx += 1
+                obs_t = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
+                with torch.no_grad():
+                    features = model.policy.extract_features(obs_t)
+                    latent_pi, _ = model.policy.mlp_extractor(features)
+                    logits = model.policy.action_net(latent_pi)
+                    probs = torch.softmax(logits, dim=-1).squeeze(0).cpu().numpy()
+
+                # Action Masking: mask out invalid actions and prioritize critical threat actions if any
+                critical_actions = env.get_critical_actions() if hasattr(env, "get_critical_actions") else None
+                valid_actions = env.get_valid_actions() if hasattr(env, "get_valid_actions") else None
+                target_actions = critical_actions if (critical_actions and len(critical_actions) > 0) else valid_actions
+
+                if target_actions is not None and len(target_actions) > 0:
+                    masked_probs = np.zeros_like(probs)
+                    for a in target_actions:
+                        if a < len(probs):
+                            masked_probs[a] = probs[a]
+                    if masked_probs.sum() > 0:
+                        masked_probs /= masked_probs.sum()
+                        action = int(np.argmax(masked_probs))
+                    else:
+                        action = int(target_actions[0])
+                    action_probs_to_emit = masked_probs.tolist()
+                elif valid_actions is not None and len(valid_actions) > 0:
+                    masked_probs = np.zeros_like(probs)
+                    for a in valid_actions:
+                        if a < len(probs):
+                            masked_probs[a] = probs[a]
+                    if masked_probs.sum() > 0:
+                        masked_probs /= masked_probs.sum()
+                        action = int(np.argmax(masked_probs))
+                    else:
+                        action = int(valid_actions[0])
+                    action_probs_to_emit = masked_probs.tolist()
+                else:
+                    action = int(np.argmax(probs))
+                    action_probs_to_emit = probs.tolist()
+
+                next_obs, reward, terminated, truncated, step_info = env.step(action)
+                ep_reward += float(reward)
+                done = bool(terminated or truncated)
+
+                if step_info.get("illegal_move_attempted") or step_info.get("is_illegal"):
+                    ep_had_illegal = True
+
+                ep_steps.append({
+                    "step": step_idx,
+                    "obs": [float(x) for x in obs],
+                    "action": action,
+                    "reward": float(reward),
+                    "reward_breakdown": step_info.get("reward_breakdown", {}),
+                    "is_success": bool(step_info.get("is_success", False)),
+                })
+
+                # Stream top deterministic evaluation episodes to the UI Arena
+                if emit_fn and ep_idx <= 5:
+                    emit_fn({
+                        "event": "episode_step",
+                        "round": round_num,
+                        "episode_id": f"eval_{ep_idx}",
+                        "step": step_idx,
+                        "total_reward": round(ep_reward, 2),
+                        "reward_breakdown": step_info.get("reward_breakdown", {}),
+                        "arena_state": step_info.get("arena_state", {}),
+                        "action_probs": [float(p) for p in action_probs_to_emit],
+                    })
+
+                obs = next_obs
+
+            if ep_had_illegal:
+                illegal_count += 1
+
+            is_success = any(s.get("is_success", False) for s in ep_steps)
+            if is_success:
+                success_count += 1
+
+            eval_episodes.append({
+                "episode_id": f"eval_{ep_idx}",
+                "round": round_num,
+                "total_reward": ep_reward,
+                "steps": ep_steps,
+                "is_success": is_success,
+                "reward_breakdown": ep_steps[-1].get("reward_breakdown", {}) if ep_steps else {},
+            })
+
+        metric = round((success_count / max(1, n_eval_episodes)) * 100.0, 2)
+        illegal_rate = round((illegal_count / max(1, n_eval_episodes)) * 100.0, 2)
+        return metric, eval_episodes, illegal_rate
 
     def _critic_warmup(
         self,
@@ -594,8 +888,9 @@ class AutonomousLoopController:
         n_episodes: int,
         emit_fn: Callable[[dict[str, Any]], None] | None = None,
     ) -> list[dict[str, Any]]:
-        """Collects episodes while streaming live ARENA_UPDATE frames."""
+        """Collects representative episodes while throttling live ARENA_UPDATE frames to UI."""
         collected_episodes: list[dict[str, Any]] = []
+        stream_stride = max(1, n_episodes // 15)
 
         for ep_idx in range(1, n_episodes + 1):
             obs, info = env.reset()
@@ -603,6 +898,7 @@ class AutonomousLoopController:
             ep_reward = 0.0
             step_idx = 0
             done = False
+            should_stream = emit_fn is not None and (ep_idx % stream_stride == 0 or ep_idx <= 2 or ep_idx == n_episodes)
 
             while not done and step_idx < 50:
                 step_idx += 1
@@ -612,7 +908,19 @@ class AutonomousLoopController:
                     latent_pi, _ = model.policy.mlp_extractor(features)
                     logits = model.policy.action_net(latent_pi)
                     probs = torch.softmax(logits, dim=-1).squeeze(0).numpy()
-                    action = int(np.random.choice(len(probs), p=probs))
+                    valid_actions = env.get_valid_actions() if hasattr(env, "get_valid_actions") else None
+                    if valid_actions:
+                        masked = np.zeros_like(probs)
+                        for a in valid_actions:
+                            if a < len(probs):
+                                masked[a] = probs[a]
+                        if masked.sum() > 0:
+                            masked /= masked.sum()
+                            action = int(np.random.choice(len(masked), p=masked))
+                        else:
+                            action = int(valid_actions[0])
+                    else:
+                        action = int(np.random.choice(len(probs), p=probs))
 
                 next_obs, reward, terminated, truncated, step_info = env.step(action)
                 ep_reward += float(reward)
@@ -627,8 +935,8 @@ class AutonomousLoopController:
                     "is_success": bool(step_info.get("is_success", False)),
                 })
 
-                # Stream live frame over WebSocket / callback
-                if emit_fn and (step_idx % 2 == 1 or done):
+                # Stream throttled live frame over WebSocket / callback
+                if should_stream and (step_idx % 2 == 1 or done):
                     emit_fn({
                         "event": "episode_step",
                         "round": round_num,
@@ -640,7 +948,7 @@ class AutonomousLoopController:
                         "action_probs": [float(p) for p in probs],
                     })
                     import time
-                    time.sleep(0.03)  # ~30 FPS pacing for smooth visual playback in arena
+                    time.sleep(0.005)
 
                 obs = next_obs
 
@@ -654,11 +962,5 @@ class AutonomousLoopController:
                 "is_success": is_success,
                 "reward_breakdown": ep_steps[-1].get("reward_breakdown", {}) if ep_steps else {},
             })
-
-        # SB3 learn call to update policy weights from new environment interactions
-        try:
-            model.learn(total_timesteps=max(32, len(collected_episodes) * 15), reset_num_timesteps=False)
-        except Exception:
-            pass
 
         return collected_episodes

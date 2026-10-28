@@ -95,6 +95,17 @@ def execute_inference(
         obs_batch = np.expand_dims(obs_batch, axis=0)
 
     obs_batch = obs_batch.astype(np.float32)
+    try:
+        expected_dim = sess.get_inputs()[0].shape[1]
+        if isinstance(expected_dim, int) and obs_batch.shape[1] != expected_dim:
+            if obs_batch.shape[1] < expected_dim:
+                pad = np.zeros((obs_batch.shape[0], expected_dim - obs_batch.shape[1]), dtype=np.float32)
+                obs_batch = np.hstack([obs_batch, pad])
+            else:
+                obs_batch = obs_batch[:, :expected_dim]
+    except Exception:
+        pass
+
     probs = sess.run(None, {"obs": obs_batch})[0]
     predicted_actions = np.argmax(probs, axis=-1)
 
@@ -241,7 +252,11 @@ def main():
     sess, baseline_data, action_labels = load_bundle_context(bundle_dir)
 
     if args.sample or not args.input:
-        feat_dim = len(baseline_data.get("feature_names", [0]*9)) or 9
+        try:
+            inp_shape = sess.get_inputs()[0].shape
+            feat_dim = inp_shape[1] if (len(inp_shape) > 1 and isinstance(inp_shape[1], int)) else (len(baseline_data.get("feature_names", [])) or 9)
+        except Exception:
+            feat_dim = len(baseline_data.get("feature_names", [0]*9)) or 9
         dummy_data = np.random.randn(16, feat_dim).astype(np.float32)
         res = execute_inference(sess, baseline_data, action_labels, dummy_data)
         print_cli_summary(res, len(dummy_data))
@@ -338,7 +353,12 @@ class PolicyExporter:
 
         # 1. Export ONNX and verify numerical parity (< 1e-5)
         onnx_file = bundle_dir / "model.onnx"
-        obs_dim = len(blueprint.observation_features)
+        if model is not None and hasattr(model, "observation_space") and hasattr(model.observation_space, "shape") and model.observation_space.shape:
+            obs_dim = int(model.observation_space.shape[0])
+        elif model is not None and hasattr(model, "policy") and hasattr(model.policy, "observation_space") and hasattr(model.policy.observation_space, "shape") and model.policy.observation_space.shape:
+            obs_dim = int(model.policy.observation_space.shape[0])
+        else:
+            obs_dim = len(blueprint.observation_features)
         cls.export_onnx(model=model, output_path=onnx_file, obs_dim=obs_dim)
         max_diff = cls.verify_parity(model=model, onnx_path=onnx_file, obs_dim=obs_dim)
 
@@ -358,13 +378,13 @@ class PolicyExporter:
 
         # 4. Generate drift baseline fitted on realistic environment observations
         from rl_ide.contracts.adapter import EpisodeLog, StepResult
-        from rl_ide.synthesizer.env_builder import load_synthesized_env_class
+        from rl_ide.synthesizer.env_builder import load_synthesized_env_class, instantiate_env
 
         real_obs_samples: list[list[float]] = []
         try:
             if Path(env_module_path).exists():
                 env_cls = load_synthesized_env_class(env_module_path)
-                sample_env = env_cls()
+                sample_env = instantiate_env(env_cls)
                 if hasattr(sample_env, "get_demonstrations"):
                     demos_X, _ = sample_env.get_demonstrations(num_samples=50)
                     real_obs_samples.extend(demos_X.tolist())
@@ -399,9 +419,15 @@ class PolicyExporter:
             ]
             dummy_episodes.append(EpisodeLog(episode_id=ep_i, steps=steps))
 
+        feature_names = list(blueprint.observation_features)
+        if len(feature_names) < obs_dim:
+            feature_names = feature_names + [f"feature_{i}" for i in range(len(feature_names), obs_dim)]
+        elif len(feature_names) > obs_dim:
+            feature_names = feature_names[:obs_dim]
+
         baseline = DriftDetector.fit_baseline(
             episodes=dummy_episodes,
-            feature_names=blueprint.observation_features,
+            feature_names=feature_names,
         )
         baseline.save(bundle_dir / "drift_baseline.json")
 

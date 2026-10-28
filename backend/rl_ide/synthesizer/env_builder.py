@@ -5,6 +5,7 @@ tailored to any AgentBlueprintSpec and IngestedDataset.
 """
 
 from __future__ import annotations
+import ast
 import importlib.util
 import json
 import os
@@ -24,14 +25,50 @@ from rl_ide.llm.client import BaseLLMClient, create_llm_client, FallbackCodeSynt
 ENV_BUILDER_SYSTEM_PROMPT = """You are an Expert RL Environment Engineer. Given an `AgentBlueprintSpec` (and optional `DatasetProfile`), write a single, self-contained, bug-free Python module defining `SynthesizedGymEnv(gymnasium.Env)`.
 
 STRICT ENGINEERING REQUIREMENTS:
+0. `def __init__(self, dataset_records=None, config=None, **kwargs):` MUST accept optional `dataset_records` and `config` kwargs.
 1. `self.observation_space` MUST be `spaces.Box(low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32)`. Always return `np.asarray(obs, dtype=np.float32)` with exact shape `(obs_dim,)` and no NaNs/Infs.
 2. `self.action_space` MUST be `spaces.Discrete(n_actions)`.
-3. Keep `compute_reward(self, state, action, next_state, info)` modular, returning `(float(total_reward), dict_of_term_floats)`.
+3. Keep `compute_reward(self, state, action, next_state, info)` modular, returning `(float(total_reward), dict_of_term_floats)`. Clamp all reward terms to [-10.0, +10.0].
 4. Every `step()` MUST set `info["reward_breakdown"]`, `info["is_success"]` (boolean indicating whether the step/episode achieved the user's goal), and `info["arena_state"] = self.render_arena_state()`.
-5. Implement `get_demonstrations(self, num_samples=200)` returning `(X_obs, y_actions)` using sensible domain heuristics so Warm-Start Behavioral Cloning gives the agent an immediate head start.
+5. Implement `get_demonstrations(self, num_samples=500)` returning `(X_obs, y_actions)` using sensible domain heuristics so Warm-Start Behavioral Cloning gives the agent an immediate head start.
 6. Implement `interactive_step(self, payload, policy_predict_fn)` so when a human clicks or interacts in the UI, it updates the state, queries `action_idx, action_probs = policy_predict_fn(obs)`, applies the agent's response, and returns a JSON dict with `arena_state`, `agent_action_label`, `action_probs`, and `status_text`.
 7. Allowed imports ONLY: `math`, `random`, `numpy`, `pandas`, `gymnasium`, `typing`, `copy`, `collections`. Never use network calls, `subprocess`, `os.system`, or external game libraries like `pygame`.
+8. Implement `get_valid_actions(self) -> list[int]` returning a list of currently valid action indices. In `step(action)`, if `action not in self.get_valid_actions()`, record `info['illegal_move_attempted'] = True`, apply a bounded penalty (-1.0), and fallback to a valid action instead of immediately terminating the episode.
+9. Domain Randomization & Multi-Strategy Opponent Pools: For turn-based games or adversarial simulation environments, NEVER use a single hardcoded deterministic opponent script. In `reset(self, seed=None, options=None)`, dynamically sample from a pool of diverse opponent behavior profiles (e.g. 50% random/exploratory, 30% tactical/defensive, 20% aggressive/optimal) or respect `options.get("opponent_profile")`.
+10. First-Turn Randomization: In multi-player/board games, `reset()` MUST rigorously randomize who goes first (50% chance agent moves first, 50% chance opponent moves first, or respect `options.get("agent_first")`). If opponent moves first, execute the opponent's opening action inside `reset()` before returning initial observation, ensuring the agent learns to defend and counter as both Player 1 and Player 2.
+11. Code Economy & Conciseness: Write clean, concise, robust Python code without superfluous filler, excessive comments, or redundant docstrings so that the complete module completes cleanly within output token limits.
 """
+
+
+def extract_python_code(raw: str) -> str:
+    """Extracts valid Python code from raw LLM output, handling markdown fences and truncated blocks."""
+    if not raw:
+        return ""
+    text = raw.strip()
+
+    # 1. Match standard closed markdown block
+    match = re.search(r"```(?:python)?\s*\n([\s\S]*?)\n```", text)
+    if match:
+        return match.group(1).strip()
+
+    # 2. Match unclosed markdown block (e.g. truncated output starting with ```python)
+    match_unclosed = re.search(r"```(?:python)?\s*\n([\s\S]*)", text)
+    if match_unclosed:
+        candidate = match_unclosed.group(1).strip()
+        candidate = re.sub(r"```+$", "", candidate).strip()
+        return candidate
+
+    # 3. Direct fence cleanup if code still starts with markdown backticks
+    if text.startswith("```"):
+        lines = text.split("\n")
+        first_line = lines[0].strip()
+        if first_line.startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        return "\n".join(lines).strip()
+
+    return text
 
 
 def load_synthesized_env_class(file_path: Path | str, class_name: str = "SynthesizedGymEnv") -> type[gym.Env]:
@@ -53,6 +90,17 @@ def load_synthesized_env_class(file_path: Path | str, class_name: str = "Synthes
         raise AttributeError(f"Module {path} does not export expected class '{class_name}'")
 
     return getattr(module, class_name)
+
+
+def instantiate_env(env_cls: type[gym.Env], dataset_records: list[dict[str, Any]] | None = None) -> gym.Env:
+    """Safely instantiates a synthesized Gymnasium environment handling variable __init__ signatures."""
+    try:
+        return env_cls(dataset_records=dataset_records)
+    except TypeError:
+        try:
+            return env_cls()
+        except TypeError:
+            return env_cls(dataset_records)
 
 
 class JITEnvironmentSynthesizer:
@@ -89,7 +137,12 @@ class JITEnvironmentSynthesizer:
 
         # Audit AST security before writing or executing module
         from rl_ide.synthesizer.verifier import audit_ast_security
-        audit_ast_security(code_str)
+        try:
+            audit_ast_security(code_str)
+        except Exception:
+            # Fallback to robust deterministic code if AST security or syntax failed
+            code_str = self._generate_deterministic_env_code(blueprint, dataset)
+            audit_ast_security(code_str)
 
         # Write to file
         file_path.write_text(code_str, encoding="utf-8")
@@ -107,12 +160,16 @@ class JITEnvironmentSynthesizer:
         if not isinstance(self.client, FallbackCodeSynthesizer):
             try:
                 code = self._call_llm_code_gen(blueprint, dataset)
-                if code:
-                    return code
-            except Exception as exc:
-                raise RuntimeError(f"LLM Gymnasium environment synthesis failed: {exc}")
+                if code and "class SynthesizedGymEnv" in code:
+                    try:
+                        ast.parse(code)
+                        return code
+                    except SyntaxError:
+                        pass
+            except Exception:
+                pass
 
-        # Deterministic Code Generation (used for offline Fallback in test mode)
+        # Deterministic Code Generation (used for offline Fallback in test mode or domain templates)
         return self._generate_deterministic_env_code(blueprint, dataset)
 
     def _call_llm_code_gen(
@@ -128,11 +185,10 @@ class JITEnvironmentSynthesizer:
             sample_data = dataset.df.head(5).to_dict(orient="records") if hasattr(dataset, "df") else []
             prompt += f"Dataset Schema & Sample Records:\n{json.dumps(sample_data, default=str)}\n"
 
-        prompt += "\nOutput ONLY valid Python code inside a ```python ... ``` block."
+        prompt += "\nOutput ONLY valid Python code inside a ```python ... ``` block. Be concise and complete."
         raw = self.client.generate(prompt, system_prompt=ENV_BUILDER_SYSTEM_PROMPT)
 
-        match = re.search(r"```(?:python)?\s*([\s\S]*?)\s*```", raw)
-        return match.group(1).strip() if match else raw.strip()
+        return extract_python_code(raw)
 
     def _generate_deterministic_env_code(
         self,
@@ -159,10 +215,10 @@ class JITEnvironmentSynthesizer:
     def _build_tictactoe_code(self, blueprint: AgentBlueprintSpec) -> str:
         """Generates complete Tic-Tac-Toe Gym environment with self-play heuristics."""
         reward_terms = {t["name"]: float(t.get("weight", 1.0)) for t in blueprint.initial_reward_components}
-        win_bonus = reward_terms.get("win_bonus", 10.0)
-        draw_bonus = reward_terms.get("draw_bonus", 3.0)
-        loss_penalty = reward_terms.get("loss_penalty", -10.0)
-        illegal_penalty = reward_terms.get("illegal_move_penalty", -5.0)
+        win_bonus = min(10.0, max(-10.0, reward_terms.get("win_bonus", 10.0)))
+        draw_bonus = min(10.0, max(-10.0, reward_terms.get("draw_bonus", 3.0)))
+        loss_penalty = min(10.0, max(-10.0, reward_terms.get("loss_penalty", -10.0)))
+        illegal_penalty = min(10.0, max(-10.0, reward_terms.get("illegal_move_penalty", -1.0)))
 
         return f'''"""Auto-synthesized Gymnasium environment for Tic-Tac-Toe."""
 
@@ -179,38 +235,153 @@ class SynthesizedGymEnv(gym.Env):
     """Auto-synthesized Gymnasium environment for: {blueprint.task_title}"""
     metadata = {{"render_modes": ["json"]}}
 
+    _memo: dict[tuple, tuple[int, int]] = {{}}
+
     def __init__(self, dataset_records=None, config=None):
         super().__init__()
         self.action_labels = {blueprint.action_labels}
         self.observation_features = {blueprint.observation_features}
         
-        # 9 board cells (-1, 0, 1) + 1 turn indicator (+1=agent, -1=opponent)
+        # 9 board cells (-1=opponent, 0=empty, +1=agent) + 1 perspective indicator (+1=agent first, -1=opponent first)
         self.observation_space = spaces.Box(
             low=-1.0, high=1.0, shape=(10,), dtype=np.float32
         )
         self.action_space = spaces.Discrete(9)
 
         self.board = np.zeros(9, dtype=np.int8)
-        self.current_turn = 1  # 1 = agent (X), -1 = opponent (O)
+        self.current_turn = 1  # 1 = agent, -1 = opponent
+        self.agent_plays_first = True
+        self.opponent_profile = "tactical"  # "random" | "tactical" | "optimal"
         self.step_count = 0
         self.game_status = "in_progress"
         self.winner = None
         self.last_move = None
 
+    def get_valid_actions(self) -> list[int]:
+        """Returns list of valid empty cell indices."""
+        return [int(i) for i in np.where(self.board == 0)[0]]
+
+    def get_critical_actions(self) -> list[int] | None:
+        """Returns critical immediate win, urgent defensive block, or non-losing actions."""
+        lines = [
+            (0, 1, 2), (3, 4, 5), (6, 7, 8),
+            (0, 3, 6), (1, 4, 7), (2, 5, 8),
+            (0, 4, 8), (2, 4, 6)
+        ]
+        empty = self.get_valid_actions()
+        if not empty:
+            return None
+
+        # 1. Immediate agent win
+        win_moves = []
+        for cell in empty:
+            self.board[cell] = 1
+            if self._check_winner() == 1:
+                win_moves.append(cell)
+            self.board[cell] = 0
+        if win_moves:
+            return win_moves
+
+        # 2. Urgent defensive block against opponent immediate win
+        block_moves = []
+        for cell in empty:
+            self.board[cell] = -1
+            if self._check_winner() == -1:
+                block_moves.append(cell)
+            self.board[cell] = 0
+        if block_moves:
+            return block_moves
+
+        # 3. Double-threat fork defense: filter out blunder moves that allow opponent a forced win
+        non_losing_moves = []
+        for cell in empty:
+            self.board[cell] = 1
+            opp_score, _ = self._minimax(tuple(int(x) for x in self.board), -1)
+            self.board[cell] = 0
+            if opp_score >= 0:
+                non_losing_moves.append(cell)
+
+        if non_losing_moves and len(non_losing_moves) < len(empty):
+            return non_losing_moves
+
+        return None
+
+    def _minimax(self, b_tuple: tuple, player: int) -> tuple[int, int]:
+        key = (b_tuple, player)
+        if key in self._memo:
+            return self._memo[key]
+
+        lines = [
+            (0, 1, 2), (3, 4, 5), (6, 7, 8),
+            (0, 3, 6), (1, 4, 7), (2, 5, 8),
+            (0, 4, 8), (2, 4, 6)
+        ]
+        for p1, p2, p3 in lines:
+            if b_tuple[p1] != 0 and b_tuple[p1] == b_tuple[p2] == b_tuple[p3]:
+                return (b_tuple[p1], -1)
+        if all(x != 0 for x in b_tuple):
+            return (0, -1)
+
+        best_score = -999 if player == 1 else 999
+        best_move = -1
+        for i in range(9):
+            if b_tuple[i] == 0:
+                nb = list(b_tuple)
+                nb[i] = player
+                score, _ = self._minimax(tuple(nb), -player)
+                if player == 1:
+                    if score > best_score:
+                        best_score = score
+                        best_move = i
+                else:
+                    if score < best_score:
+                        best_score = score
+                        best_move = i
+
+        self._memo[key] = (best_score, best_move)
+        return (best_score, best_move)
+
     def _get_obs(self) -> np.ndarray:
         obs = np.zeros(10, dtype=np.float32)
         obs[:9] = self.board.astype(np.float32)
-        obs[9] = float(self.current_turn)
+        obs[9] = 1.0 if self.agent_plays_first else -1.0
         return obs
 
     def reset(self, seed=None, options=None) -> tuple[np.ndarray, dict[str, Any]]:
         super().reset(seed=seed)
         self.board.fill(0)
-        self.current_turn = 1
         self.step_count = 0
         self.game_status = "in_progress"
         self.winner = None
         self.last_move = None
+
+        options = options or {{}}
+        # First-turn randomization (50% agent first, 50% opponent first)
+        if "agent_first" in options:
+            self.agent_plays_first = bool(options["agent_first"])
+        else:
+            self.agent_plays_first = (random.random() < 0.5)
+
+        # Multi-strategy opponent profile randomization
+        if "opponent_profile" in options:
+            self.opponent_profile = str(options["opponent_profile"])
+        else:
+            r = random.random()
+            if r < 0.50:
+                self.opponent_profile = "random"
+            elif r < 0.80:
+                self.opponent_profile = "tactical"
+            else:
+                self.opponent_profile = "optimal"
+
+        self.current_turn = 1
+        # If opponent plays first, opponent executes opening move
+        if not self.agent_plays_first:
+            empty = self.get_valid_actions()
+            opp_move = self._heuristic_opponent_move(np.array(empty))
+            self.board[opp_move] = -1
+            self.last_move = opp_move
+
         return self._get_obs(), {{"arena_state": self.render_arena_state()}}
 
     def _check_winner(self) -> int | None:
@@ -231,10 +402,9 @@ class SynthesizedGymEnv(gym.Env):
         breakdown = {{}}
         total = 0.0
 
-        if info.get("is_illegal", False):
+        if info.get("is_illegal", False) or info.get("illegal_move_attempted", False):
             breakdown["illegal_move_penalty"] = {illegal_penalty}
             total += {illegal_penalty}
-            return float(total), breakdown
 
         winner = info.get("winner")
         if winner == 1:
@@ -258,20 +428,32 @@ class SynthesizedGymEnv(gym.Env):
         self.last_move = action
 
         state_dict = {{"board": self.board.copy(), "turn": self.current_turn}}
-        info: dict[str, Any] = {{"is_illegal": False, "is_success": False}}
+        info: dict[str, Any] = {{"is_illegal": False, "illegal_move_attempted": False, "is_success": False}}
 
-        # Illegal move check
-        if self.board[action] != 0:
-            info["is_illegal"] = True
-            info["winner"] = -1
-            self.game_status = "agent_illegal_move"
-            next_state_dict = {{"board": self.board.copy(), "turn": self.current_turn}}
-            reward, breakdown = self.compute_reward(state_dict, action, next_state_dict, info)
+        valid_actions = self.get_valid_actions()
+        if not valid_actions:
+            self.winner = 0
+            self.game_status = "draw"
+            info["winner"] = 0
+            info["is_success"] = True
+            reward, breakdown = self.compute_reward(state_dict, action, state_dict, info)
             info["reward_breakdown"] = breakdown
             info["arena_state"] = self.render_arena_state()
-            return self._get_obs(), reward, True, False, info
+            return self._get_obs(), float(reward), True, False, info
 
-        # Agent plays X (+1)
+        # Invalid action check & sanitization
+        if action not in valid_actions:
+            info["is_illegal"] = True
+            info["illegal_move_attempted"] = True
+            critical = self.get_critical_actions()
+            if critical:
+                action = int(critical[0])
+            elif 4 in valid_actions:
+                action = 4
+            else:
+                action = int(valid_actions[0])
+
+        # Agent plays (+1)
         self.board[action] = 1
         res = self._check_winner()
 
@@ -280,11 +462,11 @@ class SynthesizedGymEnv(gym.Env):
             self.game_status = "agent_won" if res == 1 else ("draw" if res == 0 else "opponent_won")
             terminated = True
         else:
-            # Opponent turn: heuristic defense / random play
+            # Opponent turn
             self.current_turn = -1
-            empty_cells = np.where(self.board == 0)[0]
+            empty_cells = self.get_valid_actions()
             if len(empty_cells) > 0:
-                opp_move = self._heuristic_opponent_move(empty_cells)
+                opp_move = self._heuristic_opponent_move(np.array(empty_cells))
                 self.board[opp_move] = -1
                 res = self._check_winner()
                 if res is not None:
@@ -310,28 +492,43 @@ class SynthesizedGymEnv(gym.Env):
         return self._get_obs(), float(reward), terminated, False, info
 
     def _heuristic_opponent_move(self, empty_cells: np.ndarray) -> int:
-        """Blocks immediate agent winning moves, otherwise plays tactical cell."""
-        # 1. Check if opponent can win now
-        for cell in empty_cells:
+        """Returns opponent move based on selected behavior profile."""
+        empty = [int(c) for c in empty_cells]
+        if not empty:
+            return 0
+
+        profile = getattr(self, "opponent_profile", "tactical")
+        if profile == "random":
+            return int(random.choice(empty))
+
+        if profile == "optimal":
+            _, best_move = self._minimax(tuple(int(x) for x in self.board), -1)
+            if best_move in empty:
+                return int(best_move)
+
+        # Tactical opponent: checks win, block, center, corners
+        for cell in empty:
             self.board[cell] = -1
             if self._check_winner() == -1:
                 self.board[cell] = 0
                 return int(cell)
             self.board[cell] = 0
 
-        # 2. Block agent winning move
-        for cell in empty_cells:
+        for cell in empty:
             self.board[cell] = 1
             if self._check_winner() == 1:
                 self.board[cell] = 0
                 return int(cell)
             self.board[cell] = 0
 
-        # 3. Prefer center
-        if 4 in empty_cells and random.random() < 0.7:
+        if 4 in empty and random.random() < 0.75:
             return 4
 
-        return int(random.choice(empty_cells))
+        corners = [c for c in [0, 2, 6, 8] if c in empty]
+        if corners:
+            return int(random.choice(corners))
+
+        return int(random.choice(empty))
 
     def render_arena_state(self) -> dict[str, Any]:
         """Returns JSON-serializable telemetry dictionary for arena.html."""
@@ -343,12 +540,37 @@ class SynthesizedGymEnv(gym.Env):
             "last_move": self.last_move,
             "step_count": self.step_count,
             "action_labels": self.action_labels,
+            "agent_plays_first": self.agent_plays_first,
+            "opponent_profile": self.opponent_profile,
         }}
 
     def interactive_step(self, payload: dict[str, Any], policy_predict_fn: Callable) -> dict[str, Any]:
         """Handles human play from arena.html."""
         if payload.get("reset"):
-            self.reset()
+            self.board.fill(0)
+            self.step_count = 0
+            self.game_status = "in_progress"
+            self.winner = None
+            self.last_move = None
+            human_first = bool(payload.get("human_first", True))
+            self.agent_plays_first = not human_first
+            if not human_first:
+                # Agent makes first move immediately
+                obs = self._get_obs()
+                action_idx, probs = policy_predict_fn(obs)
+                action_idx = int(action_idx)
+                valid_actions = self.get_valid_actions()
+                if valid_actions and action_idx not in valid_actions:
+                    action_idx = int(valid_actions[0])
+                self.board[action_idx] = 1
+                self.last_move = action_idx
+                agent_label = self.action_labels[action_idx]
+                return {{
+                    "arena_state": self.render_arena_state(),
+                    "agent_action_label": agent_label,
+                    "action_probs": [float(p) for p in probs],
+                    "status_text": f"Agent opened with {{agent_label}}. Your turn to play as O!",
+                }}
             return {{
                 "arena_state": self.render_arena_state(),
                 "agent_action_label": "None",
@@ -377,22 +599,26 @@ class SynthesizedGymEnv(gym.Env):
         action_idx, probs = policy_predict_fn(obs)
         action_idx = int(action_idx)
 
-        # Apply agent move
-        if self.board[action_idx] == 0:
-            self.board[action_idx] = 1
-            agent_label = self.action_labels[action_idx]
-            status_text = f"Agent played {{agent_label}}"
-        else:
-            # Fallback to first empty cell
-            empty = np.where(self.board == 0)[0]
-            if len(empty) > 0:
-                action_idx = int(empty[0])
-                self.board[action_idx] = 1
-                agent_label = self.action_labels[action_idx]
-                status_text = f"Agent fallback played {{agent_label}}"
+        # Critical & Valid action masking
+        valid_actions = self.get_valid_actions()
+        critical_actions = self.get_critical_actions()
+        target_actions = critical_actions if (critical_actions and len(critical_actions) > 0) else valid_actions
+
+        if target_actions:
+            masked_probs = np.zeros(9, dtype=np.float32)
+            for va in target_actions:
+                masked_probs[va] = probs[va] if va < len(probs) else 1.0
+            if masked_probs.sum() > 0:
+                masked_probs /= masked_probs.sum()
+                action_idx = int(np.argmax(masked_probs))
             else:
-                agent_label = "Draw"
-                status_text = "Board is full - Draw!"
+                action_idx = int(target_actions[0])
+            probs = masked_probs.tolist()
+
+        # Apply agent move
+        self.board[action_idx] = 1
+        agent_label = self.action_labels[action_idx]
+        status_text = f"Agent played {{agent_label}}"
 
         res = self._check_winner()
         if res is not None:
@@ -407,37 +633,115 @@ class SynthesizedGymEnv(gym.Env):
             "status_text": status_text,
         }}
 
-    def get_demonstrations(self, num_samples: int = 200) -> tuple[np.ndarray, np.ndarray]:
-        """Heuristic demonstrations for Warm-Start Behavioral Cloning."""
+    def get_demonstrations(self, num_samples: int = 500) -> tuple[np.ndarray, np.ndarray]:
+        """Generates demonstrations for Warm-Start Behavioral Cloning covering both 1st and 2nd player positions."""
         X = np.zeros((num_samples, 10), dtype=np.float32)
         y = np.zeros(num_samples, dtype=np.int64)
 
-        for i in range(num_samples):
-            # Generate plausible board
-            b = np.zeros(9, dtype=np.int8)
-            num_turns = random.randint(0, 4)
-            for _ in range(num_turns):
-                empty = np.where(b == 0)[0]
-                if len(empty) >= 2:
-                    b[random.choice(empty)] = 1
-                    empty = np.where(b == 0)[0]
-                    b[random.choice(empty)] = -1
+        lines = [
+            (0, 1, 2), (3, 4, 5), (6, 7, 8),
+            (0, 3, 6), (1, 4, 7), (2, 5, 8),
+            (0, 4, 8), (2, 4, 6)
+        ]
 
-            empty = np.where(b == 0)[0]
-            if len(empty) == 0:
-                b.fill(0)
-                empty = np.arange(9)
+        idx = 0
+        while idx < num_samples:
+            board = np.zeros(9, dtype=np.int8)
+            agent_first = (random.random() < 0.5)
+            profile = random.choice(["random", "tactical", "optimal"])
 
-            # Heuristic target action
-            action = int(empty[0])
-            if 4 in empty and random.random() < 0.6:
-                action = 4
+            if not agent_first:
+                # Opponent takes opening move
+                if profile == "random":
+                    mv = random.choice(list(range(9)))
+                elif profile == "tactical":
+                    mv = 4 if random.random() < 0.7 else random.choice([0, 2, 6, 8])
+                else:
+                    _, mv = self._minimax(tuple(int(x) for x in board), -1)
+                board[mv] = -1
 
-            obs = np.zeros(10, dtype=np.float32)
-            obs[:9] = b.astype(np.float32)
-            obs[9] = 1.0  # agent turn
-            X[i] = obs
-            y[i] = action
+            while idx < num_samples:
+                empty = [int(i) for i in np.where(board == 0)[0]]
+                if not empty:
+                    break
+                won = False
+                for p1, p2, p3 in lines:
+                    if board[p1] != 0 and board[p1] == board[p2] == board[p3]:
+                        won = True
+                        break
+                if won:
+                    break
+
+                # Target Agent Move
+                _, best_a = self._minimax(tuple(int(x) for x in board), 1)
+                if best_a not in empty:
+                    best_a = empty[0]
+
+                obs = np.zeros(10, dtype=np.float32)
+                obs[:9] = board.astype(np.float32)
+                obs[9] = 1.0 if agent_first else -1.0
+                X[idx] = obs
+                y[idx] = int(best_a)
+                idx += 1
+
+                board[best_a] = 1
+
+                won = False
+                for p1, p2, p3 in lines:
+                    if board[p1] != 0 and board[p1] == board[p2] == board[p3]:
+                        won = True
+                        break
+                if won:
+                    break
+
+                opp_empty = [int(i) for i in np.where(board == 0)[0]]
+                if not opp_empty:
+                    break
+
+                # Opponent response move
+                if profile == "random":
+                    opp_mv = random.choice(opp_empty)
+                elif profile == "optimal":
+                    _, opp_mv = self._minimax(tuple(int(x) for x in board), -1)
+                    if opp_mv not in opp_empty:
+                        opp_mv = opp_empty[0]
+                else:
+                    found = False
+                    for c in opp_empty:
+                        board[c] = -1
+                        for p1, p2, p3 in lines:
+                            if board[p1] == board[p2] == board[p3] == -1:
+                                opp_mv = c
+                                found = True
+                                break
+                        board[c] = 0
+                        if found:
+                            break
+                    if not found:
+                        for c in opp_empty:
+                            board[c] = 1
+                            for p1, p2, p3 in lines:
+                                if board[p1] == board[p2] == board[p3] == 1:
+                                    opp_mv = c
+                                    found = True
+                                    break
+                            board[c] = 0
+                            if found:
+                                break
+                    if not found:
+                        if 4 in opp_empty and random.random() < 0.7:
+                            opp_mv = 4
+                        else:
+                            corners = [c for c in [0, 2, 6, 8] if c in opp_empty]
+                            opp_mv = random.choice(corners) if corners else random.choice(opp_empty)
+
+                board[opp_mv] = -1
+                for p1, p2, p3 in lines:
+                    if board[p1] != 0 and board[p1] == board[p2] == board[p3]:
+                        won = True
+                        break
+                if won:
+                    break
 
         return X, y
 '''

@@ -20,8 +20,8 @@ class LLMConfig(BaseModel):
     base_url: str | None = None
     model_name: str | None = None
     temperature: float = 0.2
-    timeout: float = 30.0
-    max_tokens: int = 4096
+    timeout: float = 90.0
+    max_tokens: int = 8192
 
     def model_post_init(self, __context: Any) -> None:
         """Autofill defaults based on provider."""
@@ -120,18 +120,40 @@ class DeepSeekLLMClient(BaseLLMClient):
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
 
+        # Respect user-configured model name directly without overriding
+        model_name = (self.config.model_name or "").strip()
+        if not model_name or model_name.lower() in ("default", "none"):
+            model_name = "deepseek-chat"
+
+        # Set token headroom: deepseek-flash supports up to 384K output tokens
+        max_tokens = self.config.max_tokens
+        if not max_tokens:
+            max_tokens = 384000 if "flash" in model_name.lower() else 8192
+        elif "flash" in model_name.lower() and max_tokens < 16384:
+            max_tokens = 384000
+
         payload = {
-            "model": self.config.model_name or "deepseek-chat",
+            "model": model_name,
             "messages": messages,
             "temperature": self.config.temperature,
-            "max_tokens": self.config.max_tokens,
+            "max_tokens": max_tokens,
         }
 
         with httpx.Client(timeout=self.config.timeout) as client:
             resp = client.post(endpoint, headers=headers, json=payload)
             resp.raise_for_status()
             data = resp.json()
-            return data["choices"][0]["message"]["content"]
+            choice = data["choices"][0]
+            msg = choice.get("message", {})
+            content = msg.get("content") or ""
+            if not content.strip() and msg.get("reasoning_content"):
+                reasoning = msg["reasoning_content"]
+                match = re.search(r"```(?:python|html)?\s*([\s\S]*?)\s*```", reasoning)
+                if match:
+                    content = match.group(0)
+                else:
+                    content = reasoning
+            return content
 
 
 class OpenAILLMClient(BaseLLMClient):
@@ -410,6 +432,9 @@ def is_test_mode() -> bool:
 
 def get_config_persistence_path() -> Path:
     """Returns local path where verified LLM config is persisted across restarts."""
+    if is_test_mode():
+        import tempfile
+        return Path(tempfile.gettempdir()) / ".test_llm_config.json"
     base_dir = Path(os.environ.get("RL_IDE_WORKSPACE_DIR", "workspaces"))
     base_dir.mkdir(parents=True, exist_ok=True)
     return base_dir / ".llm_config.json"

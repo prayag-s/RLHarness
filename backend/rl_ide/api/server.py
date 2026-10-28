@@ -226,48 +226,69 @@ async def start_session(req: SessionStartRequest):
 
     dataset = ingested_datasets_store.get(req.dataset_id) if req.dataset_id else None
 
-    # 1. Synthesize Environment & Arena
-    env_builder = JITEnvironmentSynthesizer()
-    code_str, env_path, env_cls = env_builder.synthesize(
-        blueprint=req.blueprint,
-        dataset=dataset,
-        workspace_dir=ws_dir,
-    )
+    try:
+        # 1. Synthesize Environment & Arena
+        env_builder = JITEnvironmentSynthesizer()
+        code_str, env_path, env_cls = env_builder.synthesize(
+            blueprint=req.blueprint,
+            dataset=dataset,
+            workspace_dir=ws_dir,
+        )
 
-    verifier = SandboxSmokeTester()
-    records = dataset.df.to_dict(orient="records") if (dataset and hasattr(dataset, "df")) else None
-    verified, healed_code, logs = verifier.verify_and_heal(
-        code_str=code_str,
-        blueprint=req.blueprint,
-        dataset=dataset,
-        workspace_dir=ws_dir,
-    )
+        verifier = SandboxSmokeTester()
+        records = dataset.df.to_dict(orient="records") if (dataset and hasattr(dataset, "df")) else None
+        verified, healed_code, logs = verifier.verify_and_heal(
+            code_str=code_str,
+            blueprint=req.blueprint,
+            dataset=dataset,
+            workspace_dir=ws_dir,
+        )
 
-    if not verified:
-        raise HTTPException(status_code=500, detail="Environment code failed sandbox verification checks.")
+        if not verified:
+            raise HTTPException(status_code=500, detail="Environment code failed sandbox verification checks.")
 
-    # Synthesize Arena HTML
-    dummy_env = env_cls(dataset_records=records)
-    dummy_obs, dummy_info = dummy_env.reset()
-    arena_builder = JITArenaSynthesizer()
-    html_str, arena_path = arena_builder.synthesize(
-        blueprint=req.blueprint,
-        sample_arena_state=dummy_info.get("arena_state", {}),
-        workspace_dir=ws_dir,
-    )
+        # Reload verified canonical environment class
+        from rl_ide.synthesizer.env_builder import load_synthesized_env_class, instantiate_env
+        canonical_env_file = ws_dir / "env_module.py"
+        if canonical_env_file.exists():
+            env_cls = load_synthesized_env_class(canonical_env_file)
 
-    # Initialize Session in store
-    session = SessionState(
-        session_id=sid,
-        blueprint=req.blueprint,
-        dataset_id=req.dataset_id,
-        status="synthesized",
-        max_rounds=req.blueprint.max_auto_tune_rounds or 4,
-        target_threshold=req.blueprint.target_metric_threshold,
-        env_module_code=healed_code,
-        arena_html=html_str,
-    )
-    global_store.set_session(session)
+        # Synthesize Arena HTML
+        dummy_env = instantiate_env(env_cls, dataset_records=records)
+        dummy_obs, dummy_info = dummy_env.reset()
+        arena_builder = JITArenaSynthesizer()
+        html_str, arena_path = arena_builder.synthesize(
+            blueprint=req.blueprint,
+            sample_arena_state=dummy_info.get("arena_state", {}),
+            workspace_dir=ws_dir,
+        )
+
+        # Initialize Session in store
+        session = SessionState(
+            session_id=sid,
+            blueprint=req.blueprint,
+            dataset_id=req.dataset_id,
+            status="synthesized",
+            max_rounds=req.blueprint.max_auto_tune_rounds or 4,
+            target_threshold=req.blueprint.target_metric_threshold,
+            env_module_code=healed_code,
+            arena_html=html_str,
+        )
+        global_store.set_session(session)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        if ws_dir.exists() and not list(ws_dir.iterdir()):
+            try:
+                ws_dir.rmdir()
+            except Exception:
+                pass
+        raise HTTPException(
+            status_code=500,
+            detail=f"Synthesis failed: {exc}",
+        )
 
     # Event emitter helper
     try:

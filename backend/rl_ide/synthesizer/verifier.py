@@ -21,7 +21,7 @@ import numpy as np
 from rl_ide.architect.models import AgentBlueprintSpec
 from rl_ide.ingest.loader import IngestedDataset
 from rl_ide.llm.client import BaseLLMClient, create_llm_client, FallbackCodeSynthesizer, get_active_llm_client
-from rl_ide.synthesizer.env_builder import load_synthesized_env_class
+from rl_ide.synthesizer.env_builder import load_synthesized_env_class, instantiate_env
 
 
 class SecurityViolationError(Exception):
@@ -89,7 +89,7 @@ class SandboxSmokeTester:
     ) -> dict[str, Any]:
         """Runs thorough runtime smoke test on a Gymnasium environment class."""
         # 1. Instantiate
-        env = env_cls(dataset_records=dataset_records)
+        env = instantiate_env(env_cls, dataset_records=dataset_records)
 
         # 2. Check Spaces
         if not isinstance(env.observation_space, spaces.Box):

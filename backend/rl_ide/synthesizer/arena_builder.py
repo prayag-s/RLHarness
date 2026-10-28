@@ -30,6 +30,37 @@ REQUIREMENTS:
 """
 
 
+def extract_html_code(raw: str) -> str:
+    """Extracts valid HTML from raw LLM output, handling markdown fences and truncated blocks."""
+    if not raw:
+        return ""
+    text = raw.strip()
+
+    # 1. Match standard closed markdown block
+    match = re.search(r"```(?:html)?\s*\n([\s\S]*?)\n```", text)
+    if match:
+        return match.group(1).strip()
+
+    # 2. Match unclosed markdown block
+    match_unclosed = re.search(r"```(?:html)?\s*\n([\s\S]*)", text)
+    if match_unclosed:
+        candidate = match_unclosed.group(1).strip()
+        candidate = re.sub(r"```+$", "", candidate).strip()
+        return candidate
+
+    # 3. Direct fence cleanup
+    if text.startswith("```"):
+        lines = text.split("\n")
+        first_line = lines[0].strip()
+        if first_line.startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        return "\n".join(lines).strip()
+
+    return text
+
+
 class JITArenaSynthesizer:
     """Synthesizes self-contained interactive arena.html visualizations."""
 
@@ -68,10 +99,10 @@ class JITArenaSynthesizer:
         if not isinstance(self.client, FallbackCodeSynthesizer):
             try:
                 html = self._call_llm_arena_gen(blueprint, sample_arena_state)
-                if html:
+                if html and "ARENA_UPDATE" in html and ("<html" in html.lower() or "<!doctype html" in html.lower()):
                     return html
-            except Exception as exc:
-                raise RuntimeError(f"LLM Arena HTML synthesis failed: {exc}")
+            except Exception:
+                pass
 
         return self._generate_deterministic_arena_html(blueprint, sample_arena_state)
 
@@ -84,11 +115,10 @@ class JITArenaSynthesizer:
             f"Generate the self-contained `arena.html` for:\n"
             f"Blueprint: {blueprint.model_dump_json(indent=2)}\n"
             f"Sample Arena State: {json.dumps(sample_arena_state or {}, default=str)}\n\n"
-            f"Return ONLY valid HTML inside a ```html ... ``` code block."
+            f"Return ONLY valid HTML inside a ```html ... ``` code block. Be concise and complete."
         )
         raw = self.client.generate(prompt, system_prompt=ARENA_BUILDER_SYSTEM_PROMPT)
-        match = re.search(r"```(?:html)?\s*([\s\S]*?)\s*```", raw)
-        return match.group(1).strip() if match else raw.strip()
+        return extract_html_code(raw)
 
     def _generate_deterministic_arena_html(
         self,

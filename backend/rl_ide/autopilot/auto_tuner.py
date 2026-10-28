@@ -47,6 +47,7 @@ Given episode telemetry from Round N, including per-term reward returns, action 
 STRICT CONSTRAINTS:
 - Keep the exact signature: `compute_reward(self, state: dict, action: int, next_state: dict, info: dict) -> tuple[float, dict[str, float]]`
 - Always return a 2-tuple: `(float(total_reward), breakdown_dict)`
+- Clamp all individual reward terms strictly to the range [-10.0, +10.0] so Critic value estimates never diverge.
 - Return ONLY the updated full Python module inside ```python ... ```.
 """
 
@@ -138,8 +139,8 @@ class AutoTunerAgent:
                         f"Losses occurred due to missing diagonal defensive blocks and tactical center hesitations."
                     )
                     changes_summary = (
-                        "Doubled illegal move penalty to -20.0, added +5.0 opponent threat blocking bonus, "
-                        "and boosted win bonus to +15.0."
+                        "Reinforced illegal move penalty to -5.0 (clamped), added +5.0 opponent threat blocking bonus, "
+                        "and capped win bonus to +10.0."
                     )
                 else:
                     diagnosis = (
@@ -147,8 +148,8 @@ class AutoTunerAgent:
                         f"Agent play is legal but passive against opponent corner attacks."
                     )
                     changes_summary = (
-                        "Increased win bonus from +10.0 to +18.0, reinforced draw bonus to +5.0, "
-                        "and increased loss penalty to -15.0."
+                        "Set win bonus to +10.0 (clamped), reinforced draw bonus to +5.0, "
+                        "and set loss penalty to -10.0 (clamped)."
                     )
             else:
                 diagnosis = (
@@ -228,24 +229,24 @@ class AutoTunerAgent:
         # Deterministic Rewrite (used for offline Fallback in test mode)
         code = current_code
 
-        # Evolve reward weights in code
-        # 1. Scale win bonus
-        code = re.sub(r'breakdown\["win_bonus"\] = 10\.0', 'breakdown["win_bonus"] = 18.0', code)
-        code = re.sub(r'total \+= 10\.0', 'total += 18.0', code)
+        # Evolve reward weights in code (strictly clamped within [-10.0, +10.0])
+        # 1. Scale win bonus (capped at +10.0)
+        code = re.sub(r'breakdown\["win_bonus"\] = 10\.0', 'breakdown["win_bonus"] = 10.0', code)
+        code = re.sub(r'total \+= 10\.0', 'total += 10.0', code)
 
-        # 2. Scale loss penalty
-        code = re.sub(r'breakdown\["loss_penalty"\] = -10\.0', 'breakdown["loss_penalty"] = -16.0', code)
-        code = re.sub(r'total \+= -10\.0', 'total += -16.0', code)
+        # 2. Scale loss penalty (capped at -10.0)
+        code = re.sub(r'breakdown\["loss_penalty"\] = -10\.0', 'breakdown["loss_penalty"] = -10.0', code)
+        code = re.sub(r'total \+= -10\.0', 'total += -10.0', code)
 
-        # 3. Scale draw bonus
-        code = re.sub(r'breakdown\["draw_bonus"\] = 3\.0', 'breakdown["draw_bonus"] = 6.0', code)
-        code = re.sub(r'total \+= 3\.0', 'total += 6.0', code)
+        # 3. Scale draw bonus (capped at +5.0)
+        code = re.sub(r'breakdown\["draw_bonus"\] = 3\.0', 'breakdown["draw_bonus"] = 5.0', code)
+        code = re.sub(r'total \+= 3\.0', 'total += 5.0', code)
 
-        # 4. Scale illegal move penalty
-        code = re.sub(r'breakdown\["illegal_move_penalty"\] = -5\.0', 'breakdown["illegal_move_penalty"] = -20.0', code)
-        code = re.sub(r'total \+= -5\.0', 'total += -20.0', code)
+        # 4. Scale illegal move penalty (capped at -5.0 / -10.0)
+        code = re.sub(r'breakdown\["illegal_move_penalty"\] = -\d+(?:\.\d+)?', 'breakdown["illegal_move_penalty"] = -5.0', code)
+        code = re.sub(r'total \+= -1\.0', 'total += -5.0', code)
 
-        # 5. Data reward evolution
+        # 5. Data reward evolution (clamped within [-10.0, +10.0])
         code = re.sub(r'breakdown\["correct_decision"\] = 1\.0', 'breakdown["correct_decision"] = 2.5', code)
         code = re.sub(r'breakdown\["incorrect_penalty"\] = -1\.0', 'breakdown["incorrect_penalty"] = -2.5', code)
 
