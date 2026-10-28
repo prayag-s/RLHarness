@@ -59,15 +59,23 @@ STRICT ENGINEERING REQUIREMENTS:
 ENV_BUILDER_SYSTEM_PROMPT = ENV_SYNTHESIZER_SYSTEM_PROMPT
 
 ARENA_SYNTHESIZER_SYSTEM_PROMPT = """You are a Creative Frontend & Simulation UI Engineer.
-Given an `AgentBlueprintSpec` and the exact JSON structure returned by `SynthesizedGymEnv.render_arena_state()`, generate a complete, self-contained, single-file `arena.html` document.
+Given an `AgentBlueprintSpec` and the exact JSON structure returned by `SynthesizedGymEnv.render_arena_state()`, generate a complete, self-contained, single-file `arena.html` document with built-in live mock data & animation.
 
 REQUIREMENTS:
 1. Use dark-mode modern aesthetics (`bg-slate-950 text-slate-100`, Tailwind CSS via CDN or embedded CSS, clean SVG/HTML5 Canvas animations).
-2. Listen for `window.addEventListener("message", (event) => ...)` handling `event.data.type === "ARENA_UPDATE"`.
-3. Render the domain state visually and unmistakably based on `event.data.arena_state` (e.g., an interactive game board, a 2D physics/robotics radar canvas, a visual shift calendar, a live financial/sensor chart, or an interactive card table).
-4. Render live telemetry pills at the top (Episode ID, Step, Total Reward, and a horizontal bar strip for `reward_breakdown`).
-5. Include an interactive mode: when the user clicks interactive elements in the arena (or clicks a "Reset / New Interactive Turn" button), emit `window.parent.postMessage({ type: "ARENA_INTERACT", payload: {...} }, "*")` so the user can play against or test the trained agent directly inside the arena!
-6. Handle missing/initial state gracefully with a sleek "Waiting for first episode stream..." skeleton state.
+2. Built-in Mock Simulation & Animation Engine (`startMockAnimationLoop()`):
+   - Automatically runs on load via `setInterval(..., 650)` before live training stream arrives.
+   - Generates realistic domain-appropriate mock states, moves, reward breakdowns, and fluctuating action probability bars.
+   - For board games: alternates placing mock pieces turn-by-turn, highlights winning lines, and loops.
+   - For robotics/physics: moves rover/lander along smooth trajectories with pulsing thrusters/lidar.
+   - Displays a floating preview banner at top:
+     `✨ LIVE ARENA PREVIEW (MOCK ANIMATION) — Ask in chat to customize look & feel, or click "Lock Arena & Start Training"`
+3. Listen for `window.addEventListener("message", (event) => ...)`:
+   - `event.data.type === "SET_ARENA_MODE"`: if `event.data.mode === "mock_preview"`, triggers `startMockAnimationLoop()`; if "live" or "interactive", stops mock loop and hides preview badge.
+   - `event.data.type === "ARENA_UPDATE"`: immediately clears mock timer (`clearInterval`), hides mock preview banner, and renders real episode stream.
+4. Render domain state visually and unmistakably based on `event.data.arena_state` (or mock state).
+5. Render live telemetry pills at the top (Episode ID, Step, Total Reward, and a horizontal bar strip for `reward_breakdown`).
+6. Include an interactive mode: when the user clicks interactive elements in the arena (or clicks a "Reset / New Interactive Turn" button), emit `window.parent.postMessage({ type: "ARENA_INTERACT", payload: {...} }, "*")` so the human can play against or test the trained agent directly!
 """
 
 # Alias for backwards compatibility

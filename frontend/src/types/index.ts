@@ -153,6 +153,35 @@ export interface SessionState {
   total_episodes_trained?: number
 }
 
+export type StudioActionType =
+  | 'clarify_or_discuss'
+  | 'update_arena'
+  | 'update_agent'
+  | 'update_env_mechanics'
+  | 'run_training'
+
+export interface StudioChatResponse {
+  conversation_id: string
+  status: string
+  assistant_message: string
+  message: string
+  chat_response?: string
+  action_types: StudioActionType[]
+  action_type?: StudioActionType
+  blueprint_spec?: AgentBlueprintSpec | null
+  blueprint?: AgentBlueprintSpec | null
+  arena_html?: string | null
+  env_code?: string | null
+  arena_locked: boolean
+  questions: ClarifyingQuestion[]
+  clarifying_questions: ClarifyingQuestion[]
+  quick_chips: string[]
+  training_params: TrainingParams
+  current_round: number
+  best_metric: number
+  current_metric?: number
+}
+
 export interface ConversationSummary {
   conversation_id: string
   title: string
@@ -161,6 +190,7 @@ export interface ConversationSummary {
   target_metric_threshold: number
   current_round: number
   max_auto_tune_rounds: number
+  arena_locked?: boolean
   updated_at: string
 }
 
@@ -181,6 +211,7 @@ export interface ConversationDetail {
   env_code?: string | null
   arena_html?: string | null
   latest_model_zip_path?: string | null
+  arena_locked?: boolean
 }
 
 export interface IngestedDatasetSummary {

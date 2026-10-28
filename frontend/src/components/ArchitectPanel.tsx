@@ -1,6 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react'
 import {
-  MessageSquare,
   Sparkles,
   Zap,
   Upload,
@@ -16,6 +15,11 @@ import {
   RotateCcw,
   Palette,
   Target,
+  Lock,
+  ChevronDown,
+  ChevronUp,
+  Sliders,
+  SlidersHorizontal,
 } from 'lucide-react'
 import {
   ClarifyingQuestion,
@@ -47,6 +51,10 @@ interface ArchitectPanelProps {
   onOpenSettings?: () => void
   trainingParams?: TrainingParams
   onUpdateTrainingParams?: (params: TrainingParams) => void
+  isArenaLocked?: boolean
+  onLockArena?: () => void
+  onSendStudioMessage?: (message: string, trainingParams?: TrainingParams) => Promise<any>
+  chatInputRef?: React.RefObject<HTMLInputElement>
 }
 
 export const ArchitectPanel: React.FC<ArchitectPanelProps> = ({
@@ -65,18 +73,23 @@ export const ArchitectPanel: React.FC<ArchitectPanelProps> = ({
   onOpenSettings,
   trainingParams,
   onUpdateTrainingParams,
+  isArenaLocked = false,
+  onLockArena,
+  onSendStudioMessage,
+  chatInputRef,
 }) => {
-  // Intake Chat State
+  // Unified Continuous Chat Input State
   const [userPrompt, setUserPrompt] = useState('')
   const [isAskingArchitect, setIsAskingArchitect] = useState(false)
   const [clarifyingQuestions, setClarifyingQuestions] = useState<ClarifyingQuestion[]>([])
   const [selectedAnswers, setSelectedAnswers] = useState<Record<string, string>>({})
   const [stagedBlueprint, setStagedBlueprint] = useState<AgentBlueprintSpec | null>(null)
   const [architectMessage, setArchitectMessage] = useState<string>(
-    'Describe the agent you want to synthesize or drop a dataset to get started.',
+    'Describe your agent idea or drop a dataset to get an instant live Mock Arena preview.',
   )
 
-  // Explicit Training Configuration State
+  // Collapsible Training Controls State
+  const [showTrainingControls, setShowTrainingControls] = useState<boolean>(false)
   const [rounds, setRounds] = useState<number>(trainingParams?.max_auto_tune_rounds || 5)
   const [episodesPerRound, setEpisodesPerRound] = useState<number>(trainingParams?.episodes_per_round || 200)
   const [targetGoal, setTargetGoal] = useState<number>(trainingParams?.target_metric_threshold || 90.0)
@@ -88,13 +101,11 @@ export const ArchitectPanel: React.FC<ArchitectPanelProps> = ({
     if (trainingParams?.target_metric_threshold) setTargetGoal(trainingParams.target_metric_threshold)
   }, [trainingParams])
 
-  // Nudge State
-  const [nudgeText, setNudgeText] = useState('')
-  const [isNudging, setIsNudging] = useState(false)
-
-  // Drag and Drop
+  // Drag and Drop & Refs
   const [isDragging, setIsDragging] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const internalInputRef = useRef<HTMLInputElement>(null)
+  const effectiveInputRef = (chatInputRef || internalInputRef) as React.RefObject<HTMLInputElement>
   const chatBottomRef = useRef<HTMLDivElement>(null)
 
   // Auto-scroll timeline
@@ -102,55 +113,110 @@ export const ArchitectPanel: React.FC<ArchitectPanelProps> = ({
     chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [timeline, clarifyingQuestions])
 
-  const handleSendPrompt = async (e?: React.FormEvent) => {
+  const getEffectiveParams = (): TrainingParams => ({
+    max_auto_tune_rounds: rounds,
+    episodes_per_round: episodesPerRound,
+    target_metric_threshold: targetGoal,
+  })
+
+  // Single Unified Send Function across all stages
+  const handleUnifiedSend = async (customMessage?: string, e?: React.FormEvent) => {
     if (e) e.preventDefault()
     if (!isLLMVerified) {
       if (onOpenSettings) onOpenSettings()
       return
     }
-    if (!userPrompt.trim() || isAskingArchitect) return
+
+    const textToSend = (customMessage !== undefined ? customMessage : userPrompt).trim()
+    if (!textToSend || isAskingArchitect) return
 
     setIsAskingArchitect(true)
+    const currentParams = getEffectiveParams()
+
     try {
-      const explicitParams: TrainingParams = {
-        max_auto_tune_rounds: rounds,
-        episodes_per_round: episodesPerRound,
-        target_metric_threshold: targetGoal,
-      }
-      const resp = await onChatWithArchitect(userPrompt, selectedAnswers, false, explicitParams)
-      setArchitectMessage(resp.message)
-      if (resp.status === 'needs_clarification') {
-        const questionsList = resp.questions || resp.clarifying_questions || []
-        setClarifyingQuestions(questionsList)
-        // Initialize default answers
-        const initAnswers: Record<string, string> = {}
-        questionsList.forEach((q) => {
-          const qId = q.id || q.question_id || q.pillar
-          initAnswers[qId] = q.default_option
-        })
-        setSelectedAnswers(initAnswers)
-        if (resp.recommended_training_params) {
-          if (resp.recommended_training_params.max_auto_tune_rounds) {
-            setRounds(resp.recommended_training_params.max_auto_tune_rounds)
-          }
-          if (resp.recommended_training_params.episodes_per_round) {
-            setEpisodesPerRound(resp.recommended_training_params.episodes_per_round)
-          }
-          if (resp.recommended_training_params.target_metric_threshold) {
-            setTargetGoal(resp.recommended_training_params.target_metric_threshold)
-          }
+      if (onSendStudioMessage) {
+        const resp = await onSendStudioMessage(textToSend, currentParams)
+        setUserPrompt('')
+        if (resp && resp.chat_response) {
+          setArchitectMessage(resp.chat_response)
         }
-        setStagedBlueprint(null)
-      } else if (resp.status === 'ready_to_build' && resp.blueprint) {
-        setClarifyingQuestions([])
-        setStagedBlueprint(resp.blueprint)
-        // Auto-launch synthesis
-        await onStartSession(resp.blueprint, attachedDataset?.dataset_id)
+        if (resp && resp.questions && resp.questions.length > 0) {
+          setClarifyingQuestions(resp.questions)
+          const initAnswers: Record<string, string> = {}
+          resp.questions.forEach((q: any) => {
+            const qId = q.id || q.question_id || q.pillar
+            initAnswers[qId] = q.default_option
+          })
+          setSelectedAnswers(initAnswers)
+        }
+        return
+      }
+
+      // Fallback router
+      if (activeSessionId && isArenaLocked) {
+        // Post-training nudge
+        await onNudge(textToSend)
+        setUserPrompt('')
+      } else {
+        // Intake chat
+        const resp = await onChatWithArchitect(textToSend, selectedAnswers, false, currentParams)
+        setUserPrompt('')
+        setArchitectMessage(resp.message)
+        if (resp.status === 'needs_clarification') {
+          const questionsList = resp.questions || resp.clarifying_questions || []
+          setClarifyingQuestions(questionsList)
+          const initAnswers: Record<string, string> = {}
+          questionsList.forEach((q) => {
+            const qId = q.id || q.question_id || q.pillar
+            initAnswers[qId] = q.default_option
+          })
+          setSelectedAnswers(initAnswers)
+          if (resp.recommended_training_params) {
+            if (resp.recommended_training_params.max_auto_tune_rounds) {
+              setRounds(resp.recommended_training_params.max_auto_tune_rounds)
+            }
+            if (resp.recommended_training_params.episodes_per_round) {
+              setEpisodesPerRound(resp.recommended_training_params.episodes_per_round)
+            }
+            if (resp.recommended_training_params.target_metric_threshold) {
+              setTargetGoal(resp.recommended_training_params.target_metric_threshold)
+            }
+          }
+          setStagedBlueprint(null)
+        } else if (resp.status === 'ready_to_build' && resp.blueprint) {
+          setClarifyingQuestions([])
+          setStagedBlueprint(resp.blueprint)
+          await onStartSession(resp.blueprint, attachedDataset?.dataset_id)
+        }
       }
     } catch (err: any) {
-      setArchitectMessage(`Error: ${err.message || 'Architect intake failed'}`)
+      setArchitectMessage(`Error: ${err.message || 'Operation failed'}`)
     } finally {
       setIsAskingArchitect(false)
+    }
+  }
+
+  const handleChipClick = (chip: string) => {
+    if (chip.includes('Lock Arena & Start Training')) {
+      if (onLockArena) {
+        onLockArena()
+      } else {
+        handleUnifiedSend('Looks good, lock arena and start training')
+      }
+    } else if (chip.includes('Train 5 More Rounds')) {
+      handleUnifiedSend('Train for 5 more rounds with 500 episodes per round')
+    } else if (chip.includes('Make Agent More Aggressive')) {
+      handleUnifiedSend('Change the agent behavior: make it more aggressive, prioritize center and attack forks')
+    } else if (chip.includes('Penalize Mistakes More Heavily')) {
+      handleUnifiedSend('Change the agent behavior: heavily penalize stalling and defensive mistakes')
+    } else if (chip.includes('Redesign Arena Look') || chip.includes('Neon Cyberpunk Theme')) {
+      handleUnifiedSend('Change the arena look to a neon cyberpunk theme with glowing borders')
+    } else if (chip.includes('Add Detailed Telemetry HUD')) {
+      handleUnifiedSend('Change the arena look to add a detailed action probability radar and telemetry HUD')
+    } else if (chip.includes('Make Board / Canvas Larger')) {
+      handleUnifiedSend('Change the arena look: make the cells and canvas larger with gold highlights')
+    } else {
+      handleUnifiedSend(chip)
     }
   }
 
@@ -158,13 +224,6 @@ export const ArchitectPanel: React.FC<ArchitectPanelProps> = ({
     setSelectedAnswers((prev) => ({
       ...prev,
       [questionId]: option,
-    }))
-  }
-
-  const handleCustomAnswerChange = (questionId: string, val: string) => {
-    setSelectedAnswers((prev) => ({
-      ...prev,
-      [questionId]: val,
     }))
   }
 
@@ -178,11 +237,7 @@ export const ArchitectPanel: React.FC<ArchitectPanelProps> = ({
       const promptToUse =
         userPrompt.trim() ||
         (attachedDataset ? `Train agent on ${attachedDataset.name}` : 'Train an unbeatable Tic-Tac-Toe agent')
-      const explicitParams: TrainingParams = {
-        max_auto_tune_rounds: rounds,
-        episodes_per_round: episodesPerRound,
-        target_metric_threshold: targetGoal,
-      }
+      const explicitParams = getEffectiveParams()
       const resp = await onChatWithArchitect(promptToUse, selectedAnswers, true, explicitParams)
       setArchitectMessage(resp.message)
       if (resp.blueprint) {
@@ -204,11 +259,7 @@ export const ArchitectPanel: React.FC<ArchitectPanelProps> = ({
     }
     setIsAskingArchitect(true)
     try {
-      const explicitParams: TrainingParams = {
-        max_auto_tune_rounds: rounds,
-        episodes_per_round: episodesPerRound,
-        target_metric_threshold: targetGoal,
-      }
+      const explicitParams = getEffectiveParams()
       if (onUpdateTrainingParams) {
         onUpdateTrainingParams(explicitParams)
       }
@@ -225,20 +276,6 @@ export const ArchitectPanel: React.FC<ArchitectPanelProps> = ({
     }
   }
 
-  const handleNudgeSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!nudgeText.trim() || isNudging || !activeSessionId) return
-    setIsNudging(true)
-    try {
-      await onNudge(nudgeText.trim())
-      setNudgeText('')
-    } catch (err: any) {
-      console.error('Nudge failed', err)
-    } finally {
-      setIsNudging(false)
-    }
-  }
-
   const handleDrop = async (e: React.DragEvent) => {
     e.preventDefault()
     setIsDragging(false)
@@ -247,6 +284,21 @@ export const ArchitectPanel: React.FC<ArchitectPanelProps> = ({
       await onFileUpload(file)
     }
   }
+
+  // Determine Quick Chips Contextually
+  const quickChips = !isArenaLocked
+    ? [
+        '🎨 Neon Cyberpunk Theme',
+        '📊 Add Detailed Telemetry HUD',
+        '🔍 Make Board / Canvas Larger',
+        '🔒 Lock Arena & Start Training',
+      ]
+    : [
+        '🔄 Train 5 More Rounds (500 eps/round)',
+        '🧠 Make Agent More Aggressive',
+        '🛡️ Penalize Mistakes More Heavily',
+        '🎨 Redesign Arena Look',
+      ]
 
   return (
     <aside className="w-96 flex flex-col h-full bg-gray-900 border-r border-gray-800 text-gray-200 select-none">
@@ -275,6 +327,7 @@ export const ArchitectPanel: React.FC<ArchitectPanelProps> = ({
             <span>Universal Data Intake</span>
           </span>
           <button
+            type="button"
             onClick={onOpenSQLModal}
             disabled={!isLLMVerified}
             className="flex items-center space-x-1 text-[11px] text-cyan-400 hover:text-cyan-300 font-medium px-2 py-0.5 rounded bg-cyan-950/50 border border-cyan-800/40 transition disabled:opacity-50"
@@ -298,6 +351,7 @@ export const ArchitectPanel: React.FC<ArchitectPanelProps> = ({
               </div>
             </div>
             <button
+              type="button"
               onClick={onRemoveDataset}
               className="p-1 text-gray-400 hover:text-rose-400 transition"
               title="Remove dataset"
@@ -339,18 +393,18 @@ export const ArchitectPanel: React.FC<ArchitectPanelProps> = ({
         )}
       </div>
 
-      {/* 2. Conversational Intake & Autonomous Activity Feed */}
+      {/* 2. Conversational Studio Continuous Activity Feed */}
       <div className="flex-1 overflow-y-auto p-3 space-y-3.5">
         {/* Architect Introduction / Message Card */}
         <div className="p-3 rounded-xl bg-gray-950/80 border border-gray-800 text-xs shadow-sm">
           <div className="flex items-center space-x-2 text-indigo-400 font-bold mb-1.5">
             <Sparkles className="h-4 w-4" />
-            <span>Conversational Intake Architect</span>
+            <span>Continuous Studio Omni-Agent</span>
           </div>
           <p className="text-gray-300 leading-relaxed">{architectMessage}</p>
         </div>
 
-        {/* Clarifying Questions Card (Rendered when needs_clarification) */}
+        {/* Non-Blocking Clarifying Questions Card (if any suggested options exist) */}
         {clarifyingQuestions.length > 0 && (
           <div className="p-3.5 rounded-xl bg-gradient-to-b from-indigo-950/60 to-purple-950/40 border border-indigo-700/60 space-y-3.5 shadow-lg">
             <div className="flex items-center justify-between">
@@ -359,6 +413,7 @@ export const ArchitectPanel: React.FC<ArchitectPanelProps> = ({
                 <span>Pillars Alignment ({clarifyingQuestions.length})</span>
               </span>
               <button
+                type="button"
                 onClick={handleUseSmartDefaults}
                 disabled={isAskingArchitect}
                 className="text-[10px] text-amber-400 hover:text-amber-300 flex items-center space-x-1 font-semibold"
@@ -401,115 +456,9 @@ export const ArchitectPanel: React.FC<ArchitectPanelProps> = ({
                       )
                     })}
                   </div>
-
-                  {/* Inline Custom Answer Input */}
-                  <div className="pt-1">
-                    <input
-                      type="text"
-                      value={currentVal}
-                      onChange={(e) => handleCustomAnswerChange(qId, e.target.value)}
-                      placeholder="Or type a custom answer..."
-                      className="w-full bg-gray-900/90 border border-gray-800 focus:border-indigo-500 rounded px-2 py-1 text-[11px] text-gray-200 focus:outline-none placeholder-gray-600 font-sans"
-                    />
-                  </div>
                 </div>
               )
             })}
-
-            {/* Explicit Training Configuration Bar */}
-            <div className="p-3 rounded-lg bg-gray-950/80 border border-gray-800/90 space-y-2.5">
-              <div className="flex items-center justify-between text-xs font-bold text-gray-300">
-                <span className="flex items-center space-x-1.5">
-                  <Cpu className="h-3.5 w-3.5 text-cyan-400" />
-                  <span>Training Parameters</span>
-                </span>
-                <span className="text-[10px] text-gray-500 font-mono">Explicit Control</span>
-              </div>
-
-              <div className="grid grid-cols-3 gap-2 text-[11px]">
-                {/* Rounds Stepper */}
-                <div className="space-y-1">
-                  <label className="text-gray-400 text-[10px] block">Rounds (1-100)</label>
-                  <input
-                    type="number"
-                    min={1}
-                    max={100}
-                    value={rounds}
-                    onChange={(e) => setRounds(Math.max(1, Math.min(100, parseInt(e.target.value) || 1)))}
-                    className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1 text-gray-200 text-center font-mono font-bold focus:border-cyan-500 focus:outline-none"
-                  />
-                </div>
-
-                {/* Episodes / Round Selector */}
-                <div className="space-y-1">
-                  <label className="text-gray-400 text-[10px] block">Episodes / Round</label>
-                  <select
-                    value={episodesPerRound}
-                    onChange={(e) => setEpisodesPerRound(parseInt(e.target.value))}
-                    className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-gray-200 text-center font-mono font-bold focus:border-cyan-500 focus:outline-none"
-                  >
-                    <option value={50}>50</option>
-                    <option value={100}>100</option>
-                    <option value={200}>200</option>
-                    <option value={250}>250</option>
-                    <option value={500}>500</option>
-                    <option value={1000}>1000</option>
-                  </select>
-                </div>
-
-                {/* Target Goal Slider / Input */}
-                <div className="space-y-1">
-                  <label className="text-gray-400 text-[10px] block">Target Goal (%)</label>
-                  <div className="flex items-center space-x-1">
-                    <input
-                      type="number"
-                      min={50}
-                      max={100}
-                      step={1}
-                      value={targetGoal}
-                      onChange={(e) => setTargetGoal(Math.max(50, Math.min(100, parseFloat(e.target.value) || 90)))}
-                      className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-gray-200 text-center font-mono font-bold focus:border-cyan-500 focus:outline-none"
-                    />
-                    <span className="text-gray-500 font-mono text-[10px]">%</span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Range slider for Target Goal */}
-              <div className="pt-0.5">
-                <input
-                  type="range"
-                  min={50}
-                  max={100}
-                  step={1}
-                  value={targetGoal}
-                  onChange={(e) => setTargetGoal(parseFloat(e.target.value))}
-                  className="w-full h-1 bg-gray-800 rounded-lg appearance-none cursor-pointer accent-indigo-500"
-                />
-              </div>
-            </div>
-
-            {/* Single Primary Action Button */}
-            <div className="pt-1">
-              <button
-                type="button"
-                onClick={handleConfirmAndBuild}
-                disabled={isAskingArchitect}
-                className="w-full py-2.5 px-4 rounded-xl bg-gradient-to-r from-indigo-600 via-purple-600 to-pink-600 hover:from-indigo-500 hover:via-purple-500 hover:to-pink-500 text-white text-xs font-black flex items-center justify-center space-x-2 shadow-lg shadow-indigo-950/60 transition active:scale-[0.98] disabled:opacity-50"
-              >
-                {isAskingArchitect ? (
-                  <>
-                    <RefreshCw className="h-4 w-4 animate-spin" />
-                    <span>Synthesizing Agent Blueprint...</span>
-                  </>
-                ) : (
-                  <>
-                    <Play className="h-4 w-4 fill-current text-white" />
-                    <span>🚀 Confirm Selections & Build Agent</span>
-                  </>
-                )}
-              </button>
-            </div>
           </div>
         )}
 
@@ -518,7 +467,7 @@ export const ArchitectPanel: React.FC<ArchitectPanelProps> = ({
           <div className="space-y-2 pt-1">
             <div className="text-[11px] font-bold uppercase tracking-wider text-gray-400 flex items-center space-x-1.5">
               <Cpu className="h-3.5 w-3.5 text-indigo-400" />
-              <span>Autonomous Activity Stream</span>
+              <span>Studio Activity Stream</span>
               {isTraining && (
                 <span className="flex h-2 w-2 relative ml-1">
                   <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
@@ -561,68 +510,149 @@ export const ArchitectPanel: React.FC<ArchitectPanelProps> = ({
         <div ref={chatBottomRef} />
       </div>
 
-      {/* 3. Bottom Controls: Prompt Input & Mid-Flight Nudge Bar */}
-      <div className="p-3 border-t border-gray-800 bg-gray-950/90 space-y-2">
-        {/* If session is active/trained, show Mid-Flight Nudge Input */}
-        {activeSessionId ? (
-          <form onSubmit={handleNudgeSubmit} className="space-y-1.5">
-            <div className="flex items-center justify-between text-[11px] text-amber-400 font-semibold">
-              <span className="flex items-center space-x-1">
-                <Sparkles className="h-3 w-3" />
-                <span>Nudge Active Agent</span>
+      {/* 3. Persistent Omnichannel Bottom Bar: Training Bar, Quick Chips & Single Chat Input */}
+      <div className="p-3 border-t border-gray-800 bg-gray-950/95 space-y-2.5">
+        {/* Dynamic Context-Aware Quick Action Chips */}
+        <div className="flex items-center space-x-1.5 overflow-x-auto pb-1 scrollbar-thin">
+          {quickChips.map((chip, idx) => {
+            const isLockCTA = chip.includes('Lock Arena & Start Training')
+            return (
+              <button
+                key={`chip_${idx}`}
+                type="button"
+                onClick={() => handleChipClick(chip)}
+                disabled={isAskingArchitect}
+                className={`text-[11px] px-2.5 py-1 rounded-full whitespace-nowrap font-medium transition active:scale-95 disabled:opacity-50 flex items-center space-x-1 shadow-sm ${
+                  isLockCTA
+                    ? 'bg-emerald-600 hover:bg-emerald-500 text-white font-bold ring-1 ring-emerald-400'
+                    : 'bg-gray-800/90 hover:bg-gray-750 text-gray-300 hover:text-white border border-gray-700/80 hover:border-gray-600'
+                }`}
+              >
+                {chip}
+              </button>
+            )
+          })}
+        </div>
+
+        {/* Collapsible Inline Training Controls Bar */}
+        <div className="rounded-xl border border-gray-800 bg-gray-900/80 overflow-hidden text-xs">
+          <button
+            type="button"
+            onClick={() => setShowTrainingControls(!showTrainingControls)}
+            className="w-full px-3 py-1.5 flex items-center justify-between text-gray-400 hover:text-gray-200 transition bg-gray-900/40"
+          >
+            <div className="flex items-center space-x-2">
+              <SlidersHorizontal className="h-3.5 w-3.5 text-indigo-400" />
+              <span className="font-mono text-[11px]">
+                Params: <strong className="text-gray-200">{rounds} Rounds</strong> •{' '}
+                <strong className="text-gray-200">{episodesPerRound} eps</strong> •{' '}
+                <strong className="text-emerald-400">{targetGoal}%</strong>
               </span>
-              <span className="text-[10px] text-gray-400">Triggers targeted tuning round</span>
             </div>
-            <div className="flex items-center space-x-1.5">
-              <input
-                type="text"
-                value={nudgeText}
-                onChange={(e) => setNudgeText(e.target.value)}
-                placeholder="e.g. 'Block opponent wins more aggressively'..."
-                disabled={isNudging}
-                className="flex-1 bg-gray-900 border border-gray-700 focus:border-amber-500 rounded-lg px-2.5 py-1.5 text-xs text-gray-200 focus:outline-none placeholder-gray-500"
-              />
-              <button
-                type="submit"
-                disabled={isNudging || !nudgeText.trim()}
-                className="p-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-gray-950 font-bold transition disabled:opacity-50"
-                title="Send guidance nudge"
-              >
-                <Send className="h-3.5 w-3.5" />
-              </button>
+            {showTrainingControls ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+          </button>
+
+          {showTrainingControls && (
+            <div className="p-3 border-t border-gray-800 space-y-2.5 bg-gray-950/60">
+              <div className="grid grid-cols-3 gap-2 text-[11px]">
+                <div className="space-y-1">
+                  <label className="text-gray-400 text-[10px] block">Rounds (1-100)</label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={100}
+                    value={rounds}
+                    onChange={(e) => setRounds(Math.max(1, Math.min(100, parseInt(e.target.value) || 1)))}
+                    className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1 text-gray-200 text-center font-mono font-bold focus:border-indigo-500 focus:outline-none"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-gray-400 text-[10px] block">Episodes / Round</label>
+                  <select
+                    value={episodesPerRound}
+                    onChange={(e) => setEpisodesPerRound(parseInt(e.target.value))}
+                    className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-gray-200 text-center font-mono font-bold focus:border-indigo-500 focus:outline-none"
+                  >
+                    <option value={50}>50</option>
+                    <option value={100}>100</option>
+                    <option value={200}>200</option>
+                    <option value={250}>250</option>
+                    <option value={500}>500</option>
+                    <option value={1000}>1000</option>
+                    <option value={2000}>2000</option>
+                  </select>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-gray-400 text-[10px] block">Target Goal (%)</label>
+                  <div className="flex items-center space-x-1">
+                    <input
+                      type="number"
+                      min={50}
+                      max={100}
+                      value={targetGoal}
+                      onChange={(e) => setTargetGoal(Math.max(50, Math.min(100, parseFloat(e.target.value) || 90)))}
+                      className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-gray-200 text-center font-mono font-bold focus:border-indigo-500 focus:outline-none"
+                    />
+                    <span className="text-gray-500 font-mono text-[10px]">%</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between pt-1">
+                <span className="text-[10px] text-gray-500">Fine-tune training budget</span>
+                <button
+                  type="button"
+                  onClick={() => handleUnifiedSend(`Train for ${rounds} rounds with ${episodesPerRound} episodes per round`)}
+                  disabled={isAskingArchitect}
+                  className="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded text-[10px] flex items-center space-x-1 transition active:scale-95 disabled:opacity-50"
+                >
+                  <Play className="h-3 w-3 fill-current" />
+                  <span>▶️ Train with These Params</span>
+                </button>
+              </div>
             </div>
-          </form>
-        ) : (
-          /* Intake Prompt Input */
-          <form onSubmit={handleSendPrompt} className="space-y-1.5">
-            <div className="flex items-center justify-between text-[11px] text-gray-400 font-medium">
-              <span>Agent Design Prompt</span>
-              <span className="text-[10px] text-indigo-400">Plain English</span>
-            </div>
-            <div className="flex items-center space-x-1.5">
-              <input
-                type="text"
-                value={userPrompt}
-                onChange={(e) => setUserPrompt(e.target.value)}
-                placeholder={
-                  !isLLMVerified
-                    ? '⚠️ Verify working LLM key above to begin...'
-                    : "e.g. 'Train an unbeatable Tic-Tac-Toe agent'..."
-                }
-                disabled={!isLLMVerified || isAskingArchitect}
-                className="flex-1 bg-gray-900 border border-gray-700 focus:border-indigo-500 rounded-lg px-2.5 py-1.5 text-xs text-gray-200 focus:outline-none placeholder-gray-500 disabled:opacity-40 disabled:cursor-not-allowed"
-              />
-              <button
-                type="submit"
-                disabled={!isLLMVerified || isAskingArchitect || !userPrompt.trim()}
-                className="p-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition disabled:opacity-40 disabled:cursor-not-allowed"
-                title={!isLLMVerified ? 'Verify LLM key first' : 'Send prompt to Conversational Architect'}
-              >
-                {isAskingArchitect ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
-              </button>
-            </div>
-          </form>
-        )}
+          )}
+        </div>
+
+        {/* 100% Persistent Chat Input Thread */}
+        <form onSubmit={(e) => handleUnifiedSend(undefined, e)} className="space-y-1.5">
+          <div className="flex items-center justify-between text-[11px] text-gray-400 font-medium">
+            <span className="flex items-center space-x-1">
+              <Sparkles className="h-3 w-3 text-indigo-400" />
+              <span>Studio Chat</span>
+            </span>
+            <span className="text-[10px] text-indigo-400 font-mono">
+              {!isArenaLocked ? 'Drafting & Restyling' : 'Continuous Loop Active'}
+            </span>
+          </div>
+          <div className="flex items-center space-x-1.5">
+            <input
+              ref={effectiveInputRef}
+              type="text"
+              value={userPrompt}
+              onChange={(e) => setUserPrompt(e.target.value)}
+              placeholder={
+                !isLLMVerified
+                  ? '⚠️ Verify working LLM key above to begin...'
+                  : !isArenaLocked
+                  ? "Describe agent or say e.g. 'Make cells larger and animate gold lines'..."
+                  : "Say e.g. 'Train 5 more rounds', 'Make agent more aggressive', or ask a question..."
+              }
+              disabled={!isLLMVerified || isAskingArchitect}
+              className="flex-1 bg-gray-900 border border-gray-700 focus:border-indigo-500 rounded-lg px-2.5 py-2 text-xs text-gray-200 focus:outline-none placeholder-gray-500 disabled:opacity-40 disabled:cursor-not-allowed shadow-inner"
+            />
+            <button
+              type="submit"
+              disabled={!isLLMVerified || isAskingArchitect || !userPrompt.trim()}
+              className="p-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition disabled:opacity-40 disabled:cursor-not-allowed shadow"
+              title={!isLLMVerified ? 'Verify LLM key first' : 'Send message to StudioOmniAgent'}
+            >
+              {isAskingArchitect ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+            </button>
+          </div>
+        </form>
       </div>
     </aside>
   )

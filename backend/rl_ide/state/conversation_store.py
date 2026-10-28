@@ -77,10 +77,19 @@ class ConversationStore:
                     episodes TEXT,
                     env_code TEXT,
                     arena_html TEXT,
-                    latest_model_zip_path TEXT
+                    latest_model_zip_path TEXT,
+                    arena_locked INTEGER DEFAULT 0
                 );
                 """
             )
+            # Automatic schema migration for existing databases
+            cur = conn.execute("PRAGMA table_info(conversations);")
+            columns = [row["name"] for row in cur.fetchall()]
+            if "arena_locked" not in columns:
+                try:
+                    conn.execute("ALTER TABLE conversations ADD COLUMN arena_locked INTEGER DEFAULT 0;")
+                except Exception:
+                    pass
             conn.commit()
 
     def create_conversation(
@@ -89,6 +98,7 @@ class ConversationStore:
         conversation_id: str | None = None,
         dataset_id: str | None = None,
         training_params: dict[str, Any] | None = None,
+        arena_locked: bool = False,
     ) -> dict[str, Any]:
         """Creates a new blank conversation entry and initializes its workspace directory."""
         cid = conversation_id or f"conv_{uuid.uuid4().hex[:8]}"
@@ -119,6 +129,7 @@ class ConversationStore:
             "env_code": None,
             "arena_html": None,
             "latest_model_zip_path": None,
+            "arena_locked": 1 if arena_locked else 0,
         }
 
         with self._get_connection() as conn:
@@ -127,11 +138,13 @@ class ConversationStore:
                 INSERT INTO conversations (
                     conversation_id, title, created_at, updated_at, status, chat_history,
                     dataset_id, blueprint_spec, training_params, current_round, best_metric,
-                    rounds_history, episodes, env_code, arena_html, latest_model_zip_path
+                    rounds_history, episodes, env_code, arena_html, latest_model_zip_path,
+                    arena_locked
                 ) VALUES (
                     :conversation_id, :title, :created_at, :updated_at, :status, :chat_history,
                     :dataset_id, :blueprint_spec, :training_params, :current_round, :best_metric,
-                    :rounds_history, :episodes, :env_code, :arena_html, :latest_model_zip_path
+                    :rounds_history, :episodes, :env_code, :arena_html, :latest_model_zip_path,
+                    :arena_locked
                 )
                 ON CONFLICT(conversation_id) DO NOTHING;
                 """,
@@ -162,6 +175,7 @@ class ConversationStore:
             }
             d["rounds_history"] = json.loads(d["rounds_history"]) if d["rounds_history"] else []
             d["episodes"] = json.loads(d["episodes"]) if d["episodes"] else []
+            d["arena_locked"] = bool(d.get("arena_locked", False))
             return d
 
     def list_conversations(self) -> list[dict[str, Any]]:
@@ -170,7 +184,7 @@ class ConversationStore:
             cur = conn.execute(
                 """
                 SELECT conversation_id, title, status, best_metric, training_params,
-                       current_round, updated_at
+                       current_round, updated_at, arena_locked
                 FROM conversations
                 ORDER BY updated_at DESC;
                 """
@@ -184,15 +198,17 @@ class ConversationStore:
                         t_params = json.loads(row["training_params"])
                     except Exception:
                         pass
+                row_dict = dict(row)
                 summaries.append({
-                    "conversation_id": row["conversation_id"],
-                    "title": row["title"],
-                    "status": row["status"],
-                    "best_metric": float(row["best_metric"] or 0.0),
+                    "conversation_id": row_dict["conversation_id"],
+                    "title": row_dict["title"],
+                    "status": row_dict["status"],
+                    "best_metric": float(row_dict["best_metric"] or 0.0),
                     "target_metric_threshold": float(t_params.get("target_metric_threshold", 90.0)),
-                    "current_round": int(row["current_round"] or 1),
+                    "current_round": int(row_dict["current_round"] or 1),
                     "max_auto_tune_rounds": int(t_params.get("max_auto_tune_rounds", 5)),
-                    "updated_at": row["updated_at"],
+                    "arena_locked": bool(row_dict.get("arena_locked", False)),
+                    "updated_at": row_dict["updated_at"],
                 })
             return summaries
 
@@ -212,6 +228,7 @@ class ConversationStore:
         env_code: str | None = None,
         arena_html: str | None = None,
         latest_model_zip_path: str | None = None,
+        arena_locked: bool | None = None,
     ) -> dict[str, Any]:
         """Upserts conversation state, serializing lists/dicts to JSON."""
         existing = self.get_conversation(conversation_id)
@@ -231,14 +248,16 @@ class ConversationStore:
                 "episodes_per_round": 200,
                 "target_metric_threshold": 90.0,
             }
+            effective_locked = 1 if arena_locked else 0
             with self._get_connection() as conn:
                 conn.execute(
                     """
                     INSERT INTO conversations (
                         conversation_id, title, created_at, updated_at, status, chat_history,
                         dataset_id, blueprint_spec, training_params, current_round, best_metric,
-                        rounds_history, episodes, env_code, arena_html, latest_model_zip_path
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        rounds_history, episodes, env_code, arena_html, latest_model_zip_path,
+                        arena_locked
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         conversation_id,
@@ -257,6 +276,7 @@ class ConversationStore:
                         env_code,
                         arena_html,
                         latest_model_zip_path,
+                        effective_locked,
                     ),
                 )
                 conn.commit()
@@ -282,6 +302,11 @@ class ConversationStore:
             effective_model_path = (
                 latest_model_zip_path if latest_model_zip_path is not None else existing["latest_model_zip_path"]
             )
+            effective_locked = (
+                (1 if arena_locked else 0)
+                if arena_locked is not None
+                else (1 if existing.get("arena_locked") else 0)
+            )
 
             with self._get_connection() as conn:
                 conn.execute(
@@ -300,7 +325,8 @@ class ConversationStore:
                         episodes = ?,
                         env_code = ?,
                         arena_html = ?,
-                        latest_model_zip_path = ?
+                        latest_model_zip_path = ?,
+                        arena_locked = ?
                     WHERE conversation_id = ?
                     """,
                     (
@@ -318,6 +344,7 @@ class ConversationStore:
                         effective_code,
                         effective_arena,
                         effective_model_path,
+                        effective_locked,
                         conversation_id,
                     ),
                 )
@@ -360,6 +387,13 @@ class ConversationStore:
                 current_params[k] = params[k]
 
         return self.save_or_update(conversation_id, training_params=current_params)
+
+    def lock_arena(self, conversation_id: str, locked: bool = True) -> dict[str, Any]:
+        """Locks or unlocks the visual arena configuration."""
+        existing = self.get_conversation(conversation_id)
+        if not existing:
+            raise KeyError(f"Conversation '{conversation_id}' not found.")
+        return self.save_or_update(conversation_id, arena_locked=locked)
 
     def delete(self, conversation_id: str) -> bool:
         """Deletes conversation record and associated workspace + runs files."""

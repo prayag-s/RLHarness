@@ -22,10 +22,14 @@ import {
   ConversationSummary,
   ConversationDetail,
   TrainingParams,
+  StudioChatResponse,
 } from './types'
 
 import {
   chatWithArchitect,
+  chatWithStudioOmni,
+  lockConversationArena,
+  updateArenaLook,
   startSynthesisSession,
   fetchSession,
   interactSession,
@@ -52,9 +56,11 @@ export const App: React.FC = () => {
 
   // Arena & Code State
   const [arenaHtml, setArenaHtml] = useState<string>('')
+  const [arenaLocked, setArenaLocked] = useState<boolean>(false)
   const [envModuleCode, setEnvModuleCode] = useState<string>('')
   const [latestFrame, setLatestFrame] = useState<Record<string, any> | undefined>(undefined)
   const [episodes, setEpisodes] = useState<EpisodeLog[]>([])
+  const chatInputRef = useRef<HTMLInputElement>(null)
 
   // Telemetry & Metrics
   const [currentMetric, setCurrentMetric] = useState<number>(0)
@@ -221,6 +227,7 @@ export const App: React.FC = () => {
       const conv = await fetchConversation(cid)
       setActiveConversationId(cid)
       setArenaHtml(conv.arena_html || '')
+      setArenaLocked(conv.arena_locked ?? false)
       setEnvModuleCode(conv.env_code || '')
       setEpisodes(conv.episodes || [])
       if (conv.best_metric !== undefined) setCurrentMetric(conv.best_metric)
@@ -293,6 +300,7 @@ export const App: React.FC = () => {
     setActiveSession(null)
     setActiveConversationId(undefined)
     setArenaHtml('')
+    setArenaLocked(false)
     setEnvModuleCode('')
     setEpisodes([])
     setRoundHistory([])
@@ -429,6 +437,146 @@ export const App: React.FC = () => {
     }
   }
 
+  // 1b. Continuous Conversational Studio (StudioOmniAgent)
+  const handleSendStudioMessage = async (
+    message: string,
+    explicitParams?: TrainingParams,
+  ): Promise<StudioChatResponse> => {
+    if (!isLLMVerified) {
+      setIsGateModalOpen(true)
+      throw new Error('A verified LLM API key is mandatory before using the studio.')
+    }
+
+    const cid = activeConversationId || `conv_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`
+    if (!activeConversationId) {
+      setActiveConversationId(cid)
+    }
+
+    addTimelineItem(
+      'User Instruction',
+      message,
+      'info',
+      'info',
+    )
+
+    try {
+      const resp = await chatWithStudioOmni({
+        conversation_id: cid,
+        user_message: message,
+        training_params: explicitParams || trainingParams,
+      })
+
+      if (resp.conversation_id) {
+        setActiveConversationId(resp.conversation_id)
+      }
+
+      if (resp.arena_html) {
+        setArenaHtml(resp.arena_html)
+      }
+
+      if (resp.arena_locked !== undefined) {
+        setArenaLocked(resp.arena_locked)
+      }
+
+      if (resp.env_code) {
+        setEnvModuleCode(resp.env_code)
+      }
+
+      if (resp.best_metric !== undefined || resp.current_metric !== undefined) {
+        const metric = resp.best_metric !== undefined ? resp.best_metric : (resp.current_metric || 0)
+        setCurrentMetric(metric)
+      }
+
+      if (resp.current_round !== undefined) {
+        setCurrentRound(resp.current_round)
+      }
+
+      if (resp.training_params) {
+        setTrainingParams(resp.training_params)
+        if (resp.training_params.max_auto_tune_rounds) setMaxRounds(resp.training_params.max_auto_tune_rounds)
+        if (resp.training_params.target_metric_threshold) setTargetThreshold(resp.training_params.target_metric_threshold)
+      }
+
+      if (resp.status === 'training') {
+        setIsTraining(true)
+        connectWebSocket(cid)
+      } else if (resp.status === 'completed' || resp.status === 'target_achieved') {
+        setIsTraining(false)
+      }
+
+      if (resp.blueprint) {
+        const effectiveMetric = resp.best_metric !== undefined ? resp.best_metric : (resp.current_metric || 0)
+        setTargetThreshold(resp.blueprint.target_metric_threshold || 85)
+        setTargetMetricName(resp.blueprint.target_metric_name || 'Success Rate')
+        setMaxRounds(resp.blueprint.max_auto_tune_rounds || 4)
+        setActiveSession((prev) => ({
+          session_id: cid,
+          blueprint: resp.blueprint!,
+          dataset_id: attachedDataset?.dataset_id,
+          status: resp.status,
+          current_round: resp.current_round ?? prev?.current_round ?? 1,
+          max_rounds: resp.blueprint?.max_auto_tune_rounds || prev?.max_rounds || 4,
+          target_threshold: resp.blueprint?.target_metric_threshold || prev?.target_threshold || 85,
+          current_metric: effectiveMetric,
+          env_module_code: resp.env_code || prev?.env_module_code || '',
+          arena_html: resp.arena_html || prev?.arena_html || '',
+          rounds_history: prev?.rounds_history || [],
+          episodes: prev?.episodes || [],
+        }))
+      }
+
+      const replyText = resp.assistant_message || resp.message || resp.chat_response
+      const isArenaUpdate = (resp.action_types && resp.action_types.includes('update_arena')) || resp.action_type === 'update_arena'
+      if (replyText) {
+        addTimelineItem(
+          'Studio Omni Response',
+          replyText,
+          'synthesis',
+          isArenaUpdate ? 'success' : 'info',
+        )
+      }
+
+      loadConversationsList()
+      return resp
+    } catch (err: any) {
+      if (err.message && (err.message.includes('verified') || err.message.includes('mandatory') || err.message.includes('403'))) {
+        setIsLLMVerified(false)
+        setIsGateModalOpen(true)
+      }
+      addTimelineItem('Studio Error', err.message || 'Error processing request', 'error', 'warning')
+      throw err
+    }
+  }
+
+  // 1c. Lock Arena and Start Training
+  const handleLockArena = async () => {
+    const cid = activeConversationId
+    if (!cid) return
+    try {
+      await lockConversationArena(cid, true)
+      setArenaLocked(true)
+      addTimelineItem(
+        'Arena Locked 🔒',
+        'Arena layout locked in. Initializing training loop...',
+        'arena',
+        'success',
+      )
+      // Send chat message to run training
+      await handleSendStudioMessage('Looks good, start training!')
+    } catch (err: any) {
+      console.error('Failed to lock arena', err)
+      addTimelineItem('Lock Failed', err.message || 'Could not lock arena', 'error', 'warning')
+    }
+  }
+
+  // 1d. Focus chat to edit arena look
+  const handleEditArenaLook = () => {
+    if (chatInputRef.current) {
+      chatInputRef.current.focus()
+      chatInputRef.current.select()
+    }
+  }
+
   // 2. Start JIT Autonomous Session
   const handleStartSession = async (blueprint: AgentBlueprintSpec, datasetId?: string) => {
     if (!isLLMVerified) {
@@ -531,7 +679,17 @@ export const App: React.FC = () => {
   const handleWebSocketEvent = (event: any) => {
     const eventType = event.event
 
-    if (eventType === 'round_started') {
+    if (eventType === 'arena_updated') {
+      if (event.arena_html) {
+        setArenaHtml(event.arena_html)
+      }
+      addTimelineItem(
+        'Arena Hot-Reloaded 🎨',
+        event.message || 'Updated arena layout and styles without resetting policy weights.',
+        'arena',
+        'success',
+      )
+    } else if (eventType === 'round_started') {
       const rNum = event.round ?? event.round_num ?? 1
       setCurrentRound(rNum)
       addTimelineItem(
@@ -788,6 +946,10 @@ export const App: React.FC = () => {
           onOpenSettings={() => setIsGateModalOpen(true)}
           trainingParams={trainingParams}
           onUpdateTrainingParams={setTrainingParams}
+          isArenaLocked={arenaLocked}
+          onLockArena={handleLockArena}
+          onSendStudioMessage={handleSendStudioMessage}
+          chatInputRef={chatInputRef}
         />
 
         {/* Center Panel: Universal Sandboxed Arena Iframe */}
@@ -795,9 +957,12 @@ export const App: React.FC = () => {
           sessionId={activeSession?.session_id}
           arenaHtml={arenaHtml}
           isTraining={isTraining}
+          isArenaLocked={arenaLocked}
           latestFrame={latestFrame}
           episodes={episodes}
           onOpenCodeInspector={() => setIsCodeInspectorOpen(true)}
+          onLockArena={handleLockArena}
+          onEditArenaLook={handleEditArenaLook}
         />
 
         {/* Right Panel: Target Expectations & Multi-Round Telemetry */}

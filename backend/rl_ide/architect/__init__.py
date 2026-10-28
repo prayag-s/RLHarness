@@ -14,12 +14,22 @@ from rl_ide.architect.intake import (
     IntakeArchitectAgent,
     ARCHITECT_SYSTEM_PROMPT,
 )
+from rl_ide.architect.omni_agent import (
+    StudioOmniAgent,
+    StudioActionType,
+    StudioChatRequest,
+    StudioChatResponse,
+)
 
 __all__ = [
     "ClarifyingQuestion",
     "AgentBlueprintSpec",
     "IntakeResponse",
     "IntakeArchitectAgent",
+    "StudioOmniAgent",
+    "StudioActionType",
+    "StudioChatRequest",
+    "StudioChatResponse",
     "ARCHITECT_SYSTEM_PROMPT",
     "PILLAR_OBJECTIVE",
     "PILLAR_DATA",

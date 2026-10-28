@@ -11,6 +11,7 @@ import {
   ConversationSummary,
   ConversationDetail,
   TrainingParams,
+  StudioChatResponse,
 } from '../types'
 
 const API_V4 = '/api/v4'
@@ -120,6 +121,77 @@ export async function chatWithArchitect(
     blueprint: normalizedBlueprint,
     recommended_training_params: data.recommended_training_params,
   }
+}
+
+// -----------------------------------------------------------------------------
+// 2a. Unified Continuous Conversational Studio (v4.2 StudioOmniAgent)
+// -----------------------------------------------------------------------------
+
+export interface StudioChatParams {
+  conversation_id: string
+  user_message: string
+  selected_options?: Record<string, any>
+  training_params?: TrainingParams
+  run_sync?: boolean
+}
+
+export async function chatWithStudioOmni(
+  params: StudioChatParams,
+): Promise<StudioChatResponse> {
+  const res = await fetch(`${API_V4}/conversations/${params.conversation_id}/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      user_message: params.user_message,
+      selected_options: params.selected_options || {},
+      training_params: params.training_params,
+      run_sync: params.run_sync ?? false,
+    }),
+  })
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Omni chat failed' }))
+    throw new Error(err.detail || 'Studio chat failed')
+  }
+
+  const data = await res.json()
+  return data
+}
+
+export async function updateArenaLook(
+  conversationId: string,
+  userVisualRequest: string,
+): Promise<{ conversation_id: string; arena_html: string; status: string }> {
+  const res = await fetch(`${API_V4}/conversations/${conversationId}/arena/update`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ user_visual_request: userVisualRequest }),
+  })
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Failed to update arena look' }))
+    throw new Error(err.detail || 'Failed to update arena look')
+  }
+
+  return res.json()
+}
+
+export async function lockConversationArena(
+  conversationId: string,
+  locked: boolean = true,
+): Promise<{ conversation_id: string; arena_locked: boolean }> {
+  const res = await fetch(`${API_V4}/conversations/${conversationId}/arena/lock`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ locked }),
+  })
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Failed to lock arena' }))
+    throw new Error(err.detail || 'Failed to lock arena')
+  }
+
+  return res.json()
 }
 
 // -----------------------------------------------------------------------------

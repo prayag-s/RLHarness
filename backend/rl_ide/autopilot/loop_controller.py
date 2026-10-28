@@ -245,14 +245,12 @@ class AutonomousLoopController:
         on_event_callback: Callable[[dict[str, Any]], None] | None = None,
         max_rounds: int | None = None,
         episodes_per_burst: int = 25,
+        continue_training: bool = False,
     ) -> SessionState:
-        """Executes the full multi-round autonomous training loop."""
+        """Executes the full multi-round autonomous training loop, supporting continuous resumption."""
         records = dataset.df.to_dict(orient="records") if (dataset and hasattr(dataset, "df")) else None
         env = instantiate_env(env_cls, dataset_records=records)
         self.store.set_env(session_id, env)
-
-        rounds_limit = max_rounds or blueprint.max_auto_tune_rounds or 4
-        target_threshold = blueprint.target_metric_threshold
 
         # Initialize or retrieve SessionState
         session = self.store.get_session(session_id)
@@ -267,19 +265,83 @@ class AutonomousLoopController:
                 session_id=session_id,
                 blueprint=blueprint,
                 dataset_id=blueprint.dataset_id,
-                max_rounds=rounds_limit,
-                target_threshold=target_threshold,
+                max_rounds=max_rounds or blueprint.max_auto_tune_rounds or 4,
+                target_threshold=blueprint.target_metric_threshold,
                 env_module_code=env_code,
                 arena_html=arena_html,
             )
             self.store.set_session(session)
 
+        # Compute effective rounds limit and starting round
+        start_round = len(session.rounds_history) + 1
+        has_prior_rounds = len(session.rounds_history) > 0
+
+        if has_prior_rounds:
+            if max_rounds is not None:
+                if max_rounds <= len(session.rounds_history):
+                    rounds_limit = len(session.rounds_history) + max_rounds
+                else:
+                    rounds_limit = max_rounds
+            else:
+                rounds_limit = len(session.rounds_history) + (blueprint.max_auto_tune_rounds or 4)
+        else:
+            rounds_limit = max_rounds or blueprint.max_auto_tune_rounds or 4
+
+        session.max_rounds = rounds_limit
+        target_threshold = blueprint.target_metric_threshold if blueprint.target_metric_threshold is not None else (session.target_threshold or 85.0)
+        session.target_threshold = target_threshold
+
         # Determine effective gamma: 0.0 for contextual bandit/tabular, 0.95 for dynamic sim
         is_tabular = blueprint.data_source_type in ("uploaded_dataset", "tabular") or dataset is not None
         effective_gamma = 0.0 if is_tabular else 0.95
 
-        # Initialize SB3 PPO Policy explicitly configured for fast tabular/game convergence
+        # Initialize or reload SB3 PPO Policy
         model = self.store.get_model(session_id)
+        if not model:
+            # Check latest_model_zip_path or runs/<session_id>/model.zip
+            model_zip_candidate = (
+                Path(session.latest_model_zip_path)
+                if session.latest_model_zip_path
+                else (Path("runs") / session_id / "model.zip")
+            )
+            if model_zip_candidate and model_zip_candidate.exists():
+                try:
+                    model = PPO.load(str(model_zip_candidate), env=env, device="cpu")
+                    self.store.set_model(session_id, model)
+                except Exception as load_err:
+                    print(f"Warning: Failed to load PPO from {model_zip_candidate}: {load_err}")
+
+        # Check weights path if model still not loaded
+        if not model and session.weights_path and Path(session.weights_path).exists():
+            try:
+                model = PPO(
+                    "MlpPolicy",
+                    env,
+                    learning_rate=1e-3,
+                    gamma=effective_gamma,
+                    n_steps=256,
+                    batch_size=64,
+                    n_epochs=10,
+                    ent_coef=0.02,
+                    device="cpu",
+                    verbose=0,
+                )
+                state_dict = torch.load(session.weights_path, map_location="cpu", weights_only=True)
+                model.policy.load_state_dict(state_dict)
+                self.store.set_model(session_id, model)
+            except Exception as w_err:
+                print(f"Warning: Failed to load weights from {session.weights_path}: {w_err}")
+
+        # Verify observation and action space compatibility
+        if model:
+            obs_match = getattr(model, "observation_space", None) == env.observation_space
+            act_match = getattr(model, "action_space", None) == env.action_space
+            if obs_match and act_match:
+                model.set_env(env)
+            else:
+                # Spaces changed: fresh policy required
+                model = None
+
         if not model:
             model = PPO(
                 "MlpPolicy",
@@ -305,7 +367,6 @@ class AutonomousLoopController:
                     pass
 
         current_code = session.env_module_code
-        start_round = len(session.rounds_history) + 1
 
         # --- MULTI-ROUND AUTONOMOUS LOOP ---
         for r in range(start_round, rounds_limit + 1):
@@ -320,8 +381,8 @@ class AutonomousLoopController:
                 "message": f"Starting Autonomous Round {r}/{rounds_limit}...",
             })
 
-            # Stage 3.1: Warm-Start Behavioral Cloning (Round 1)
-            if r == 1:
+            # Stage 3.1: Warm-Start Behavioral Cloning (Round 1 ONLY, never when resuming past rounds)
+            if r == 1 and not has_prior_rounds:
                 emit({"event": "warmstart_started", "round": 1, "message": "Running Warm-Start Behavioral Cloning on domain heuristics..."})
                 loss, acc = self._warmstart_from_demonstrations(model, env, epochs=40, lr=3e-3, num_samples=500)
                 emit({
@@ -339,6 +400,8 @@ class AutonomousLoopController:
             # Stage 3.2: Critic Warmup (Round > 1)
             if r > 1 and replay_buffer:
                 emit({"event": "critic_warmup_started", "round": r, "message": "Calibrating value network on updated reward function..."})
+                self._critic_warmup(model, replay_buffer, gamma=effective_gamma, epochs=15)
+                emit({"event": "critic_warmup_completed", "round": r, "message": "Value network calibrated."})
                 self._critic_warmup(model, replay_buffer, gamma=effective_gamma, epochs=15)
                 emit({"event": "critic_warmup_completed", "round": r, "message": "Value network calibrated."})
 
@@ -699,6 +762,23 @@ class AutonomousLoopController:
 
         if transitions:
             self._critic_warmup(model, transitions, gamma=gamma, epochs=epochs)
+
+    def calibrate_critic(
+        self,
+        session_id: str,
+        env: gym.Env | None = None,
+        epochs: int = 15,
+        n_episodes: int = 25,
+    ) -> bool:
+        """Calibrates Critic value head on existing policy weights without resetting Actor."""
+        model = self.store.get_model(session_id)
+        active_env = env or self.store.get_env(session_id)
+        if not model or not active_env:
+            return False
+        session = self.store.get_session(session_id)
+        effective_gamma = 0.0 if (session and session.blueprint.data_source_type in ("uploaded_dataset", "tabular")) else 0.95
+        self._critic_pre_calibration(model, active_env, gamma=effective_gamma, epochs=epochs, n_episodes=n_episodes)
+        return True
 
     def evaluate_policy_deterministic(
         self,

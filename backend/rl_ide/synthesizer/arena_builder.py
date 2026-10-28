@@ -1,7 +1,9 @@
-"""Dynamic JIT Arena Synthesizer for RL-Native Agent IDE v4.0.
+"""Dynamic JIT Arena Synthesizer for RL-Native Agent IDE v4.2.
 
 Generates self-contained, interactive HTML5/Canvas/Tailwind arena visualizations
 (arena.html) rendered in a sandboxed iframe with postMessage bi-directional bridges.
+Includes a built-in Mock Simulation & Animation Loop (startMockAnimationLoop) for instant
+zero-training preview, live restyling, and seamless transition to real training telemetry.
 """
 
 from __future__ import annotations
@@ -50,7 +52,7 @@ def extract_html_code(raw: str) -> str:
 
 
 class JITArenaSynthesizer:
-    """Synthesizes self-contained interactive arena.html visualizations."""
+    """Synthesizes self-contained interactive arena.html visualizations with live mock animations."""
 
     def __init__(self, llm_client: BaseLLMClient | None = None):
         self._llm_client = llm_client
@@ -67,6 +69,7 @@ class JITArenaSynthesizer:
         sample_arena_state: dict[str, Any] | None = None,
         session_id: str | None = None,
         workspace_dir: str | Path | None = None,
+        visual_style: str | None = None,
     ) -> tuple[str, Path]:
         """Generates and writes arena.html to the workspace directory."""
         sid = session_id or f"session_{uuid.uuid4().hex[:8]}"
@@ -74,25 +77,67 @@ class JITArenaSynthesizer:
         out_dir.mkdir(parents=True, exist_ok=True)
         file_path = out_dir / "arena.html"
 
-        html_str = self.generate_arena_html(blueprint, sample_arena_state)
+        html_str = self.generate_arena_html(blueprint, sample_arena_state, visual_style=visual_style)
         file_path.write_text(html_str, encoding="utf-8")
         return html_str, file_path
+
+    def update_arena(
+        self,
+        blueprint: AgentBlueprintSpec,
+        current_arena_html: str,
+        user_visual_request: str,
+        sample_arena_state: dict[str, Any] | None = None,
+        workspace_dir: str | Path | None = None,
+    ) -> str:
+        """Restyles arena.html according to user's visual request while preserving live mock animation and bi-directional bridges."""
+        if not isinstance(self.client, FallbackCodeSynthesizer):
+            try:
+                prompt = (
+                    f"You are restyling this self-contained `arena.html` according to the user's visual request:\n"
+                    f"User Visual Request: \"{user_visual_request}\"\n\n"
+                    f"Current Arena HTML:\n{current_arena_html[:6000] if current_arena_html else ''}\n\n"
+                    f"Blueprint: {blueprint.model_dump_json(indent=2)}\n\n"
+                    f"REQUIREMENTS:\n"
+                    f"1. Apply the user's visual styling (e.g. colors, scoreboard, badges, layouts, sizing, themes).\n"
+                    f"2. PRESERVE `startMockAnimationLoop()`, `SET_ARENA_MODE`, `ARENA_UPDATE`, and `ARENA_INTERACT` functionality.\n"
+                    f"3. Return ONLY valid HTML inside ```html ... ```."
+                )
+                raw = self.client.generate(prompt, system_prompt=ARENA_SYNTHESIZER_SYSTEM_PROMPT)
+                extracted = extract_html_code(raw)
+                if extracted and "ARENA_UPDATE" in extracted and "startMockAnimationLoop" in extracted:
+                    if workspace_dir:
+                        (Path(workspace_dir) / "arena.html").write_text(extracted, encoding="utf-8")
+                    return extracted
+            except Exception:
+                pass
+
+        # Deterministic update
+        updated = self._generate_deterministic_arena_html(
+            blueprint=blueprint,
+            sample_arena_state=sample_arena_state,
+            visual_style=user_visual_request,
+            base_html=current_arena_html,
+        )
+        if workspace_dir:
+            (Path(workspace_dir) / "arena.html").write_text(updated, encoding="utf-8")
+        return updated
 
     def generate_arena_html(
         self,
         blueprint: AgentBlueprintSpec,
         sample_arena_state: dict[str, Any] | None = None,
+        visual_style: str | None = None,
     ) -> str:
         """Synthesizes HTML code using LLM or deterministic template."""
         if not isinstance(self.client, FallbackCodeSynthesizer):
             try:
                 html = self._call_llm_arena_gen(blueprint, sample_arena_state)
-                if html and "ARENA_UPDATE" in html and ("<html" in html.lower() or "<!doctype html" in html.lower()):
+                if html and "ARENA_UPDATE" in html and "startMockAnimationLoop" in html and ("<html" in html.lower() or "<!doctype html" in html.lower()):
                     return html
             except Exception:
                 pass
 
-        return self._generate_deterministic_arena_html(blueprint, sample_arena_state)
+        return self._generate_deterministic_arena_html(blueprint, sample_arena_state, visual_style=visual_style)
 
     def _call_llm_arena_gen(
         self,
@@ -100,7 +145,7 @@ class JITArenaSynthesizer:
         sample_arena_state: dict[str, Any] | None,
     ) -> str | None:
         prompt = (
-            f"Generate the self-contained `arena.html` for:\n"
+            f"Generate the self-contained `arena.html` with built-in Mock Data & Animation Engine (startMockAnimationLoop) for:\n"
             f"Blueprint: {blueprint.model_dump_json(indent=2)}\n"
             f"Sample Arena State: {json.dumps(sample_arena_state or {}, default=str)}\n\n"
             f"Return ONLY valid HTML inside a ```html ... ``` code block. Be concise and complete."
@@ -112,8 +157,10 @@ class JITArenaSynthesizer:
         self,
         blueprint: AgentBlueprintSpec,
         sample_arena_state: dict[str, Any] | None,
+        visual_style: str | None = None,
+        base_html: str | None = None,
     ) -> str:
-        """Constructs a responsive, feature-complete arena.html with full postMessage support."""
+        """Constructs a responsive, feature-complete arena.html with full postMessage support, mock animation loop, and visual theming."""
         task_title = blueprint.task_title
         is_tictactoe = is_tictactoe_spec(blueprint)
         is_dataset = (
@@ -121,25 +168,71 @@ class JITArenaSynthesizer:
             or (sample_arena_state and "record_index" in sample_arena_state)
         )
 
+        style_query = ((visual_style or "") + " " + (blueprint.arena_visual_description or "")).lower()
+        if base_html:
+            style_query += " " + base_html.lower()
+
+        has_scoreboard = "scoreboard" in style_query or "score" in style_query
+        has_gold = "gold" in style_query or "golden" in style_query
+        has_badge = "victory badge" in style_query or "badge" in style_query or "victory" in style_query
+        has_larger = "larger" in style_query or "bigger" in style_query or "large" in style_query
+        has_arcade = "arcade" in style_query or "retro" in style_query or "cyber" in style_query
+        has_radar = "radar" in style_query or "hud" in style_query
+
         action_labels_json = json.dumps(blueprint.action_labels)
         target_threshold = blueprint.target_metric_threshold
 
+        # Scoreboard HTML snippet
+        scoreboard_html = ""
+        if has_scoreboard or has_arcade:
+            scoreboard_html = """
+            <!-- Retro Cyber Scoreboard -->
+            <div id="arcade-scoreboard" class="flex items-center justify-between bg-slate-900/90 border border-purple-500/50 px-4 py-2 rounded-xl mb-3 shadow-lg">
+              <div class="flex items-center gap-2">
+                <span class="text-amber-400 font-black text-xs font-mono">🏆 SCOREBOARD:</span>
+                <span id="scoreboard-agent-score" class="text-xs font-mono text-cyan-400 font-bold">AGENT: 12</span>
+                <span class="text-slate-600 font-mono">|</span>
+                <span id="scoreboard-opp-score" class="text-xs font-mono text-rose-400 font-bold">OPPONENT: 4</span>
+                <span class="text-slate-600 font-mono">|</span>
+                <span id="scoreboard-draws" class="text-xs font-mono text-slate-400 font-bold">DRAWS: 3</span>
+              </div>
+              <div class="text-[10px] uppercase font-mono px-2 py-0.5 rounded bg-purple-950/80 border border-purple-700/60 text-purple-300 font-bold">CYBER LEAGUE</div>
+            </div>
+            """
+
+        # Victory Badge snippet
+        victory_badge_html = ""
+        if has_badge:
+            victory_badge_html = """
+            <!-- Victory Badge Banner -->
+            <div id="victory-badge" class="flex items-center justify-center gap-2 py-2 px-4 bg-gradient-to-r from-amber-500/20 via-yellow-500/20 to-amber-500/20 border border-amber-400/80 rounded-xl mb-3 shadow-xl animate-pulse text-xs font-black text-amber-300">
+              <span>🏆</span>
+              <span>CHAMPION VICTORY BADGE UNLOCKED — TOP TIER POLICY ACTIVE</span>
+              <span>🏆</span>
+            </div>
+            """
+
+        cell_dim = "w-24 h-24 text-4xl" if has_larger else "w-20 h-20 text-3xl"
+        border_accent = "border-amber-500/50 shadow-amber-500/10" if has_gold else "border-slate-800 shadow-2xl"
+
         # Domain-specific interactive stage and rendering JS
         if is_tictactoe:
-            domain_html = """
+            domain_html = f"""
+            {victory_badge_html}
+            {scoreboard_html}
             <!-- Tic-Tac-Toe 3x3 Grid -->
             <div class="flex flex-col items-center justify-center py-4">
               <div class="text-sm font-medium text-slate-400 mb-3" id="game-status-label">Turn: Agent (X)</div>
-              <div class="grid grid-cols-3 gap-3 bg-slate-900/80 p-4 rounded-2xl border border-slate-800 shadow-2xl">
-                <button onclick="cellClick(0)" id="cell-0" class="w-20 h-20 bg-slate-800 hover:bg-slate-700/80 rounded-xl text-3xl font-black transition-all flex items-center justify-center text-slate-600 cursor-pointer"></button>
-                <button onclick="cellClick(1)" id="cell-1" class="w-20 h-20 bg-slate-800 hover:bg-slate-700/80 rounded-xl text-3xl font-black transition-all flex items-center justify-center text-slate-600 cursor-pointer"></button>
-                <button onclick="cellClick(2)" id="cell-2" class="w-20 h-20 bg-slate-800 hover:bg-slate-700/80 rounded-xl text-3xl font-black transition-all flex items-center justify-center text-slate-600 cursor-pointer"></button>
-                <button onclick="cellClick(3)" id="cell-3" class="w-20 h-20 bg-slate-800 hover:bg-slate-700/80 rounded-xl text-3xl font-black transition-all flex items-center justify-center text-slate-600 cursor-pointer"></button>
-                <button onclick="cellClick(4)" id="cell-4" class="w-20 h-20 bg-slate-800 hover:bg-slate-700/80 rounded-xl text-3xl font-black transition-all flex items-center justify-center text-slate-600 cursor-pointer"></button>
-                <button onclick="cellClick(5)" id="cell-5" class="w-20 h-20 bg-slate-800 hover:bg-slate-700/80 rounded-xl text-3xl font-black transition-all flex items-center justify-center text-slate-600 cursor-pointer"></button>
-                <button onclick="cellClick(6)" id="cell-6" class="w-20 h-20 bg-slate-800 hover:bg-slate-700/80 rounded-xl text-3xl font-black transition-all flex items-center justify-center text-slate-600 cursor-pointer"></button>
-                <button onclick="cellClick(7)" id="cell-7" class="w-20 h-20 bg-slate-800 hover:bg-slate-700/80 rounded-xl text-3xl font-black transition-all flex items-center justify-center text-slate-600 cursor-pointer"></button>
-                <button onclick="cellClick(8)" id="cell-8" class="w-20 h-20 bg-slate-800 hover:bg-slate-700/80 rounded-xl text-3xl font-black transition-all flex items-center justify-center text-slate-600 cursor-pointer"></button>
+              <div class="grid grid-cols-3 gap-3 bg-slate-900/80 p-4 rounded-2xl border {border_accent}">
+                <button onclick="cellClick(0)" id="cell-0" class="{cell_dim} bg-slate-800 hover:bg-slate-700/80 rounded-xl font-black transition-all flex items-center justify-center text-slate-600 cursor-pointer"></button>
+                <button onclick="cellClick(1)" id="cell-1" class="{cell_dim} bg-slate-800 hover:bg-slate-700/80 rounded-xl font-black transition-all flex items-center justify-center text-slate-600 cursor-pointer"></button>
+                <button onclick="cellClick(2)" id="cell-2" class="{cell_dim} bg-slate-800 hover:bg-slate-700/80 rounded-xl font-black transition-all flex items-center justify-center text-slate-600 cursor-pointer"></button>
+                <button onclick="cellClick(3)" id="cell-3" class="{cell_dim} bg-slate-800 hover:bg-slate-700/80 rounded-xl font-black transition-all flex items-center justify-center text-slate-600 cursor-pointer"></button>
+                <button onclick="cellClick(4)" id="cell-4" class="{cell_dim} bg-slate-800 hover:bg-slate-700/80 rounded-xl font-black transition-all flex items-center justify-center text-slate-600 cursor-pointer"></button>
+                <button onclick="cellClick(5)" id="cell-5" class="{cell_dim} bg-slate-800 hover:bg-slate-700/80 rounded-xl font-black transition-all flex items-center justify-center text-slate-600 cursor-pointer"></button>
+                <button onclick="cellClick(6)" id="cell-6" class="{cell_dim} bg-slate-800 hover:bg-slate-700/80 rounded-xl font-black transition-all flex items-center justify-center text-slate-600 cursor-pointer"></button>
+                <button onclick="cellClick(7)" id="cell-7" class="{cell_dim} bg-slate-800 hover:bg-slate-700/80 rounded-xl font-black transition-all flex items-center justify-center text-slate-600 cursor-pointer"></button>
+                <button onclick="cellClick(8)" id="cell-8" class="{cell_dim} bg-slate-800 hover:bg-slate-700/80 rounded-xl font-black transition-all flex items-center justify-center text-slate-600 cursor-pointer"></button>
               </div>
               <div class="mt-4 flex gap-3">
                 <button onclick="resetBoard()" class="px-4 py-1.5 bg-indigo-600/80 hover:bg-indigo-500 rounded-lg text-xs font-semibold text-white transition-all shadow">
@@ -148,43 +241,126 @@ class JITArenaSynthesizer:
               </div>
             </div>
             """
-            domain_js = """
-            function renderDomainState(state) {
+            domain_js = f"""
+            const HAS_GOLD = {'true' if has_gold else 'false'};
+            const CELL_DIM = "{cell_dim}";
+
+            function renderDomainState(state) {{
               if (!state || !state.board) return;
-              for (let i = 0; i < 9; i++) {
+              for (let i = 0; i < 9; i++) {{
                 const cell = document.getElementById('cell-' + i);
                 if (!cell) continue;
                 const val = state.board[i];
-                if (val === 1) {
+                if (val === 1) {{
                   cell.innerText = 'X';
-                  cell.className = 'w-20 h-20 bg-cyan-950/60 border border-cyan-500/50 rounded-xl text-3xl font-black text-cyan-400 flex items-center justify-center shadow-lg shadow-cyan-500/20';
-                } else if (val === -1) {
+                  if (HAS_GOLD) {{
+                    cell.className = CELL_DIM + ' bg-amber-950/70 border-2 border-amber-400 rounded-xl font-black text-amber-300 flex items-center justify-center shadow-lg shadow-amber-500/30';
+                  }} else {{
+                    cell.className = CELL_DIM + ' bg-cyan-950/60 border border-cyan-500/50 rounded-xl font-black text-cyan-400 flex items-center justify-center shadow-lg shadow-cyan-500/20';
+                  }}
+                }} else if (val === -1) {{
                   cell.innerText = 'O';
-                  cell.className = 'w-20 h-20 bg-rose-950/60 border border-rose-500/50 rounded-xl text-3xl font-black text-rose-400 flex items-center justify-center shadow-lg shadow-rose-500/20';
-                } else {
+                  cell.className = CELL_DIM + ' bg-rose-950/60 border border-rose-500/50 rounded-xl font-black text-rose-400 flex items-center justify-center shadow-lg shadow-rose-500/20';
+                }} else {{
                   cell.innerText = '';
-                  cell.className = 'w-20 h-20 bg-slate-800/80 hover:bg-slate-700/80 border border-slate-700/50 rounded-xl text-3xl font-black flex items-center justify-center cursor-pointer';
-                }
-              }
+                  cell.className = CELL_DIM + ' bg-slate-800/80 hover:bg-slate-700/80 border border-slate-700/50 rounded-xl font-black flex items-center justify-center cursor-pointer';
+                }}
+              }}
               const status = document.getElementById('game-status-label');
-              if (status && state.game_status) {
+              if (status && state.game_status) {{
                 status.innerText = 'Status: ' + state.game_status + (state.winner !== null ? ' (Winner: ' + state.winner + ')' : '');
-              }
-            }
+              }}
+            }}
 
-            function cellClick(idx) {
-              sendInteraction({ user_action: idx });
-            }
+            function cellClick(idx) {{
+              sendInteraction({{ user_action: idx }});
+            }}
 
-            function resetBoard() {
-              sendInteraction({ reset: true });
-            }
+            function resetBoard() {{
+              sendInteraction({{ reset: true }});
+            }}
+
+            // --- Mock Animation Engine for Tic-Tac-Toe ---
+            let mockBoard = [0, 0, 0, 0, 0, 0, 0, 0, 0];
+            let mockTurn = 1;
+            let mockEpisodeCount = 1;
+            let mockStepCount = 0;
+
+            function checkWinningLine(b) {{
+              const wins = [
+                [0,1,2],[3,4,5],[6,7,8],
+                [0,3,6],[1,4,7],[2,5,8],
+                [0,4,8],[2,4,6]
+              ];
+              for (const [x,y,z] of wins) {{
+                if (b[x] !== 0 && b[x] === b[y] && b[y] === b[z]) return [x,y,z,b[x]];
+              }}
+              return null;
+            }}
+
+            function stepMockDomain() {{
+              mockStepCount++;
+              const win = checkWinningLine(mockBoard);
+              const empty = mockBoard.map((v, i) => v === 0 ? i : -1).filter(i => i !== -1);
+
+              if (win || empty.length === 0) {{
+                if (win) {{
+                  const [c1, c2, c3] = win;
+                  [c1, c2, c3].forEach(idx => {{
+                    const el = document.getElementById('cell-' + idx);
+                    if (el) {{
+                      el.classList.add('ring-4', 'ring-amber-400', 'bg-amber-900/90', 'text-amber-200');
+                    }}
+                  }});
+                }}
+                setTimeout(() => {{
+                  mockBoard = [0, 0, 0, 0, 0, 0, 0, 0, 0];
+                  mockTurn = 1;
+                  mockEpisodeCount++;
+                  renderDomainState({{ board: mockBoard, game_status: 'Mock Match Reset' }});
+                }}, 450);
+                return;
+              }}
+
+              // Strategic move heuristic for realistic mock visualization
+              let chosen = (mockBoard[4] === 0 && Math.random() < 0.6)
+                ? 4
+                : empty[Math.floor(Math.random() * empty.length)];
+
+              mockBoard[chosen] = mockTurn;
+              const playerTag = mockTurn === 1 ? 'Agent (X)' : 'Opponent (O)';
+              mockTurn = -mockTurn;
+
+              // Action probabilities
+              const probs = ACTION_LABELS.map((_, i) => i === chosen ? 0.65 + Math.random() * 0.25 : Math.random() * 0.05);
+              const sum = probs.reduce((a, b) => a + b, 0);
+              const normProbs = probs.map(p => p / sum);
+
+              applyArenaPayload({{
+                episode_id: 'MOCK-' + mockEpisodeCount,
+                step: mockStepCount,
+                total_reward: (mockStepCount * 0.15).toFixed(2),
+                reward_breakdown: {{
+                  step_cost: -0.01,
+                  center_control: mockBoard[4] === 1 ? 0.5 : 0.0,
+                  tactical_pressure: 0.25
+                }},
+                action_probs: normProbs,
+                arena_state: {{
+                  board: [...mockBoard],
+                  game_status: 'Mock turn by ' + playerTag,
+                  winner: null
+                }}
+              }});
+            }}
             """
         elif is_dataset:
-            domain_html = """
+            domain_html = f"""
+            {victory_badge_html}
+            {scoreboard_html}
             <!-- Data Inspector Card -->
             <div class="flex flex-col items-center justify-center py-4 w-full max-w-lg mx-auto">
-              <div class="w-full bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-2xl">
+              <div class="w-full bg-slate-900 border {border_accent} rounded-2xl p-5 shadow-2xl">
                 <div class="flex justify-between items-center mb-4 pb-2 border-b border-slate-800">
                   <div class="text-xs uppercase tracking-wider text-slate-400 font-bold">Record Telemetry</div>
                   <div id="data-idx-badge" class="px-2.5 py-1 bg-cyan-950 text-cyan-400 border border-cyan-800/60 rounded-md text-xs font-mono">Row #0</div>
@@ -231,12 +407,38 @@ class JITArenaSynthesizer:
             function nextRecord() {
               sendInteraction({ user_action: 1 });
             }
+
+            let mockRow = 0;
+            function stepMockDomain() {
+              mockRow = (mockRow + 1) % 50;
+              const probs = ACTION_LABELS.map((_, i) => i === 0 ? 0.8 : 0.2 / Math.max(1, ACTION_LABELS.length - 1));
+              applyArenaPayload({
+                episode_id: 'MOCK-DATA',
+                step: mockRow,
+                total_reward: (mockRow * 0.92).toFixed(1),
+                reward_breakdown: { classification_accuracy: 1.0, latency_penalty: -0.05 },
+                action_probs: probs,
+                arena_state: {
+                  record_index: mockRow,
+                  total_records: 100,
+                  accuracy_pct: (94.5 + Math.random() * 4).toFixed(1),
+                  current_record_preview: {
+                    feature_a: (Math.random() * 10).toFixed(2),
+                    feature_b: (Math.random() * 100).toFixed(1),
+                    prediction: 'ACCEPTED',
+                    confidence: '98.2%'
+                  }
+                }
+              });
+            }
             """
         else:
-            domain_html = """
+            domain_html = f"""
+            {victory_badge_html}
+            {scoreboard_html}
             <!-- 2D Canvas Physics / Navigation -->
             <div class="flex flex-col items-center justify-center py-4">
-              <canvas id="sim-canvas" width="400" height="300" class="bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl cursor-crosshair"></canvas>
+              <canvas id="sim-canvas" width="440" height="320" class="bg-slate-900 border {border_accent} rounded-2xl shadow-2xl cursor-crosshair"></canvas>
               <div class="text-xs text-slate-500 mt-2">Click anywhere on canvas to deploy interactive waypoint target</div>
             </div>
             """
@@ -253,6 +455,13 @@ class JITArenaSynthesizer:
               });
             }
 
+            function toScreen(x, y) {
+              return [
+                ((x + 8) / 16) * canvas.width,
+                ((y + 8) / 16) * canvas.height
+              ];
+            }
+
             function renderDomainState(state) {
               if (!ctx || !state) return;
               ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -265,14 +474,6 @@ class JITArenaSynthesizer:
               }
               for (let j = 0; j < canvas.height; j += 40) {
                 ctx.beginPath(); ctx.moveTo(0, j); ctx.lineTo(canvas.width, j); ctx.stroke();
-              }
-
-              // Transform coordinates
-              function toScreen(x, y) {
-                return [
-                  ((x + 8) / 16) * canvas.width,
-                  ((y + 8) / 16) * canvas.height
-                ];
               }
 
               // Draw Target
@@ -293,6 +494,37 @@ class JITArenaSynthesizer:
                 ctx.fill();
               }
             }
+
+            let mockT = 0;
+            function stepMockDomain() {
+              mockT += 0.15;
+              const ax = Math.sin(mockT) * 4.5;
+              const ay = Math.cos(mockT * 0.7) * 3.5;
+              const tx = 5.0;
+              const ty = 4.0;
+              const dist = Math.hypot(ax - tx, ay - ty);
+
+              applyArenaPayload({
+                episode_id: 'MOCK-SIM',
+                step: Math.floor(mockT * 5),
+                total_reward: (-dist).toFixed(2),
+                reward_breakdown: { distance_reward: (-dist * 0.2).toFixed(2), velocity_cost: -0.05 },
+                action_probs: [0.35, 0.25, 0.2, 0.2],
+                arena_state: {
+                  agent_pos: [ax, ay],
+                  target_pos: [tx, ty]
+                }
+              });
+            }
+            """
+
+        radar_hud_snippet = ""
+        if has_radar:
+            radar_hud_snippet = """
+            <div id="radar-hud" class="px-3 py-1 bg-cyan-950/40 border border-cyan-800/40 rounded-lg text-xs font-mono text-cyan-300 flex items-center gap-2">
+              <span class="w-2 h-2 rounded-full bg-cyan-400 animate-ping"></span>
+              <span>RADAR HUD ACTIVE</span>
+            </div>
             """
 
         return f"""<!DOCTYPE html>
@@ -314,12 +546,23 @@ class JITArenaSynthesizer:
   </style>
 </head>
 <body class="p-4 flex flex-col justify-between min-h-screen">
+  <!-- Sleek Floating Mock Preview Badge -->
+  <div id="mock-preview-banner" class="flex items-center justify-between bg-gradient-to-r from-amber-500/20 via-purple-500/20 to-cyan-500/20 border border-amber-500/40 px-3.5 py-1.5 rounded-lg mb-3 text-xs text-amber-200 shadow-lg backdrop-blur-sm">
+    <span class="flex items-center gap-2">
+      <span class="w-2 h-2 rounded-full bg-amber-400 animate-ping"></span>
+      <span class="font-semibold">✨ LIVE ARENA PREVIEW (MOCK ANIMATION)</span>
+      <span class="text-amber-300/80 hidden sm:inline">— Ask in chat to customize look & feel, or click "Lock Arena & Start Training"</span>
+    </span>
+    <span class="text-[10px] uppercase font-mono px-2 py-0.5 rounded bg-amber-950/80 border border-amber-700/60 text-amber-300 font-bold">Mock Mode</span>
+  </div>
+
   <!-- Top Telemetry Bar -->
   <header class="flex flex-wrap items-center justify-between pb-3 border-b border-slate-800 gap-2">
     <div class="flex items-center gap-2">
       <span class="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></span>
       <h1 class="text-sm font-bold text-slate-100">{task_title}</h1>
-      <span class="text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-700 font-mono">v4.0 JIT Arena</span>
+      <span class="text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-700 font-mono">v4.2 JIT Arena</span>
+      {radar_hud_snippet}
     </div>
     <div class="flex items-center gap-3 font-mono text-xs">
       <div class="bg-slate-900 border border-slate-800 px-3 py-1 rounded-lg">
@@ -363,7 +606,7 @@ class JITArenaSynthesizer:
     <div id="action-probs-bar" class="grid grid-cols-3 sm:grid-cols-5 md:grid-cols-9 gap-1.5 text-[10px] font-mono"></div>
   </footer>
 
-  <!-- postMessage Communication Protocol -->
+  <!-- postMessage Communication Protocol & Mock Engine -->
   <script>
     const ACTION_LABELS = {action_labels_json};
 
@@ -391,60 +634,101 @@ class JITArenaSynthesizer:
       }}
     }}
 
+    function applyArenaPayload(data) {{
+      if (!data) return;
+
+      // 1. Update Telemetry
+      if (data.episode_id !== undefined) {{
+        const ep = document.getElementById('telemetry-episode');
+        if (ep) ep.innerText = '#' + data.episode_id;
+      }}
+      if (data.step !== undefined) {{
+        const st = document.getElementById('telemetry-step');
+        if (st) st.innerText = data.step;
+      }}
+      if (data.total_reward !== undefined) {{
+        const rw = document.getElementById('telemetry-reward');
+        if (rw) rw.innerText = Number(data.total_reward).toFixed(2);
+      }}
+
+      // 2. Update Reward Breakdown Strip
+      if (data.reward_breakdown) {{
+        const rb = document.getElementById('reward-breakdown-bar');
+        if (rb) {{
+          const terms = Object.entries(data.reward_breakdown);
+          if (terms.length > 0) {{
+            rb.innerHTML = terms.map(([k, v]) => {{
+              const color = v >= 0 ? 'text-emerald-400 bg-emerald-950/60 border-emerald-800/60' : 'text-rose-400 bg-rose-950/60 border-rose-800/60';
+              return `<span class="px-2 py-0.5 rounded border text-[11px] ${{color}}">${{k}}: ${{Number(v).toFixed(2)}}</span>`;
+            }}).join('');
+          }}
+        }}
+      }}
+
+      // 3. Update Action Probabilities
+      if (data.action_probs && Array.isArray(data.action_probs)) {{
+        data.action_probs.forEach((p, idx) => {{
+          const bar = document.getElementById('prob-bar-' + idx);
+          const val = document.getElementById('prob-val-' + idx);
+          const pct = Math.round(p * 100);
+          if (bar) bar.style.width = pct + '%';
+          if (val) val.innerText = pct + '%';
+        }});
+      }}
+
+      // 4. Update Domain Arena State
+      if (data.arena_state) {{
+        renderDomainState(data.arena_state);
+      }}
+    }}
+
     // Domain Rendering JS
     {domain_js}
 
-    // Listen for ARENA_UPDATE from Parent IDE
+    // --- Mock Animation Loop Controller ---
+    let mockAnimationTimer = null;
+
+    function startMockAnimationLoop() {{
+      if (mockAnimationTimer) clearInterval(mockAnimationTimer);
+      const banner = document.getElementById('mock-preview-banner');
+      if (banner) banner.style.display = 'flex';
+      mockAnimationTimer = setInterval(() => {{
+        stepMockDomain();
+      }}, 650);
+    }}
+
+    function stopMockAnimationLoop() {{
+      if (mockAnimationTimer) {{
+        clearInterval(mockAnimationTimer);
+        mockAnimationTimer = null;
+      }}
+      const banner = document.getElementById('mock-preview-banner');
+      if (banner) banner.style.display = 'none';
+    }}
+
+    // Listen for parent messages
     window.addEventListener("message", function(event) {{
       if (!event.data) return;
+
+      if (event.data.type === "SET_ARENA_MODE") {{
+        const mode = event.data.mode;
+        if (mode === "mock_preview") {{
+          startMockAnimationLoop();
+        }} else {{
+          stopMockAnimationLoop();
+        }}
+        return;
+      }}
+
       if (event.data.type === "ARENA_UPDATE") {{
+        stopMockAnimationLoop();
         const data = event.data.payload || event.data;
-
-        // 1. Update Telemetry
-        if (data.episode_id !== undefined) {{
-          const ep = document.getElementById('telemetry-episode');
-          if (ep) ep.innerText = '#' + data.episode_id;
-        }}
-        if (data.step !== undefined) {{
-          const st = document.getElementById('telemetry-step');
-          if (st) st.innerText = data.step;
-        }}
-        if (data.total_reward !== undefined) {{
-          const rw = document.getElementById('telemetry-reward');
-          if (rw) rw.innerText = Number(data.total_reward).toFixed(2);
-        }}
-
-        // 2. Update Reward Breakdown Strip
-        if (data.reward_breakdown) {{
-          const rb = document.getElementById('reward-breakdown-bar');
-          if (rb) {{
-            const terms = Object.entries(data.reward_breakdown);
-            if (terms.length > 0) {{
-              rb.innerHTML = terms.map(([k, v]) => {{
-                const color = v >= 0 ? 'text-emerald-400 bg-emerald-950/60 border-emerald-800/60' : 'text-rose-400 bg-rose-950/60 border-rose-800/60';
-                return `<span class="px-2 py-0.5 rounded border text-[11px] ${{color}}">${{k}}: ${{Number(v).toFixed(2)}}</span>`;
-              }}).join('');
-            }}
-          }}
-        }}
-
-        // 3. Update Action Probabilities
-        if (data.action_probs && Array.isArray(data.action_probs)) {{
-          data.action_probs.forEach((p, idx) => {{
-            const bar = document.getElementById('prob-bar-' + idx);
-            const val = document.getElementById('prob-val-' + idx);
-            const pct = Math.round(p * 100);
-            if (bar) bar.style.width = pct + '%';
-            if (val) val.innerText = pct + '%';
-          }});
-        }}
-
-        // 4. Update Domain Arena State
-        if (data.arena_state) {{
-          renderDomainState(data.arena_state);
-        }}
+        applyArenaPayload(data);
       }}
     }});
+
+    // Auto-start mock animation loop on load for immediate preview
+    startMockAnimationLoop();
   </script>
 </body>
 </html>

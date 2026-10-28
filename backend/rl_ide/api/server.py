@@ -21,6 +21,12 @@ from pydantic import BaseModel, Field
 
 from rl_ide.architect.models import AgentBlueprintSpec, IntakeResponse
 from rl_ide.architect.intake import IntakeArchitectAgent
+from rl_ide.architect.omni_agent import (
+    StudioOmniAgent,
+    StudioActionType,
+    StudioChatRequest,
+    StudioChatResponse,
+)
 from rl_ide.state.conversation_store import (
     ConversationStore,
     get_conversation_store,
@@ -74,6 +80,11 @@ global_store = SessionStateStore()
 global_controller = AutonomousLoopController(global_store)
 global_registry = RunBundleRegistry()
 ingested_datasets_store: dict[str, IngestedDataset] = {}
+global_omni_agent = StudioOmniAgent(
+    conv_store=get_conversation_store(),
+    session_store=global_store,
+    loop_controller=global_controller,
+)
 
 # Initialize LLM state (from persistent storage or environment variables)
 init_llm_state()
@@ -604,6 +615,104 @@ def delete_conversation(conversation_id: str):
         raise HTTPException(status_code=404, detail=f"Conversation '{conversation_id}' not found.")
     conv_store.delete(conversation_id)
     return {"success": True, "conversation_id": conversation_id}
+
+
+class UnifiedConversationChatRequest(BaseModel):
+    user_message: str | None = None
+    message: str | None = None
+    prompt: str | None = None
+    user_prompt: str | None = None
+    selected_options: dict[str, Any] = Field(default_factory=dict)
+    user_answers: dict[str, Any] = Field(default_factory=dict)
+    training_params: dict[str, Any] | None = None
+    force_action: StudioActionType | None = None
+    run_sync: bool = False
+
+    def get_effective_message(self) -> str:
+        return self.user_message or self.message or self.prompt or self.user_prompt or ""
+
+    def get_effective_answers(self) -> dict[str, Any]:
+        return self.selected_options or self.user_answers or {}
+
+
+class ArenaUpdateRequest(BaseModel):
+    user_visual_request: str | None = None
+    visual_prompt: str | None = None
+    theme: str | None = None
+
+
+class ArenaLockRequest(BaseModel):
+    locked: bool = True
+
+
+@app.post("/api/v4/conversations/{conversation_id}/chat", response_model=StudioChatResponse)
+async def conversation_omni_chat(conversation_id: str, req: UnifiedConversationChatRequest):
+    """Unified Codex-style omni-agent chat endpoint for continuous conversation at any stage."""
+    require_verified_llm()
+    msg = req.get_effective_message()
+    if not msg.strip():
+        raise HTTPException(status_code=400, detail="User message cannot be empty.")
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.get_event_loop()
+
+    def sync_broadcast(event_data: dict[str, Any]):
+        asyncio.run_coroutine_threadsafe(manager.broadcast(conversation_id, event_data), loop)
+
+    response = global_omni_agent.process_message(
+        conversation_id=conversation_id,
+        user_message=msg,
+        selected_options=req.get_effective_answers(),
+        training_params=req.training_params,
+        force_action=req.force_action,
+        broadcast_callback=sync_broadcast,
+        run_sync=req.run_sync,
+    )
+    return response
+
+
+@app.post("/api/v4/conversations/{conversation_id}/arena/update")
+async def update_conversation_arena(conversation_id: str, req: ArenaUpdateRequest):
+    """Mid-flight or post-training hot-reloading of visual arena HTML."""
+    require_verified_llm()
+    req_text = req.user_visual_request or req.visual_prompt or req.theme or "Update visual styling"
+    conv_store = get_conversation_store()
+    conv = conv_store.get_conversation(conversation_id)
+    if not conv or not conv.get("blueprint_spec"):
+        raise HTTPException(status_code=404, detail=f"Conversation '{conversation_id}' not found or has no blueprint.")
+
+    blueprint = AgentBlueprintSpec.model_validate(conv["blueprint_spec"])
+    current_html = conv.get("arena_html") or ""
+    ws_dir = global_store.base_dir / conversation_id
+
+    arena_builder = JITArenaSynthesizer()
+    new_html = arena_builder.update_arena(
+        blueprint=blueprint,
+        current_arena_html=current_html,
+        user_visual_request=req_text,
+        workspace_dir=ws_dir,
+    )
+
+    conv_store.save_or_update(conversation_id, arena_html=new_html)
+    sess = global_store.get_session(conversation_id)
+    if sess:
+        sess.arena_html = new_html
+
+    await manager.broadcast(conversation_id, {"event": "arena_updated", "arena_html": new_html})
+    return {"conversation_id": conversation_id, "arena_html": new_html, "status": "arena_updated"}
+
+
+@app.post("/api/v4/conversations/{conversation_id}/arena/lock")
+async def lock_conversation_arena(conversation_id: str, req: ArenaLockRequest = ArenaLockRequest()):
+    """Locks or unlocks the Arena visual layout."""
+    conv_store = get_conversation_store()
+    try:
+        updated = conv_store.lock_arena(conversation_id, locked=req.locked)
+        return {"conversation_id": conversation_id, "arena_locked": updated.get("arena_locked", True)}
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Conversation '{conversation_id}' not found.")
 
 
 @app.get("/api/v4/sessions/{session_id}")

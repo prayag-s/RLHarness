@@ -3,10 +3,10 @@ import {
   Tv,
   Gamepad2,
   Code,
-  Layers,
   Sparkles,
-  Maximize2,
-  RefreshCw,
+  Palette,
+  Lock,
+  Unlock,
   Play,
   RotateCcw,
 } from 'lucide-react'
@@ -17,23 +17,38 @@ interface SandboxedArenaIframeProps {
   sessionId?: string
   arenaHtml?: string
   isTraining: boolean
+  isArenaLocked?: boolean
   latestFrame?: Record<string, any>
   episodes: EpisodeLog[]
   onOpenCodeInspector: () => void
+  onLockArena?: () => void
+  onEditArenaLook?: () => void
 }
 
 export const SandboxedArenaIframe: React.FC<SandboxedArenaIframeProps> = ({
   sessionId,
   arenaHtml,
   isTraining,
+  isArenaLocked = true,
   latestFrame,
   episodes,
   onOpenCodeInspector,
+  onLockArena,
+  onEditArenaLook,
 }) => {
   const iframeRef = useRef<HTMLIFrameElement>(null)
-  const [mode, setMode] = useState<'watch' | 'play'>('watch')
+  const [mode, setMode] = useState<'mock' | 'watch' | 'play'>(isArenaLocked ? 'watch' : 'mock')
   const [selectedEpisodeIdx, setSelectedEpisodeIdx] = useState<number | null>(null)
   const [iframeLoaded, setIframeLoaded] = useState(false)
+
+  // Sync mode if arena lock status changes
+  useEffect(() => {
+    if (!isArenaLocked) {
+      setMode('mock')
+    } else if (mode === 'mock') {
+      setMode('watch')
+    }
+  }, [isArenaLocked])
 
   // 1. Send ARENA_UPDATE to iframe contentWindow
   const postArenaUpdate = useCallback((payload: Record<string, any>) => {
@@ -48,14 +63,38 @@ export const SandboxedArenaIframe: React.FC<SandboxedArenaIframeProps> = ({
     )
   }, [])
 
-  // 2. Stream latestFrame into iframe when in 'watch' mode
+  // 2. Dispatch mode to iframe
+  const setArenaMode = useCallback((newMode: 'mock_preview' | 'live' | 'interactive') => {
+    if (!iframeRef.current || !iframeRef.current.contentWindow) return
+    iframeRef.current.contentWindow.postMessage(
+      {
+        type: 'SET_ARENA_MODE',
+        mode: newMode,
+      },
+      '*',
+    )
+  }, [])
+
+  const handleSwitchMode = (newMode: 'mock' | 'watch' | 'play') => {
+    setMode(newMode)
+    setSelectedEpisodeIdx(null)
+    if (newMode === 'mock') {
+      setArenaMode('mock_preview')
+    } else if (newMode === 'watch') {
+      setArenaMode('live')
+    } else {
+      setArenaMode('interactive')
+    }
+  }
+
+  // 3. Stream latestFrame into iframe when in 'watch' mode
   useEffect(() => {
     if (mode === 'watch' && latestFrame && iframeLoaded) {
       postArenaUpdate(latestFrame)
     }
   }, [latestFrame, mode, iframeLoaded, postArenaUpdate])
 
-  // 3. Bi-Directional window.postMessage Bridge for ARENA_INTERACT
+  // 4. Bi-Directional window.postMessage Bridge for ARENA_INTERACT
   useEffect(() => {
     const handleWindowMessage = async (event: MessageEvent) => {
       // Validate that message originates exclusively from our sandboxed iframe
@@ -86,10 +125,11 @@ export const SandboxedArenaIframe: React.FC<SandboxedArenaIframeProps> = ({
     }
   }, [sessionId, postArenaUpdate])
 
-  // 4. Handle Episode Replay Scrubber
+  // 5. Handle Episode Replay Scrubber
   const handleSelectEpisode = (ep: EpisodeLog, idx: number) => {
     setSelectedEpisodeIdx(idx)
     setMode('watch')
+    setArenaMode('live')
     postArenaUpdate({
       total_reward: ep.total_reward,
       reward_breakdown: ep.reward_breakdown || {},
@@ -109,32 +149,43 @@ export const SandboxedArenaIframe: React.FC<SandboxedArenaIframeProps> = ({
         <div className="flex items-center space-x-2">
           <div className="flex items-center bg-gray-950 border border-gray-800 rounded-lg p-0.5 text-xs font-semibold">
             <button
-              onClick={() => {
-                setMode('watch')
-                setSelectedEpisodeIdx(null)
-              }}
-              className={`flex items-center space-x-1.5 px-3 py-1 rounded-md transition ${
+              type="button"
+              onClick={() => handleSwitchMode('mock')}
+              className={`flex items-center space-x-1.5 px-2.5 py-1 rounded-md transition ${
+                mode === 'mock'
+                  ? 'bg-amber-600 text-white shadow-sm'
+                  : 'text-gray-400 hover:text-gray-200'
+              }`}
+              title="Preview with continuous simulated moves before training"
+            >
+              <Sparkles className="h-3.5 w-3.5" />
+              <span>✨ Mock Preview</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => handleSwitchMode('watch')}
+              className={`flex items-center space-x-1.5 px-2.5 py-1 rounded-md transition ${
                 mode === 'watch'
                   ? 'bg-indigo-600 text-white shadow-sm'
                   : 'text-gray-400 hover:text-gray-200'
               }`}
+              title="Stream real training episodes live"
             >
               <Tv className="h-3.5 w-3.5" />
-              <span>📺 Watch Live Training</span>
+              <span>📺 Live Stream</span>
             </button>
             <button
-              onClick={() => {
-                setMode('play')
-                setSelectedEpisodeIdx(null)
-              }}
-              className={`flex items-center space-x-1.5 px-3 py-1 rounded-md transition ${
+              type="button"
+              onClick={() => handleSwitchMode('play')}
+              className={`flex items-center space-x-1.5 px-2.5 py-1 rounded-md transition ${
                 mode === 'play'
                   ? 'bg-emerald-600 text-white shadow-sm'
                   : 'text-gray-400 hover:text-gray-200'
               }`}
+              title="Test agent interactively"
             >
               <Gamepad2 className="h-3.5 w-3.5" />
-              <span>🎮 Interact / Play Live</span>
+              <span>🎮 Play / Interact</span>
             </button>
           </div>
 
@@ -146,18 +197,53 @@ export const SandboxedArenaIframe: React.FC<SandboxedArenaIframeProps> = ({
           )}
         </div>
 
-        {/* Action Buttons: Code Inspector Drawer Toggle */}
+        {/* Action Buttons: Quick Restyle & Code Inspector */}
         <div className="flex items-center space-x-2">
+          {onEditArenaLook && (
+            <button
+              type="button"
+              onClick={onEditArenaLook}
+              className="flex items-center space-x-1.5 text-xs text-amber-300 hover:text-white px-2.5 py-1 rounded-lg bg-amber-950/40 hover:bg-amber-900/60 border border-amber-700/50 transition font-medium"
+              title="Ask in chat to change themes, colors, or components"
+            >
+              <Palette className="h-3.5 w-3.5 text-amber-400" />
+              <span>🎨 Edit Arena Look</span>
+            </button>
+          )}
+
           <button
+            type="button"
             onClick={onOpenCodeInspector}
             className="flex items-center space-x-1.5 text-xs text-gray-300 hover:text-white px-2.5 py-1 rounded-lg bg-gray-800 hover:bg-gray-700 border border-gray-700 transition"
             title="Inspect synthesized Python env_module.py and arena.html"
           >
             <Code className="h-3.5 w-3.5 text-cyan-400" />
-            <span>🔍 Inspect Synthesized Code</span>
+            <span>🔍 Inspect Code</span>
           </button>
         </div>
       </div>
+
+      {/* Prominent Banner when Arena is Not Locked */}
+      {!isArenaLocked && arenaHtml && (
+        <div className="bg-gradient-to-r from-amber-950/90 via-purple-950/90 to-cyan-950/90 border-b border-amber-600/40 px-4 py-2 flex items-center justify-between z-10 text-xs shadow-md">
+          <div className="flex items-center space-x-2 text-amber-200">
+            <Sparkles className="h-4 w-4 text-amber-400 shrink-0 animate-pulse" />
+            <span className="font-medium">
+              Previewing Arena with Mock Data & Animation — Ask in chat to tweak the look, or confirm when ready.
+            </span>
+          </div>
+          {onLockArena && (
+            <button
+              type="button"
+              onClick={onLockArena}
+              className="px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg shadow-md transition flex items-center space-x-1.5 text-xs active:scale-95"
+            >
+              <Lock className="h-3.5 w-3.5" />
+              <span>🔒 Lock Arena & Start Training</span>
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Episode Replay Scrubber Strip (if episodes exist) */}
       {episodes.length > 0 && (
@@ -173,15 +259,16 @@ export const SandboxedArenaIframe: React.FC<SandboxedArenaIframeProps> = ({
               const match = epIdStr.match(/^r(\d+)_(eval|train)_(\d+)$/)
               if (match) {
                 const rNum = match[1]
-                const type = match[2] === 'eval' ? 'Eval' : 'Train'
+                const epType = match[2] === 'eval' ? 'Eval' : 'Train'
                 const epNum = match[3]
-                chipLabel = `R${rNum} • ${type} #${epNum}`
+                chipLabel = `R${rNum} • ${epType} #${epNum}`
               } else if (ep.round) {
                 chipLabel = `R${ep.round} • #${epIdStr}`
               }
 
               return (
                 <button
+                  type="button"
                   key={`${ep.round || 0}_${ep.episode_id}_${idx}`}
                   onClick={() => handleSelectEpisode(ep, idx)}
                   className={`px-2 py-0.5 rounded font-mono text-[10px] whitespace-nowrap transition border ${
@@ -211,7 +298,11 @@ export const SandboxedArenaIframe: React.FC<SandboxedArenaIframeProps> = ({
             srcDoc={arenaHtml}
             onLoad={() => {
               setIframeLoaded(true)
-              if (latestFrame) postArenaUpdate(latestFrame)
+              if (mode === 'mock') {
+                setArenaMode('mock_preview')
+              } else if (latestFrame) {
+                postArenaUpdate(latestFrame)
+              }
             }}
             className="w-full h-full border-none bg-gray-950"
           />
@@ -224,17 +315,16 @@ export const SandboxedArenaIframe: React.FC<SandboxedArenaIframeProps> = ({
             <div>
               <h3 className="text-lg font-bold text-gray-200">Universal Sandboxed Arena</h3>
               <p className="text-xs text-gray-400 mt-1 leading-relaxed">
-                Describe your agent in the Conversational Architect panel or drop a dataset.
-                The IDE will autonomously synthesize an isolated Gymnasium environment (<code className="text-indigo-300">env_module.py</code>)
-                and an interactive HTML5/SVG arena (<code className="text-indigo-300">arena.html</code>) in real time.
+                Describe your agent in the Conversational Studio below. The IDE will instantly generate a live mock-animated
+                Arena UI (<code className="text-indigo-300">arena.html</code>) in the center panel before training begins.
               </p>
             </div>
             <div className="flex items-center justify-center space-x-2 text-[11px] text-gray-500 font-mono">
-              <span className="px-2 py-0.5 rounded bg-gray-900 border border-gray-800">Zero-Adapter JIT</span>
+              <span className="px-2 py-0.5 rounded bg-gray-900 border border-gray-800">Zero-Training Preview</span>
               <span>•</span>
-              <span className="px-2 py-0.5 rounded bg-gray-900 border border-gray-800">Self-Healing Smoke Test</span>
+              <span className="px-2 py-0.5 rounded bg-gray-900 border border-gray-800">Live Mock Engine</span>
               <span>•</span>
-              <span className="px-2 py-0.5 rounded bg-gray-900 border border-gray-800">ONNX Export</span>
+              <span className="px-2 py-0.5 rounded bg-gray-900 border border-gray-800">Continuous Resumability</span>
             </div>
           </div>
         )}
