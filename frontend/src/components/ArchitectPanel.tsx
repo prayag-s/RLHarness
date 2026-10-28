@@ -263,7 +263,11 @@ export const ArchitectPanel: React.FC<ArchitectPanelProps> = ({
       if (onUpdateTrainingParams) {
         onUpdateTrainingParams(explicitParams)
       }
-      const resp = await onChatWithArchitect(userPrompt, selectedAnswers, false, explicitParams)
+      const promptToUse =
+        userPrompt.trim() ||
+        stagedBlueprint?.task_title ||
+        (attachedDataset ? `Train agent on ${attachedDataset.name}` : 'Confirm selections and build agent')
+      const resp = await onChatWithArchitect(promptToUse, selectedAnswers, false, explicitParams)
       if (resp.blueprint) {
         setClarifyingQuestions([])
         setStagedBlueprint(resp.blueprint)

@@ -147,6 +147,8 @@ class JITEnvironmentSynthesizer:
 
         if is_tictactoe_spec(blueprint):
             return self._build_tictactoe_code(blueprint)
+        if any(kw in title_lower or kw in summary_lower for kw in ["solar", "battery", "energy", "tariff"]):
+            return self._build_energy_arbitrage_code(blueprint)
         if any(kw in title_lower or kw in summary_lower for kw in ["rover", "maze", "navigation", "grid", "catcher"]):
             return self._build_general_sim_code(blueprint)
         if any(kw in title_lower or kw in summary_lower for kw in ["cartpole", "pendulum", "pole balance", "pole balancing", "inverted pendulum"]):
@@ -198,7 +200,8 @@ class JITEnvironmentSynthesizer:
         task_title = (blueprint.task_title or "").lower()
         summary = (blueprint.domain_summary or "").lower()
         is_tictactoe = is_tictactoe_spec(blueprint)
-        is_rover = any(kw in task_title or kw in summary for kw in ["rover", "maze", "navigation", "grid", "catcher"])
+        is_rover = any(kw in task_title or kw in summary for kw in ["rover", "maze", "navigation", "grid", "catcher", "robot", "amr", "warehouse"])
+        is_energy = any(kw in task_title or kw in summary for kw in ["solar", "battery arbitrage", "energy arbitrage", "tariff", "power grid", "power-flow"])
         is_cartpole = any(kw in task_title or kw in summary for kw in ["cartpole", "pendulum", "pole balance", "pole balancing", "inverted pendulum"])
         is_dataset = blueprint.data_source_type == "uploaded_dataset" or dataset is not None or "fraud" in task_title or "fraud" in summary
 
@@ -206,6 +209,8 @@ class JITEnvironmentSynthesizer:
             return self._build_tictactoe_code(blueprint)
         elif is_rover:
             return self._build_general_sim_code(blueprint)
+        elif is_energy:
+            return self._build_energy_arbitrage_code(blueprint)
         elif is_cartpole:
             return self._build_cartpole_code(blueprint)
         elif is_dataset:
@@ -1018,12 +1023,23 @@ class SynthesizedGymEnv(gym.Env):
         self.last_action = action
 
         record = self.records[self.current_idx]
-        # Ground truth pseudo-label derived from first numerical column or index
-        first_feat = record.get(self.observation_features[0], 0.0)
-        try:
-            truth = int(float(first_feat)) % self.n_actions
-        except (ValueError, TypeError):
-            truth = self.current_idx % self.n_actions
+        target_keys = ["is_fraud", "churn_risk", "is_policy_violation", "target", "label", "class", "sop_compliance_score"]
+        found_target = None
+        for tk in target_keys:
+            if tk in record:
+                found_target = record[tk]
+                break
+        if found_target is not None:
+            try:
+                truth = int(float(found_target)) % self.n_actions
+            except (ValueError, TypeError):
+                truth = self.current_idx % self.n_actions
+        else:
+            first_feat = record.get(self.observation_features[0], 0.0)
+            try:
+                truth = int(float(first_feat)) % self.n_actions
+            except (ValueError, TypeError):
+                truth = self.current_idx % self.n_actions
 
         self.last_prediction_truth = truth
         is_correct = (action == truth)
@@ -1035,6 +1051,7 @@ class SynthesizedGymEnv(gym.Env):
             "is_success": is_correct,
             "record_index": self.current_idx,
             "truth": truth,
+            **{{k: v for k, v in record.items() if isinstance(v, (int, float, bool))}}
         }}
 
         state_dict = {{"record": record, "action": action}}
@@ -1097,11 +1114,23 @@ class SynthesizedGymEnv(gym.Env):
         for i in range(n):
             rec = self.records[i % len(self.records)]
             obs = self._extract_obs(rec)
-            first_feat = rec.get(self.observation_features[0], 0.0)
-            try:
-                truth = int(float(first_feat)) % self.n_actions
-            except (ValueError, TypeError):
-                truth = i % self.n_actions
+            target_keys = ["is_fraud", "churn_risk", "is_policy_violation", "target", "label", "class", "sop_compliance_score"]
+            found_target = None
+            for tk in target_keys:
+                if tk in rec:
+                    found_target = rec[tk]
+                    break
+            if found_target is not None:
+                try:
+                    truth = int(float(found_target)) % self.n_actions
+                except (ValueError, TypeError):
+                    truth = i % self.n_actions
+            else:
+                first_feat = rec.get(self.observation_features[0], 0.0)
+                try:
+                    truth = int(float(first_feat)) % self.n_actions
+                except (ValueError, TypeError):
+                    truth = i % self.n_actions
 
             X[i] = obs
             y[i] = truth
@@ -1281,6 +1310,221 @@ class SynthesizedGymEnv(gym.Env):
 
             X[i] = obs
             y[i] = act % self.n_actions
+
+        return X, y
+'''
+
+    def _build_energy_arbitrage_code(self, blueprint: AgentBlueprintSpec) -> str:
+        """Generates continuous simulation environment for CleanTech Solar + Battery Tariff Arbitrage."""
+        obs_features = blueprint.observation_features
+        obs_dim = max(4, len(obs_features))
+        action_labels = blueprint.action_labels
+        n_actions = len(action_labels)
+
+        return f'''"""Auto-synthesized Gymnasium environment for Solar + Commercial Battery Tariff Arbitrage."""
+
+from __future__ import annotations
+import math
+import random
+from typing import Any, Callable
+import gymnasium as gym
+from gymnasium import spaces
+import numpy as np
+
+
+class SynthesizedGymEnv(gym.Env):
+    """Auto-synthesized Gymnasium environment for: {blueprint.task_title}"""
+    metadata = {{"render_modes": ["json"]}}
+
+    def __init__(self, dataset_records=None, config=None):
+        super().__init__()
+        self.action_labels = {action_labels}
+        self.observation_features = {obs_features}
+        self.obs_dim = {obs_dim}
+        self.n_actions = {n_actions}
+
+        self.observation_space = spaces.Box(
+            low=0.0, high=200.0, shape=(self.obs_dim,), dtype=np.float32
+        )
+        self.action_space = spaces.Discrete(self.n_actions)
+
+        # Simulation state
+        self.t = 0.0
+        self.battery_soc_pct = 50.0  # 0 to 100%
+        self.solar_kw = 0.0
+        self.building_load_kw = 0.0
+        self.grid_price_kwh = 0.15
+        self.step_count = 0
+        self.optimal_count = 0
+        self.last_action = None
+
+    def _get_obs(self) -> np.ndarray:
+        obs = np.zeros(self.obs_dim, dtype=np.float32)
+        obs[0] = float(self.solar_kw)
+        obs[1] = float(self.building_load_kw)
+        obs[2] = float(self.battery_soc_pct)
+        obs[3] = float(self.grid_price_kwh)
+        return obs
+
+    def reset(self, seed=None, options=None) -> tuple[np.ndarray, dict[str, Any]]:
+        super().reset(seed=seed)
+        self.t = float(random.uniform(0.0, 10.0))
+        self.battery_soc_pct = float(random.uniform(30.0, 70.0))
+        self.solar_kw = float(max(0.0, 15.0 * math.sin(self.t) + random.uniform(-1.0, 1.0)))
+        self.building_load_kw = float(8.0 + 4.0 * math.cos(self.t * 0.7) + random.uniform(-1.0, 1.0))
+        self.grid_price_kwh = float(0.12 + 0.10 * math.sin(self.t * 0.5) + 0.05)
+        self.step_count = 0
+        self.optimal_count = 0
+        self.last_action = None
+        return self._get_obs(), {{"arena_state": self.render_arena_state()}}
+
+    def compute_reward(self, state: dict, action: int, next_state: dict, info: dict) -> tuple[float, dict[str, float]]:
+        """Modular reward function. Rewritten across rounds by Autonomous Auto-Tuner."""
+        breakdown = {{}}
+        total = 0.0
+
+        is_optimal = info.get("is_optimal", False)
+        if is_optimal:
+            breakdown["arbitrage_savings"] = 1.0
+            breakdown["tariff_efficiency"] = 0.2
+            total += 1.2
+        else:
+            breakdown["suboptimal_dispatch_penalty"] = -0.5
+            total += -0.5
+
+        if self.battery_soc_pct < 15.0 and action == 1:
+            breakdown["deep_discharge_penalty"] = -2.0
+            total += -2.0
+
+        return float(total), breakdown
+
+    def _get_optimal_action(self) -> int:
+        # Heuristic ground-truth arbitrage logic:
+        # 0: Charge, 1: Discharge, 2: Sell to Grid, 3: Idle
+        net_solar = self.solar_kw - self.building_load_kw
+        if self.grid_price_kwh > 0.18 and (self.battery_soc_pct > 30.0 or net_solar > 0):
+            if net_solar > 5.0 and self.battery_soc_pct > 75.0:
+                return 2  # Sell Back to Grid
+            elif self.battery_soc_pct > 25.0:
+                return 1  # Discharge to Building
+            else:
+                return 3  # Idle Hold
+        elif net_solar > 2.0 and self.battery_soc_pct < 95.0:
+            return 0  # Charge Battery
+        elif net_solar < -2.0 and self.battery_soc_pct > 20.0 and self.grid_price_kwh >= 0.14:
+            return 1  # Discharge to Building
+        elif self.grid_price_kwh < 0.10 and self.battery_soc_pct < 90.0:
+            return 0  # Charge Battery with cheap grid
+        else:
+            return 3  # Idle Hold
+
+    def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
+        action = int(action)
+        self.step_count += 1
+        self.last_action = action
+
+        optimal_act = self._get_optimal_action()
+        is_optimal = (action == optimal_act)
+        if is_optimal:
+            self.optimal_count += 1
+
+        # Apply state transitions
+        if action == 0:  # Charge
+            self.battery_soc_pct = min(100.0, self.battery_soc_pct + 8.0)
+        elif action == 1:  # Discharge
+            self.battery_soc_pct = max(0.0, self.battery_soc_pct - 8.0)
+        elif action == 2:  # Sell
+            self.battery_soc_pct = max(0.0, self.battery_soc_pct - 12.0)
+        # action 3: Idle
+
+        # Progress simulation time
+        self.t += 0.25
+        self.solar_kw = float(max(0.0, 15.0 * math.sin(self.t) + random.uniform(-0.5, 0.5)))
+        self.building_load_kw = float(8.0 + 4.0 * math.cos(self.t * 0.7) + random.uniform(-0.5, 0.5))
+        self.grid_price_kwh = float(0.12 + 0.10 * math.sin(self.t * 0.5) + 0.05)
+
+        info: dict[str, Any] = {{
+            "is_optimal": is_optimal,
+            "is_success": is_optimal,
+            "solar_kw": self.solar_kw,
+            "building_load_kw": self.building_load_kw,
+            "battery_soc_pct": self.battery_soc_pct,
+            "grid_price_kwh": self.grid_price_kwh,
+            "step_count": self.step_count,
+        }}
+
+        next_obs = self._get_obs()
+        reward, breakdown = self.compute_reward({{}}, action, {{}}, info)
+        info["reward_breakdown"] = breakdown
+        info["arena_state"] = self.render_arena_state()
+
+        terminated = (self.step_count >= 25)
+        return next_obs, float(reward), terminated, False, info
+
+    def render_arena_state(self) -> dict[str, Any]:
+        """Returns JSON-serializable telemetry dictionary for arena.html."""
+        efficiency = (self.optimal_count / max(1, self.step_count)) * 100.0
+        return {{
+            "solar_kw": round(float(self.solar_kw), 1),
+            "building_load_kw": round(float(self.building_load_kw), 1),
+            "battery_soc_pct": round(float(self.battery_soc_pct), 1),
+            "grid_price_kwh": round(float(self.grid_price_kwh), 3),
+            "efficiency_pct": round(efficiency, 1),
+            "step_count": self.step_count,
+            "last_action_label": self.action_labels[self.last_action] if self.last_action is not None else "Idle Hold",
+            "action_labels": self.action_labels,
+        }}
+
+    def interactive_step(self, payload: dict[str, Any], policy_predict_fn: Callable) -> dict[str, Any]:
+        """Handles human interaction from arena.html."""
+        if "solar_kw" in payload:
+            self.solar_kw = float(payload["solar_kw"])
+        if "building_load_kw" in payload:
+            self.building_load_kw = float(payload["building_load_kw"])
+        if "battery_soc_pct" in payload:
+            self.battery_soc_pct = float(payload["battery_soc_pct"])
+        if "grid_price_kwh" in payload:
+            self.grid_price_kwh = float(payload["grid_price_kwh"])
+
+        obs = self._get_obs()
+        action_idx, probs = policy_predict_fn(obs)
+        action_idx = int(action_idx)
+        label = self.action_labels[action_idx]
+
+        return {{
+            "arena_state": self.render_arena_state(),
+            "agent_action_label": label,
+            "action_probs": [float(p) for p in probs],
+            "status_text": f"Controller dispatched: {{label}} (confidence: {{round(float(probs[action_idx])*100, 1)}}%)",
+        }}
+
+    def get_demonstrations(self, num_samples: int = 200) -> tuple[np.ndarray, np.ndarray]:
+        """Optimal heuristic demonstrations for Warm-Start Behavioral Cloning."""
+        n = num_samples
+        X = np.zeros((n, self.obs_dim), dtype=np.float32)
+        y = np.zeros(n, dtype=np.int64)
+
+        for i in range(n):
+            t = float(i * 0.3)
+            solar = max(0.0, 15.0 * math.sin(t) + random.uniform(-0.5, 0.5))
+            load = 8.0 + 4.0 * math.cos(t * 0.7) + random.uniform(-0.5, 0.5)
+            soc = random.uniform(20.0, 90.0)
+            price = 0.12 + 0.10 * math.sin(t * 0.5) + 0.05
+
+            net = solar - load
+            if price > 0.18 and (soc > 30.0 or net > 0):
+                act = 2 if (net > 5.0 and soc > 75.0) else (1 if soc > 25.0 else 3)
+            elif net > 2.0 and soc < 95.0:
+                act = 0
+            elif net < -2.0 and soc > 20.0 and price >= 0.14:
+                act = 1
+            elif price < 0.10 and soc < 90.0:
+                act = 0
+            else:
+                act = 3
+
+            X[i] = np.array([solar, load, soc, price] + [0.0]*(self.obs_dim - 4), dtype=np.float32)
+            y[i] = act
 
         return X, y
 '''

@@ -49,6 +49,7 @@ class StudioActionType(str, Enum):
 
 class StudioChatRequest(BaseModel):
     user_message: str
+    dataset_id: str | None = None
     selected_options: dict[str, Any] = Field(default_factory=dict)
     training_params: dict[str, Any] | None = None
     force_action: StudioActionType | None = None
@@ -136,8 +137,10 @@ class StudioOmniAgent:
         # 2. Arena Look / Restyling intent keywords
         arena_kws = [
             "look", "theme", "color", "cell", "cells", "canvas",
-            "scoreboard", "victory badge", "badge", "gold", "arcade", "hud", "radar",
-            "display", "visual", "larger", "restyle", "redesign", "bigger", "retro"
+            "scoreboard", "victory badge", "badge", "badges", "banner", "gold", "arcade", "hud", "radar",
+            "display", "visual", "larger", "restyle", "redesign", "bigger", "retro",
+            "meter", "arrow", "arrows", "highlight", "highlights", "hipaa", "power-flow", "flow",
+            "ui", "chart", "gauge", "burn-rate"
         ]
         has_arena_intent = any(kw in text for kw in arena_kws) and not any(
             kw in text for kw in ["lock arena", "lock & start", "lock and start", "confirm and start", "start training"]
@@ -158,7 +161,9 @@ class StudioOmniAgent:
         agent_kws = [
             "passive", "aggressive", "behavior", "personality", "stalling", "strategy",
             "prioritize", "attack", "bonus", "penalize", "reward", "mistakes", "defense",
-            "heuristic", "bonus for winning"
+            "heuristic", "bonus for winning", "never", "always", "route", "forbid", "disallow",
+            "reduce", "false positive", "false positives", "prevent", "avoid", "strictly",
+            "prefer", "require", "cardiac", "payroll", "clearance"
         ]
         has_agent_intent = any(kw in text for kw in agent_kws)
 
@@ -204,6 +209,8 @@ class StudioOmniAgent:
         self,
         conversation_id: str,
         user_message: str,
+        dataset: Any | None = None,
+        dataset_id: str | None = None,
         selected_options: dict[str, Any] | None = None,
         training_params: dict[str, Any] | None = None,
         force_action: StudioActionType | None = None,
@@ -217,10 +224,20 @@ class StudioOmniAgent:
                 conversation_id=conversation_id,
                 title=generate_title_from_prompt(user_message),
                 training_params=training_params,
+                dataset_id=dataset_id,
             )
 
         ws_dir = self.conv_store.workspaces_dir / conversation_id
         ws_dir.mkdir(parents=True, exist_ok=True)
+
+        effective_dataset_id = dataset_id or conv.get("dataset_id")
+        active_dataset = dataset
+        if active_dataset is None and effective_dataset_id:
+            try:
+                from rl_ide.api.server import ingested_datasets_store
+                active_dataset = ingested_datasets_store.get(effective_dataset_id)
+            except Exception:
+                pass
 
         selected_opts = selected_options or {}
         t_params = dict(conv.get("training_params", {}) or {})
@@ -276,11 +293,10 @@ class StudioOmniAgent:
         # ---------------------------------------------------------------------
         if not current_arena_html or not blueprint:
             intake_agent = IntakeArchitectAgent(self._llm_client)
-            dataset = None
 
             intake_resp = intake_agent.interview(
                 user_prompt=user_message,
-                dataset=dataset,
+                dataset=active_dataset,
                 user_answers=selected_opts,
                 force_smart_defaults=False,
                 training_params=t_params,
@@ -293,7 +309,7 @@ class StudioOmniAgent:
                 # Fast deterministic blueprint so arena preview can generate instantly without duplicate LLM latency!
                 fallback_resp = intake_agent._deterministic_intake(
                     prompt=user_message,
-                    dataset=dataset,
+                    dataset=active_dataset,
                     answers=selected_opts,
                     wants_defaults=True,
                     training_params=t_params,
@@ -315,6 +331,16 @@ class StudioOmniAgent:
 
             # Generate initial Mock-Animated arena.html
             dummy_sample_state = {"board": [0] * 9, "game_status": "Mock Arena Preview"}
+            if active_dataset is not None:
+                rec_preview = {}
+                if hasattr(active_dataset, "df") and active_dataset.df is not None and len(active_dataset.df) > 0:
+                    rec_preview = {k: str(v) for k, v in active_dataset.df.iloc[0].to_dict().items()}
+                dummy_sample_state = {
+                    "record_index": 0,
+                    "total_records": len(active_dataset.df) if hasattr(active_dataset, "df") and active_dataset.df is not None else 100,
+                    "accuracy_pct": 100.0,
+                    "current_record_preview": rec_preview,
+                }
             arena_html_str, _ = self.arena_synthesizer.synthesize(
                 blueprint=blueprint,
                 sample_arena_state=dummy_sample_state,
@@ -356,6 +382,7 @@ class StudioOmniAgent:
                 arena_html=current_arena_html,
                 arena_locked=False,
                 training_params=t_params,
+                dataset_id=effective_dataset_id,
             )
 
             if broadcast_callback:
@@ -480,10 +507,11 @@ class StudioOmniAgent:
             # Ensure environment module exists
             env_file = ws_dir / "env_module.py"
             if not env_file.exists() or not current_env_code:
-                code_str, _, _ = self.env_synthesizer.synthesize(blueprint=blueprint, workspace_dir=ws_dir)
+                code_str, _, _ = self.env_synthesizer.synthesize(blueprint=blueprint, dataset=active_dataset, workspace_dir=ws_dir)
                 verified, healed_code, _ = self.smoke_tester.verify_and_heal(
                     code_str=code_str,
                     blueprint=blueprint,
+                    dataset=active_dataset,
                     workspace_dir=ws_dir,
                 )
                 current_env_code = healed_code
@@ -498,6 +526,7 @@ class StudioOmniAgent:
                     session_id=conversation_id,
                     blueprint=blueprint,
                     env_cls=env_cls,
+                    dataset=active_dataset,
                     on_event_callback=broadcast_callback,
                     max_rounds=add_rounds,
                     episodes_per_burst=eps_per_burst,
@@ -556,6 +585,7 @@ class StudioOmniAgent:
             chat_history=history,
             blueprint_spec=blueprint.model_dump() if blueprint else None,
             training_params=t_params,
+            dataset_id=effective_dataset_id,
             arena_html=current_arena_html,
             env_code=current_env_code,
             arena_locked=arena_locked,
@@ -620,6 +650,18 @@ class StudioOmniAgent:
             additions.append('        # Center control priority\n        reward_breakdown["center_control"] = 2.0\n')
         if "mistake" in fb or "penalize" in fb:
             additions.append('        # Mistake avoidance penalty\n        reward_breakdown["mistake_penalty"] = -2.5\n')
+        if "cardiac" in fb:
+            additions.append('        # Cardiac symptom safety: never deny cardiac cases, route to urgent review\n        if info.get("has_cardiac_symptoms", 0) and action == 3:\n            reward_breakdown["cardiac_denial_penalty"] = -10.0\n        elif info.get("has_cardiac_symptoms", 0) and action == 2:\n            reward_breakdown["cardiac_urgent_route_bonus"] = 5.0\n')
+        if "verified" in fb or "payroll" in fb or "false positive" in fb:
+            additions.append('        # Reduce false positives on verified corporate payroll accounts\n        if info.get("is_verified_corporate", 0) and action != 0:\n            reward_breakdown["false_freeze_penalty"] = -5.0\n')
+        if "clearance" in fb or "7 days" in fb or "forbid" in fb:
+            additions.append('        # Forbid clearance when > 7 days remaining\n        if info.get("day_of_sale", 0) <= 7 and action == 3:\n            reward_breakdown["premature_clearance_penalty"] = -8.0\n')
+        if "liability" in fb or "100,000" in fb or "100000" in fb:
+            additions.append('        # Strict liability cap verification over $100,000\n        if info.get("max_dollar_value", 0) >= 100000 and action != 1:\n            reward_breakdown["unlimited_liability_penalty"] = -6.0\n')
+        if "obstacle" in fb or "safety" in fb:
+            additions.append('        # Increased obstacle safety clearance reward\n        reward_breakdown["obstacle_safety_clearance"] = 2.0\n')
+        if "login_drop" in fb or "discount" in fb or "vip" in fb:
+            additions.append('        # Penalize offering discount when login_drop_pct < 20%\n        if info.get("login_drop_pct", 0) < 20.0 and action == 2:\n            reward_breakdown["premature_discount_penalty"] = -5.0\n')
 
         if additions and "def compute_reward" in code:
             injection = "".join(additions)

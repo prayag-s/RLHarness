@@ -299,6 +299,7 @@ export const App: React.FC = () => {
   const handleNewAgent = () => {
     setActiveSession(null)
     setActiveConversationId(undefined)
+    setAttachedDataset(null)
     setArenaHtml('')
     setArenaLocked(false)
     setEnvModuleCode('')
@@ -463,6 +464,7 @@ export const App: React.FC = () => {
       const resp = await chatWithStudioOmni({
         conversation_id: cid,
         user_message: message,
+        dataset_id: attachedDataset?.dataset_id,
         training_params: explicitParams || trainingParams,
       })
 

@@ -90,20 +90,20 @@ class BaseLLMClient(ABC):
         return self.config.provider
 
     @abstractmethod
-    def generate(self, prompt: str, system_prompt: str | None = None) -> str:
+    def generate(self, prompt: str, system_prompt: str | None = None, timeout: float | None = None) -> str:
         """Generates raw text completion."""
         ...
 
-    def generate_json(self, prompt: str, system_prompt: str | None = None) -> dict[str, Any]:
+    def generate_json(self, prompt: str, system_prompt: str | None = None, timeout: float | None = None) -> dict[str, Any]:
         """Generates completion and parses as JSON."""
-        raw = self.generate(prompt, system_prompt)
+        raw = self.generate(prompt, system_prompt, timeout=timeout)
         return extract_json_from_text(raw)
 
 
 class DeepSeekLLMClient(BaseLLMClient):
     """First-class DeepSeek LLM Client (deepseek-chat / deepseek-reasoner)."""
 
-    def generate(self, prompt: str, system_prompt: str | None = None) -> str:
+    def generate(self, prompt: str, system_prompt: str | None = None, timeout: float | None = None) -> str:
         api_key = self.config.api_key or os.environ.get("DEEPSEEK_API_KEY", "")
         if not api_key:
             raise ValueError("DEEPSEEK_API_KEY is not set or provided in LLMConfig.")
@@ -139,7 +139,8 @@ class DeepSeekLLMClient(BaseLLMClient):
             "max_tokens": max_tokens,
         }
 
-        with httpx.Client(timeout=self.config.timeout) as client:
+        req_timeout = timeout if timeout is not None else self.config.timeout
+        with httpx.Client(timeout=req_timeout) as client:
             resp = client.post(endpoint, headers=headers, json=payload)
             resp.raise_for_status()
             data = resp.json()
@@ -159,7 +160,7 @@ class DeepSeekLLMClient(BaseLLMClient):
 class OpenAILLMClient(BaseLLMClient):
     """OpenAI API Client (GPT-4o, o3-mini, etc.)."""
 
-    def generate(self, prompt: str, system_prompt: str | None = None) -> str:
+    def generate(self, prompt: str, system_prompt: str | None = None, timeout: float | None = None) -> str:
         api_key = self.config.api_key or os.environ.get("OPENAI_API_KEY", "")
         if not api_key:
             raise ValueError("OPENAI_API_KEY is not set or provided in LLMConfig.")
@@ -183,7 +184,8 @@ class OpenAILLMClient(BaseLLMClient):
             "max_tokens": self.config.max_tokens,
         }
 
-        with httpx.Client(timeout=self.config.timeout) as client:
+        req_timeout = timeout if timeout is not None else self.config.timeout
+        with httpx.Client(timeout=req_timeout) as client:
             resp = client.post(endpoint, headers=headers, json=payload)
             resp.raise_for_status()
             data = resp.json()
@@ -193,7 +195,7 @@ class OpenAILLMClient(BaseLLMClient):
 class AnthropicLLMClient(BaseLLMClient):
     """Anthropic Messages API Client (Claude 3.5 Sonnet, Claude 3.7 Sonnet)."""
 
-    def generate(self, prompt: str, system_prompt: str | None = None) -> str:
+    def generate(self, prompt: str, system_prompt: str | None = None, timeout: float | None = None) -> str:
         api_key = self.config.api_key or os.environ.get("ANTHROPIC_API_KEY", "")
         if not api_key:
             raise ValueError("ANTHROPIC_API_KEY is not set or provided in LLMConfig.")
@@ -215,7 +217,8 @@ class AnthropicLLMClient(BaseLLMClient):
         if system_prompt:
             payload["system"] = system_prompt
 
-        with httpx.Client(timeout=self.config.timeout) as client:
+        req_timeout = timeout if timeout is not None else self.config.timeout
+        with httpx.Client(timeout=req_timeout) as client:
             resp = client.post(endpoint, headers=headers, json=payload)
             resp.raise_for_status()
             data = resp.json()
@@ -225,7 +228,7 @@ class AnthropicLLMClient(BaseLLMClient):
 class OllamaLLMClient(BaseLLMClient):
     """Ollama and vLLM local OpenAI-compatible endpoint."""
 
-    def generate(self, prompt: str, system_prompt: str | None = None) -> str:
+    def generate(self, prompt: str, system_prompt: str | None = None, timeout: float | None = None) -> str:
         base_url = (self.config.base_url or "http://localhost:11434/v1").rstrip("/")
         endpoint = f"{base_url}/chat/completions"
 
@@ -244,7 +247,8 @@ class OllamaLLMClient(BaseLLMClient):
             "temperature": self.config.temperature,
         }
 
-        with httpx.Client(timeout=self.config.timeout) as client:
+        req_timeout = timeout if timeout is not None else self.config.timeout
+        with httpx.Client(timeout=req_timeout) as client:
             resp = client.post(endpoint, headers=headers, json=payload)
             resp.raise_for_status()
             data = resp.json()
@@ -258,7 +262,7 @@ class FallbackCodeSynthesizer(BaseLLMClient):
     and arena.html responses dynamically based on user prompts and schemas.
     """
 
-    def generate(self, prompt: str, system_prompt: str | None = None) -> str:
+    def generate(self, prompt: str, system_prompt: str | None = None, timeout: float | None = None) -> str:
         prompt_lower = prompt.lower()
         sys_lower = (system_prompt or "").lower()
 
@@ -484,7 +488,7 @@ class UnconfiguredLLMClient(BaseLLMClient):
     def __init__(self, config: LLMConfig | None = None):
         super().__init__(config or LLMConfig(provider="unconfigured", model_name="none"))
 
-    def generate(self, prompt: str, system_prompt: str | None = None) -> str:
+    def generate(self, prompt: str, system_prompt: str | None = None, timeout: float | None = None) -> str:
         raise RuntimeError(
             "A verified LLM API key is mandatory before executing studio tasks. "
             "Please configure and verify your LLM settings."

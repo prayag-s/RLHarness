@@ -538,7 +538,7 @@ def get_conversation(conversation_id: str):
                     global_store.set_model(conversation_id, loaded_model)
                 except Exception as m_err:
                     print(f"Warning: Failed to load PPO model from {model_zip}: {m_err}")
-            elif conv.get("rounds_history"):
+            if global_store.get_model(conversation_id) is None and conv.get("rounds_history"):
                 latest_round = conv["rounds_history"][-1]
                 weights_path = Path(latest_round.get("weights_path", ""))
                 if weights_path.exists():
@@ -623,6 +623,7 @@ class UnifiedConversationChatRequest(BaseModel):
     message: str | None = None
     prompt: str | None = None
     user_prompt: str | None = None
+    dataset_id: str | None = None
     selected_options: dict[str, Any] = Field(default_factory=dict)
     user_answers: dict[str, Any] = Field(default_factory=dict)
     training_params: dict[str, Any] | None = None
@@ -662,10 +663,17 @@ async def conversation_omni_chat(conversation_id: str, req: UnifiedConversationC
     def sync_broadcast(event_data: dict[str, Any]):
         asyncio.run_coroutine_threadsafe(manager.broadcast(conversation_id, event_data), loop)
 
+    conv_store = get_conversation_store()
+    existing_conv = conv_store.get_conversation(conversation_id)
+    effective_ds_id = req.dataset_id or (existing_conv.get("dataset_id") if existing_conv else None)
+    active_dataset = ingested_datasets_store.get(effective_ds_id) if effective_ds_id else None
+
     response = await asyncio.to_thread(
         global_omni_agent.process_message,
         conversation_id=conversation_id,
         user_message=msg,
+        dataset=active_dataset,
+        dataset_id=effective_ds_id,
         selected_options=req.get_effective_answers(),
         training_params=req.training_params,
         force_action=req.force_action,
@@ -675,7 +683,6 @@ async def conversation_omni_chat(conversation_id: str, req: UnifiedConversationC
 
     # Launch asynchronous background training if training action was triggered
     if StudioActionType.RUN_OR_CONTINUE_TRAINING in response.action_types and not req.run_sync:
-        conv_store = get_conversation_store()
         conv = conv_store.get_conversation(conversation_id)
         if conv and conv.get("blueprint_spec"):
             bp = AgentBlueprintSpec.model_validate(conv["blueprint_spec"])
@@ -685,6 +692,7 @@ async def conversation_omni_chat(conversation_id: str, req: UnifiedConversationC
                 env_cls = load_synthesized_env_class(env_file)
                 eps_per_burst = int(response.training_params.get("episodes_per_round") or bp.episodes_per_round or 200)
                 add_rounds = int(response.training_params.get("max_auto_tune_rounds") or bp.max_auto_tune_rounds or 5)
+                training_dataset = active_dataset or (ingested_datasets_store.get(bp.dataset_id) if bp.dataset_id else None)
 
                 async def _run_training_background():
                     try:
@@ -693,6 +701,7 @@ async def conversation_omni_chat(conversation_id: str, req: UnifiedConversationC
                             session_id=conversation_id,
                             blueprint=bp,
                             env_cls=env_cls,
+                            dataset=training_dataset,
                             on_event_callback=sync_broadcast,
                             max_rounds=add_rounds,
                             episodes_per_burst=eps_per_burst,
@@ -781,7 +790,16 @@ def get_session_arena(session_id: str):
 
 
 class InteractRequest(BaseModel):
-    payload: dict[str, Any]
+    model_config = {"extra": "allow"}
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+    def get_effective_payload(self) -> dict[str, Any]:
+        if self.payload and len(self.payload) > 0:
+            return self.payload
+        extra = getattr(self, "__pydantic_extra__", None) or {}
+        base = {k: v for k, v in self.__dict__.items() if k != "payload" and not k.startswith("_")}
+        base.update(extra)
+        return base or self.payload
 
 
 @app.post("/api/v4/sessions/{session_id}/interact")
@@ -818,6 +836,20 @@ def session_interact(session_id: str, req: InteractRequest):
                 except Exception as e:
                     print(f"Warning: could not load model from {mc}: {e}")
 
+        if not model and conv and conv.get("rounds_history"):
+            latest_round = conv["rounds_history"][-1]
+            weights_path = Path(latest_round.get("weights_path", ""))
+            if weights_path.exists():
+                try:
+                    from stable_baselines3 import PPO
+                    temp_model = PPO("MlpPolicy", env, device="cpu", verbose=0)
+                    state_dict = torch.load(str(weights_path), map_location="cpu", weights_only=True)
+                    temp_model.policy.load_state_dict(state_dict)
+                    model = temp_model
+                    global_store.set_model(session_id, model)
+                except Exception as w_err:
+                    print(f"Warning: could not load weights from {weights_path}: {w_err}")
+
     def policy_predict(obs):
         if model:
             obs_t = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
@@ -832,7 +864,7 @@ def session_interact(session_id: str, req: InteractRequest):
             n_acts = env.action_space.n
             return 0, [1.0 / n_acts] * n_acts
 
-    res = env.interactive_step(req.payload, policy_predict)
+    res = env.interactive_step(req.get_effective_payload(), policy_predict)
     return res
 
 
@@ -936,6 +968,7 @@ def session_export(session_id: str):
     return {
         "session_id": session_id,
         "bundle_dir": str(bundle_dir),
+        "bundle_path": str(bundle_dir),
         "zip_path": str(zip_path),
         "onnx_parity_diff": max_diff,
         "download_url": f"/api/v4/sessions/{session_id}/download",

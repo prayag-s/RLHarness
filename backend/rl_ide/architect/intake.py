@@ -52,6 +52,31 @@ def is_tictactoe_intent(text: str) -> bool:
     return False
 
 
+def extract_action_labels_from_prompt(text: str) -> list[str] | None:
+    """Extracts explicit quoted action labels from user prompt."""
+    if not text:
+        return None
+    m = re.search(r"(?:actions|classify into|into)\s*:?\s*([\'\"][^\.\n]+)", text, re.IGNORECASE)
+    if m:
+        acts = re.findall(r"[\'\"]([^\'\"]+)[\'\"]", m.group(1))
+        if len(acts) >= 2:
+            return [a.strip() for a in acts if a.strip()]
+    return None
+
+
+def extract_observation_features_from_prompt(text: str) -> list[str] | None:
+    """Extracts explicit observation features from phrases like 'observing a, b, c. Actions'."""
+    if not text:
+        return None
+    m = re.search(r"observing\s+([^.]+?)\.\s*Actions", text, re.IGNORECASE)
+    if m:
+        parts = re.split(r",\s*|\s+and\s+", m.group(1).strip())
+        feats = [p.strip() for p in parts if p.strip()]
+        if len(feats) >= 2:
+            return feats
+    return None
+
+
 def is_tictactoe_spec(blueprint: AgentBlueprintSpec) -> bool:
     """Checks if an AgentBlueprintSpec represents a Tic-Tac-Toe domain."""
     if not blueprint:
@@ -474,6 +499,11 @@ class IntakeArchitectAgent:
         objective_choice = answers.get("q_objective") or answers.get("objective") or answers.get(PILLAR_OBJECTIVE)
 
         # Build domain-specific blueprint
+        prompt_actions = extract_action_labels_from_prompt(prompt)
+        prompt_obs = extract_observation_features_from_prompt(prompt)
+        is_robotics_kw = any(kw in prompt_lower for kw in ["rover", "robot", "amr", "warehouse", "obstacle", "dock", "turn", "cartpole", "pendulum"])
+        is_energy = ("solar" in prompt_lower or "grid_price" in prompt_lower or "tariff" in prompt_lower or ("battery" in prompt_lower and not is_robotics_kw))
+
         if is_tictactoe:
             task_title = "Tic-Tac-Toe Master Agent"
             domain_summary = (
@@ -502,6 +532,24 @@ class IntakeArchitectAgent:
                 {"name": "loss_penalty", "weight": -10.0, "description": "Penalty for losing the game"},
                 {"name": "illegal_move_penalty", "weight": -5.0, "description": "Penalty for selecting an occupied cell"},
             ]
+        elif is_energy:
+            task_title = "Solar & Commercial Battery Arbitrage Controller"
+            domain_summary = (
+                f"Smart edge controller observing solar generation, building load, battery SOC, and dynamic grid prices. Strategy: {objective_choice}"
+                if objective_choice
+                else "Smart edge controller optimizing solar and commercial battery charge/discharge and grid arbitrage."
+            )
+            data_source_type = "pure_simulation"
+            dataset_id = None
+            observation_features = prompt_obs or ["solar_kw", "building_load_kw", "battery_soc_pct", "grid_price_kwh"]
+            action_labels = prompt_actions or ["Charge Battery", "Discharge to Building", "Sell Back to Grid", "Idle Hold"]
+            interactive_mode = interactive_choice or "Interactive energy flow simulator with animated power arrows and live battery SOC inspection."
+            success_metric = "Tariff Arbitrage Efficiency (%)"
+            reward_components = [
+                {"name": "arbitrage_savings", "weight": 1.0, "description": "Net dollar savings on building energy bill"},
+                {"name": "peak_discharge_bonus", "weight": 0.5, "description": "Reward for discharging during high tariff hours"},
+                {"name": "deep_discharge_penalty", "weight": -5.0, "description": "Penalty for dropping battery SOC below 15%"},
+            ]
         elif is_data:
             if dataset is not None:
                 raw_cols = list(dataset.df.columns) if hasattr(dataset, "df") and dataset.df is not None else []
@@ -509,7 +557,31 @@ class IntakeArchitectAgent:
                 if not observation_features:
                     observation_features = ["feature_0", "feature_1", "feature_2", "feature_3"]
 
-                task_title = f"{dataset.name} Decision Agent"
+                if any(kw in prompt_lower for kw in ["prior-auth", "clinical", "hipaa", "triage"]):
+                    task_title = "Prior-Authorization Clinical Triage Agent"
+                    success_metric = "Clinical Triage Accuracy (%)"
+                elif any(kw in prompt_lower for kw in ["wire", "ach", "fraud interceptor"]):
+                    task_title = "Real-Time Wire & ACH Fraud Interceptor"
+                    success_metric = "Fraud Interception Accuracy (%)"
+                elif any(kw in prompt_lower for kw in ["k8s", "kubernetes", "auto-scaler"]):
+                    task_title = "Kubernetes Cluster Auto-Scaler & SLA Protector"
+                    success_metric = "SLA Compliance Rate (%)"
+                elif any(kw in prompt_lower for kw in ["flash-sale", "flash sale", "dynamic pricing"]):
+                    task_title = "Flash-Sale Dynamic Pricing Agent"
+                    success_metric = "Revenue Optimization Rate (%)"
+                elif any(kw in prompt_lower for kw in ["nda", "contract", "clause risk"]):
+                    task_title = "Contract Clause Risk Auditor"
+                    success_metric = "Clause Classification Accuracy (%)"
+                elif any(kw in prompt_lower for kw in ["travel", "expense", "t&e", "receipt"]):
+                    task_title = "Travel & Expense (T&E) Policy Auditor"
+                    success_metric = "Audit Compliance Rate (%)"
+                elif any(kw in prompt_lower for kw in ["retention", "churn", "csm", "retained mrr"]):
+                    task_title = "VIP Customer Churn & Retention Optimizer"
+                    success_metric = "Net Retention Rate (%)"
+                else:
+                    task_title = f"{dataset.name} Decision Agent"
+                    success_metric = "Classification Accuracy (%)"
+
                 domain_summary = (
                     f"Autonomous sequential decision and classification agent operating over ingested dataset '{dataset.name}'. Strategy: {objective_choice}"
                     if objective_choice
@@ -518,18 +590,21 @@ class IntakeArchitectAgent:
                 data_source_type = "uploaded_dataset"
                 dataset_id = dataset.dataset_id
             else:
-                observation_features = ["transaction_amount", "user_velocity_score", "country_risk_index", "device_trust_score"]
+                observation_features = prompt_obs or ["transaction_amount", "user_velocity_score", "country_risk_index", "device_trust_score"]
                 task_title = "Fraud & Risk Classification Agent"
                 domain_summary = f"Autonomous tabular decision and fraud risk classification agent. Strategy: {objective_choice or 'High-precision risk flagging'}"
                 data_source_type = "uploaded_dataset"
                 dataset_id = None
+                success_metric = "Classification Accuracy (%)"
 
-            action_labels = ["Approve / Normal", "Flag / High-Risk"]
-            if len(observation_features) > 4:
-                action_labels = ["Accept / Class 0", "Review / Class 1", "Escalate / Class 2"]
+            if prompt_actions:
+                action_labels = prompt_actions
+            else:
+                action_labels = ["Approve / Normal", "Flag / High-Risk"]
+                if len(observation_features) > 4:
+                    action_labels = ["Accept / Class 0", "Review / Class 1", "Escalate / Class 2"]
 
             interactive_mode = interactive_choice or "Inspect any custom row from the dataset or adjust feature sliders to test agent predictions live."
-            success_metric = "Classification Accuracy (%)"
             reward_components = [
                 {"name": "correct_decision", "weight": 1.0, "description": "Reward for correct classification / action"},
                 {"name": "incorrect_decision", "weight": -1.0, "description": "Penalty for false positive or false negative"},
@@ -542,7 +617,7 @@ class IntakeArchitectAgent:
                 data_source_type = "pure_simulation"
                 dataset_id = None
                 observation_features = ["cart_position", "cart_velocity", "pole_angle", "pole_angular_velocity"]
-                action_labels = ["Push Cart Left", "Push Cart Right"]
+                action_labels = prompt_actions or ["Push Cart Left", "Push Cart Right"]
                 interactive_mode = interactive_choice or "Interactive physics simulation: apply directional push disturbances to test recovery."
                 success_metric = "Balance Stability Rate (%)"
                 reward_components = [
@@ -551,12 +626,13 @@ class IntakeArchitectAgent:
                     {"name": "fall_penalty", "weight": -10.0, "description": "Penalty for pole falling past failure threshold"},
                 ]
             else:
-                task_title = "2D Maze Navigation Rover Agent" if any(kw in prompt_lower for kw in ["rover", "maze", "navigation"]) else "Autonomous Task Synthesizer"
+                is_warehouse = any(kw in prompt_lower for kw in ["warehouse", "amr", "loading dock"])
+                task_title = "2D AMR Warehouse Navigation Rover" if is_warehouse else ("2D Maze Navigation Rover Agent" if any(kw in prompt_lower for kw in ["rover", "maze", "navigation"]) else "Autonomous Task Synthesizer")
                 domain_summary = f"Custom RL agent synthesized for: {prompt[:60]}. Priority: {objective_choice or 'Balanced efficiency'}"
                 data_source_type = "pure_simulation"
                 dataset_id = None
-                observation_features = ["state_pos_x", "state_pos_y", "velocity_x", "velocity_y", "target_distance"]
-                action_labels = ["Move Left", "Move Right", "Move Up", "Move Down", "Hold Position"]
+                observation_features = prompt_obs or ["state_pos_x", "state_pos_y", "velocity_x", "velocity_y", "target_distance"]
+                action_labels = prompt_actions or ["Move Left", "Move Right", "Move Up", "Move Down", "Hold Position"]
                 interactive_mode = interactive_choice or "Click or drag target points in the arena to interactively guide and test the agent."
                 success_metric = "Target Achievement Rate (%)"
                 reward_components = [

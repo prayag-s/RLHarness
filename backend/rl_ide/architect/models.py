@@ -62,7 +62,7 @@ class AgentBlueprintSpec(BaseModel):
 
 class IntakeResponse(BaseModel):
     """Response returned by the Intake Architect Agent."""
-    status: str                  # "needs_clarification" | "ready_to_build"
+    status: str = "ready_to_build"  # "needs_clarification" | "ready_to_build"
     assistant_message: str = ""
     conversation_id: str | None = None
     questions: list[ClarifyingQuestion] = Field(default_factory=list)
@@ -78,20 +78,26 @@ class IntakeResponse(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def normalize_fields(cls, data: Any) -> Any:
-        if isinstance(data, dict):
-            if "assistant_message" not in data:
-                data["assistant_message"] = (
-                    data.get("message")
-                    or data.get("assistant_response")
-                    or data.get("response")
-                    or data.get("summary")
-                    or ""
-                )
+        if not isinstance(data, dict):
+            data = {"assistant_message": str(data) if data else "", "status": "needs_clarification"}
+        else:
+            data = dict(data)
+            msg = (
+                data.get("assistant_message")
+                or data.get("message")
+                or data.get("assistant_response")
+                or data.get("response")
+                or data.get("summary")
+                or ""
+            )
+            data["assistant_message"] = str(msg) if msg is not None else ""
+            if not data.get("status"):
+                data["status"] = "ready_to_build" if (data.get("blueprint_spec") or data.get("blueprint")) else "needs_clarification"
             if "questions" not in data and "clarifying_questions" in data:
                 data["questions"] = data["clarifying_questions"]
             if "blueprint_spec" not in data and "blueprint" in data:
                 data["blueprint_spec"] = data["blueprint"]
-            if "recommended_training_params" not in data:
+            if "recommended_training_params" not in data or not data["recommended_training_params"]:
                 data["recommended_training_params"] = {
                     "max_auto_tune_rounds": 5,
                     "episodes_per_round": 200,

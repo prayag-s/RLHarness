@@ -130,6 +130,7 @@ export async function chatWithArchitect(
 export interface StudioChatParams {
   conversation_id: string
   user_message: string
+  dataset_id?: string
   selected_options?: Record<string, any>
   training_params?: TrainingParams
   run_sync?: boolean
@@ -143,6 +144,7 @@ export async function chatWithStudioOmni(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       user_message: params.user_message,
+      dataset_id: params.dataset_id,
       selected_options: params.selected_options || {},
       training_params: params.training_params,
       run_sync: params.run_sync ?? false,
