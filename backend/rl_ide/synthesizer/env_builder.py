@@ -8,6 +8,7 @@ from __future__ import annotations
 import ast
 import importlib.util
 import json
+import math
 import os
 import re
 import sys
@@ -15,6 +16,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 import gymnasium as gym
+import numpy as np
 
 from rl_ide.architect.models import AgentBlueprintSpec
 from rl_ide.architect.intake import is_tictactoe_spec
@@ -139,9 +141,20 @@ class JITEnvironmentSynthesizer:
         blueprint: AgentBlueprintSpec,
         dataset: IngestedDataset | None = None,
     ) -> str:
-        """Synthesizes python code via live LLM or deterministic fallback."""
+        """Synthesizes python code via domain templates or live LLM."""
+        title_lower = (blueprint.task_title or "").lower()
+        summary_lower = (blueprint.domain_summary or "").lower()
+
         if is_tictactoe_spec(blueprint):
             return self._build_tictactoe_code(blueprint)
+        if any(kw in title_lower or kw in summary_lower for kw in ["rover", "maze", "navigation", "grid", "catcher"]):
+            return self._build_general_sim_code(blueprint)
+        if any(kw in title_lower or kw in summary_lower for kw in ["cartpole", "pendulum", "pole balance", "pole balancing", "inverted pendulum"]):
+            return self._build_cartpole_code(blueprint)
+        if blueprint.data_source_type == "uploaded_dataset" or dataset is not None or "fraud" in title_lower or "fraud" in summary_lower:
+            return self._build_dataset_code(blueprint, dataset)
+        if any(kw in title_lower or kw in summary_lower for kw in ["sim", "simulation"]):
+            return self._build_general_sim_code(blueprint)
 
         if not isinstance(self.client, FallbackCodeSynthesizer):
             try:
@@ -182,21 +195,180 @@ class JITEnvironmentSynthesizer:
         dataset: IngestedDataset | None,
     ) -> str:
         """Builds a high-performance, robust SynthesizedGymEnv Python module."""
-        task_title = blueprint.task_title
+        task_title = (blueprint.task_title or "").lower()
+        summary = (blueprint.domain_summary or "").lower()
         is_tictactoe = is_tictactoe_spec(blueprint)
-        is_dataset = blueprint.data_source_type == "uploaded_dataset" or dataset is not None
-
-        obs_dim = len(blueprint.observation_features)
-        n_actions = len(blueprint.action_labels)
-        action_labels = blueprint.action_labels
-        obs_features = blueprint.observation_features
+        is_rover = any(kw in task_title or kw in summary for kw in ["rover", "maze", "navigation", "grid", "catcher"])
+        is_cartpole = any(kw in task_title or kw in summary for kw in ["cartpole", "pendulum", "pole balance", "pole balancing", "inverted pendulum"])
+        is_dataset = blueprint.data_source_type == "uploaded_dataset" or dataset is not None or "fraud" in task_title or "fraud" in summary
 
         if is_tictactoe:
             return self._build_tictactoe_code(blueprint)
+        elif is_rover:
+            return self._build_general_sim_code(blueprint)
+        elif is_cartpole:
+            return self._build_cartpole_code(blueprint)
         elif is_dataset:
             return self._build_dataset_code(blueprint, dataset)
         else:
             return self._build_general_sim_code(blueprint)
+
+    def _build_cartpole_code(self, blueprint: AgentBlueprintSpec) -> str:
+        """Generates self-contained CartPole Inverted Pendulum Gym environment."""
+        action_labels = blueprint.action_labels or ["Push Cart Left", "Push Cart Right"]
+        obs_features = blueprint.observation_features or ["cart_position", "cart_velocity", "pole_angle", "pole_angular_velocity"]
+        return f'''"""Auto-synthesized Gymnasium environment for CartPole Physics Balancing."""
+
+from __future__ import annotations
+import math
+import random
+from typing import Any, Callable
+import gymnasium as gym
+from gymnasium import spaces
+import numpy as np
+
+
+class SynthesizedGymEnv(gym.Env):
+    """Auto-synthesized Gymnasium environment for: {blueprint.task_title}"""
+    metadata = {{"render_modes": ["json"]}}
+
+    def __init__(self, dataset_records=None, config=None):
+        super().__init__()
+        self.action_labels = {action_labels}
+        self.observation_features = {obs_features}
+        self.gravity = 9.8
+        self.masscart = 1.0
+        self.masspole = 0.1
+        self.total_mass = self.masspole + self.masscart
+        self.length = 0.5
+        self.polemass_length = self.masspole * self.length
+        self.force_mag = 10.0
+        self.tau = 0.02
+
+        self.theta_threshold_radians = 12 * 2 * math.pi / 360
+        self.x_threshold = 2.4
+
+        high = np.array([
+            self.x_threshold * 2,
+            np.finfo(np.float32).max,
+            self.theta_threshold_radians * 2,
+            np.finfo(np.float32).max,
+        ], dtype=np.float32)
+
+        self.action_space = spaces.Discrete(2)
+        self.observation_space = spaces.Box(-high, high, dtype=np.float32)
+
+        self.state = None
+        self.steps_beyond_terminated = None
+        self.step_count = 0
+
+    def reset(self, seed=None, options=None) -> tuple[np.ndarray, dict[str, Any]]:
+        super().reset(seed=seed)
+        low, high = -0.05, 0.05
+        self.state = np.random.uniform(low=low, high=high, size=(4,)).astype(np.float32)
+        self.steps_beyond_terminated = None
+        self.step_count = 0
+        return np.array(self.state, dtype=np.float32), {{"arena_state": self.render_arena_state()}}
+
+    def compute_reward(self, state: dict, action: int, next_state: dict, info: dict) -> tuple[float, dict[str, float]]:
+        breakdown = {{}}
+        total = 0.0
+        if not info.get("terminated", False):
+            breakdown["upright_bonus"] = 1.0
+            total += 1.0
+        else:
+            breakdown["fall_penalty"] = -10.0
+            total -= 10.0
+        return float(total), breakdown
+
+    def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
+        x, x_dot, theta, theta_dot = self.state
+        force = self.force_mag if action == 1 else -self.force_mag
+        costheta = math.cos(theta)
+        sintheta = math.sin(theta)
+
+        temp = (force + self.polemass_length * theta_dot**2 * sintheta) / self.total_mass
+        thetaacc = (self.gravity * sintheta - costheta * temp) / (
+            self.length * (4.0 / 3.0 - self.masspole * costheta**2 / self.total_mass)
+        )
+        xacc = temp - self.polemass_length * thetaacc * costheta / self.total_mass
+
+        x = x + self.tau * x_dot
+        x_dot = x_dot + self.tau * xacc
+        theta = theta + self.tau * theta_dot
+        theta_dot = theta_dot + self.tau * thetaacc
+
+        self.state = (x, x_dot, theta, theta_dot)
+        self.step_count += 1
+
+        terminated = bool(
+            x < -self.x_threshold
+            or x > self.x_threshold
+            or theta < -self.theta_threshold_radians
+            or theta > self.theta_threshold_radians
+            or self.step_count >= 100
+        )
+
+        info = {{
+            "terminated": terminated,
+            "step_count": self.step_count,
+            "pole_angle_deg": round(float(theta * 180 / math.pi), 2),
+            "cart_position": round(float(x), 2),
+            "is_success": not (x < -self.x_threshold or x > self.x_threshold or theta < -self.theta_threshold_radians or theta > self.theta_threshold_radians)
+        }}
+
+        reward, breakdown = self.compute_reward({{}}, action, {{}}, info)
+        info["reward_breakdown"] = breakdown
+        info["arena_state"] = self.render_arena_state()
+
+        return np.array(self.state, dtype=np.float32), float(reward), terminated, False, info
+
+    def render_arena_state(self) -> dict[str, Any]:
+        if self.state is None:
+            return {{"cart_x": 0.0, "pole_angle": 0.0, "step_count": 0}}
+        x, _, theta, _ = self.state
+        return {{
+            "cart_x": round(float(x), 2),
+            "pole_angle": round(float(theta * 180 / math.pi), 2),
+            "step_count": self.step_count,
+            "action_labels": self.action_labels,
+        }}
+
+    def interactive_step(self, payload: dict[str, Any], policy_predict_fn: Callable) -> dict[str, Any]:
+        if payload.get("reset") or self.state is None:
+            self.reset()
+
+        if "push" in payload or "target_pos" in payload:
+            x, x_dot, theta, theta_dot = self.state
+            self.state = (x, x_dot, theta + 0.05, theta_dot + 0.1)
+
+        obs = np.array(self.state, dtype=np.float32)
+        action_idx, probs = policy_predict_fn(obs)
+        action_idx = int(action_idx)
+        label = self.action_labels[action_idx]
+
+        self.step(action_idx)
+
+        return {{
+            "arena_state": self.render_arena_state(),
+            "agent_action_label": label,
+            "action_probs": [float(p) for p in probs],
+            "status_text": f"Agent applied: {{label}} (pole angle: {{round(float(self.state[2]*180/math.pi), 1)}}°)",
+        }}
+
+    def get_demonstrations(self, num_samples: int = 200) -> tuple[np.ndarray, np.ndarray]:
+        X = np.zeros((num_samples, 4), dtype=np.float32)
+        y = np.zeros(num_samples, dtype=np.int64)
+        for i in range(num_samples):
+            x = np.random.uniform(-1.0, 1.0)
+            x_dot = np.random.uniform(-0.5, 0.5)
+            theta = np.random.uniform(-0.15, 0.15)
+            theta_dot = np.random.uniform(-0.5, 0.5)
+            act = 1 if (theta + 0.1 * theta_dot > 0) else 0
+            X[i] = [x, x_dot, theta, theta_dot]
+            y[i] = act
+        return X, y
+'''
 
     def _build_tictactoe_code(self, blueprint: AgentBlueprintSpec) -> str:
         """Generates complete Tic-Tac-Toe Gym environment with self-play heuristics."""
@@ -759,7 +931,7 @@ class SynthesizedGymEnv(gym.Env):
         if not sample_records:
             # Fallback synthetic records
             for i in range(100):
-                rec = {col: float(np.sin(i * 0.1 + j)) for j, col in enumerate(obs_features)}
+                rec = {col: float(math.sin(i * 0.1 + j)) for j, col in enumerate(obs_features)}
                 sample_records.append(rec)
 
         records_json = json.dumps(sample_records)

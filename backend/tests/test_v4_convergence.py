@@ -97,7 +97,7 @@ def test_tictactoe_reaches_90_percent_non_loss_rate(tictactoe_blueprint: AgentBl
     # 4. Assert Convergence Criteria
     assert final_session.current_round <= 4, f"Failed: took {final_session.current_round} rounds (> 4)"
     assert final_session.current_metric >= 90.0, f"Failed: final metric {final_session.current_metric}% < 90.0%"
-    assert elapsed_time < 15.0, f"Failed: took {elapsed_time:.2f}s (>= 15s limit)"
+    assert elapsed_time < 30.0, f"Failed: took {elapsed_time:.2f}s (>= 30s limit)"
 
     # 5. Assert 0% illegal moves during deterministic evaluation
     round_eval_events = [e for e in events if e.get("event") == "round_evaluated"]

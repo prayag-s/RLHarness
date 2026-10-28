@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 from pathlib import Path
 from typing import Any
 import numpy as np

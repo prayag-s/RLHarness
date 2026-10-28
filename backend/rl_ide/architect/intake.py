@@ -502,24 +502,31 @@ class IntakeArchitectAgent:
                 {"name": "loss_penalty", "weight": -10.0, "description": "Penalty for losing the game"},
                 {"name": "illegal_move_penalty", "weight": -5.0, "description": "Penalty for selecting an occupied cell"},
             ]
-        elif is_data and dataset is not None:
-            raw_cols = list(dataset.df.columns) if hasattr(dataset, "df") and dataset.df is not None else []
-            observation_features = [str(c).strip() for c in raw_cols if str(c).strip()]
-            if not observation_features:
-                observation_features = ["feature_0", "feature_1", "feature_2", "feature_3"]
+        elif is_data:
+            if dataset is not None:
+                raw_cols = list(dataset.df.columns) if hasattr(dataset, "df") and dataset.df is not None else []
+                observation_features = [str(c).strip() for c in raw_cols if str(c).strip()]
+                if not observation_features:
+                    observation_features = ["feature_0", "feature_1", "feature_2", "feature_3"]
 
-            task_title = f"{dataset.name} Decision Agent"
-            domain_summary = (
-                f"Autonomous sequential decision and classification agent operating over ingested dataset '{dataset.name}'. Strategy: {objective_choice}"
-                if objective_choice
-                else f"Autonomous sequential decision and classification agent operating over ingested dataset '{dataset.name}'."
-            )
-            data_source_type = "uploaded_dataset"
-            dataset_id = dataset.dataset_id
+                task_title = f"{dataset.name} Decision Agent"
+                domain_summary = (
+                    f"Autonomous sequential decision and classification agent operating over ingested dataset '{dataset.name}'. Strategy: {objective_choice}"
+                    if objective_choice
+                    else f"Autonomous sequential decision and classification agent operating over ingested dataset '{dataset.name}'."
+                )
+                data_source_type = "uploaded_dataset"
+                dataset_id = dataset.dataset_id
+            else:
+                observation_features = ["transaction_amount", "user_velocity_score", "country_risk_index", "device_trust_score"]
+                task_title = "Fraud & Risk Classification Agent"
+                domain_summary = f"Autonomous tabular decision and fraud risk classification agent. Strategy: {objective_choice or 'High-precision risk flagging'}"
+                data_source_type = "uploaded_dataset"
+                dataset_id = None
 
-            action_labels = ["Accept / Class 0", "Review / Class 1", "Escalate / Class 2"]
-            if len(observation_features) > 2:
-                action_labels = ["Approve / Normal", "Flag / High-Risk"]
+            action_labels = ["Approve / Normal", "Flag / High-Risk"]
+            if len(observation_features) > 4:
+                action_labels = ["Accept / Class 0", "Review / Class 1", "Escalate / Class 2"]
 
             interactive_mode = interactive_choice or "Inspect any custom row from the dataset or adjust feature sliders to test agent predictions live."
             success_metric = "Classification Accuracy (%)"
@@ -529,19 +536,34 @@ class IntakeArchitectAgent:
                 {"name": "high_confidence_bonus", "weight": 0.2, "description": "Bonus for well-calibrated decisions"},
             ]
         else:
-            task_title = "Autonomous Task Synthesizer"
-            domain_summary = f"Custom RL agent synthesized for: {prompt[:60]}. Priority: {objective_choice or 'Balanced efficiency'}"
-            data_source_type = "pure_simulation"
-            dataset_id = None
-            observation_features = ["state_pos_x", "state_pos_y", "velocity_x", "velocity_y", "target_distance"]
-            action_labels = ["Move Left", "Move Right", "Move Up", "Move Down", "Hold Position"]
-            interactive_mode = interactive_choice or "Click or drag target points in the arena to interactively guide and test the agent."
-            success_metric = "Target Achievement Rate (%)"
-            reward_components = [
-                {"name": "goal_bonus", "weight": 10.0, "description": "Reward for reaching target state"},
-                {"name": "distance_delta", "weight": 1.0, "description": "Progress reward for closing distance to target"},
-                {"name": "step_cost", "weight": -0.05, "description": "Small efficiency step penalty"},
-            ]
+            if any(kw in prompt_lower for kw in ["cartpole", "pole", "pendulum", "balance", "inverted pendulum"]):
+                task_title = "CartPole Physics Balancing Agent"
+                domain_summary = f"Continuous control inverted pendulum physics agent learning upright stabilization against gravity. Strategy: {objective_choice or 'Pole balance stabilization'}"
+                data_source_type = "pure_simulation"
+                dataset_id = None
+                observation_features = ["cart_position", "cart_velocity", "pole_angle", "pole_angular_velocity"]
+                action_labels = ["Push Cart Left", "Push Cart Right"]
+                interactive_mode = interactive_choice or "Interactive physics simulation: apply directional push disturbances to test recovery."
+                success_metric = "Balance Stability Rate (%)"
+                reward_components = [
+                    {"name": "upright_bonus", "weight": 1.0, "description": "Reward for maintaining pole angle within threshold"},
+                    {"name": "centering_bonus", "weight": 0.2, "description": "Bonus for keeping cart near track center"},
+                    {"name": "fall_penalty", "weight": -10.0, "description": "Penalty for pole falling past failure threshold"},
+                ]
+            else:
+                task_title = "2D Maze Navigation Rover Agent" if any(kw in prompt_lower for kw in ["rover", "maze", "navigation"]) else "Autonomous Task Synthesizer"
+                domain_summary = f"Custom RL agent synthesized for: {prompt[:60]}. Priority: {objective_choice or 'Balanced efficiency'}"
+                data_source_type = "pure_simulation"
+                dataset_id = None
+                observation_features = ["state_pos_x", "state_pos_y", "velocity_x", "velocity_y", "target_distance"]
+                action_labels = ["Move Left", "Move Right", "Move Up", "Move Down", "Hold Position"]
+                interactive_mode = interactive_choice or "Click or drag target points in the arena to interactively guide and test the agent."
+                success_metric = "Target Achievement Rate (%)"
+                reward_components = [
+                    {"name": "goal_bonus", "weight": 10.0, "description": "Reward for reaching target state"},
+                    {"name": "distance_delta", "weight": 1.0, "description": "Progress reward for closing distance to target"},
+                    {"name": "step_cost", "weight": -0.05, "description": "Small efficiency step penalty"},
+                ]
 
         spec = AgentBlueprintSpec(
             task_title=task_title,

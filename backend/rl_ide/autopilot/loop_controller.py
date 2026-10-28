@@ -9,6 +9,7 @@ import asyncio
 from datetime import datetime, timezone
 import json
 import os
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 from pathlib import Path
 import re
 import shutil
@@ -404,11 +405,9 @@ class AutonomousLoopController:
                 emit({"event": "critic_warmup_started", "round": r, "message": "Calibrating value network on updated reward function..."})
                 self._critic_warmup(model, replay_buffer, gamma=effective_gamma, epochs=15)
                 emit({"event": "critic_warmup_completed", "round": r, "message": "Value network calibrated."})
-                self._critic_warmup(model, replay_buffer, gamma=effective_gamma, epochs=15)
-                emit({"event": "critic_warmup_completed", "round": r, "message": "Value network calibrated."})
 
-            # Stage 3.3: PPO Training Burst (4096 timesteps per round, or 512 for fast bursts)
-            train_timesteps = 512 if episodes_per_burst <= 25 else min(4096, episodes_per_burst * 100)
+            # Stage 3.3: PPO Training Burst (512 timesteps for fast burst, up to 2048)
+            train_timesteps = 512 if episodes_per_burst <= 50 else min(2048, episodes_per_burst * 40)
             try:
                 model.learn(total_timesteps=train_timesteps, reset_num_timesteps=False)
             except Exception:
