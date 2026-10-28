@@ -162,16 +162,26 @@ class StudioOmniAgent:
 
         # 5. Environment mechanics / rules keywords
         env_kws = [
-            "4x4", "board to", "grid size", "add action", "hold action",
-            "lives", "rules of the game", "action space", "observation space"
+            "mechanic", "mechanics", "rules", "rule", "4x4", "5x5", "board to", "grid size", "board size",
+            "add action", "hold action", "remove action", "lives", "rules of the game",
+            "action space", "observation space", "turbulence", "wind", "friction", "gravity",
+            "obstacle", "obstacles", "physics", "disturbance", "environment rules"
         ]
         has_env_intent = any(kw in text for kw in env_kws)
 
         # 6. Diagnostic questions
-        diag_kws = ["why", "how", "what", "explain", "diagnose", "tell me", "loss in round"]
+        diag_kws = ["why", "how", "what", "explain", "diagnose", "tell me", "loss in round", "suboptimal", "reason"]
         has_diag_intent = any(kw in text for kw in diag_kws) or ("?" in text and not has_train_intent)
+        is_pure_question = has_diag_intent and (
+            text.startswith(("why", "what", "how", "explain", "tell me", "can you", "is there", "why did"))
+            or ("?" in text and not any(text.startswith(cmd) for cmd in ["change", "make", "update", "set", "train", "add", "penalize", "prioritize"]))
+        )
 
         # Assemble composable actions
+        if is_pure_question and not has_train_intent:
+            actions.append(StudioActionType.CLARIFY_OR_DISCUSS)
+            return actions
+
         if has_agent_intent:
             actions.append(StudioActionType.UPDATE_AGENT_CHARACTERISTICS)
         if has_env_intent:
@@ -391,6 +401,8 @@ class StudioOmniAgent:
         # Intent B: UPDATE_ENV_MECHANICS
         if StudioActionType.UPDATE_ENV_MECHANICS in intents:
             env_file = ws_dir / "env_module.py"
+            if blueprint:
+                blueprint.domain_summary = f"{blueprint.domain_summary}. Rules: {user_message}"
             code_str, _, env_cls = self.env_synthesizer.synthesize(
                 blueprint=blueprint,
                 workspace_dir=ws_dir,
