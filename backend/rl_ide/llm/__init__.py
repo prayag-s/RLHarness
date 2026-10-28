@@ -12,6 +12,13 @@ from rl_ide.llm.client import (
     create_llm_client,
     validate_llm_connection,
     extract_json_from_text,
+    get_active_llm_client,
+    verify_and_set_llm_config,
+    get_llm_status,
+    is_llm_ready,
+    is_llm_verified,
+    init_llm_state,
+    is_test_mode,
 )
 
 __all__ = [
@@ -26,4 +33,11 @@ __all__ = [
     "create_llm_client",
     "validate_llm_connection",
     "extract_json_from_text",
+    "get_active_llm_client",
+    "verify_and_set_llm_config",
+    "get_llm_status",
+    "is_llm_ready",
+    "is_llm_verified",
+    "init_llm_state",
+    "is_test_mode",
 ]

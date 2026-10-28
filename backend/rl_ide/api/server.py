@@ -31,7 +31,15 @@ from rl_ide.export.exporter import PolicyExporter
 from rl_ide.export.registry import RunBundleRegistry, BundleMetadata, BundleDetails
 from rl_ide.ingest.loader import IngestedDataset, load_bytes
 from rl_ide.ingest.sql_connector import test_sql_connection, load_sql_dataset
-from rl_ide.llm.client import LLMConfig, validate_llm_connection, create_llm_client
+from rl_ide.llm.client import (
+    LLMConfig,
+    validate_llm_connection,
+    create_llm_client,
+    get_llm_status,
+    verify_and_set_llm_config,
+    is_llm_ready,
+    init_llm_state,
+)
 from rl_ide.synthesizer.env_builder import JITEnvironmentSynthesizer, load_synthesized_env_class
 from rl_ide.synthesizer.verifier import SandboxSmokeTester
 from rl_ide.synthesizer.arena_builder import JITArenaSynthesizer
@@ -59,6 +67,21 @@ global_store = SessionStateStore()
 global_controller = AutonomousLoopController(global_store)
 global_registry = RunBundleRegistry()
 ingested_datasets_store: dict[str, IngestedDataset] = {}
+
+# Initialize LLM state (from persistent storage or environment variables)
+init_llm_state()
+
+
+def require_verified_llm() -> None:
+    """Enforces that a working, verified LLM key is active before allowing task execution."""
+    if not is_llm_ready():
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "A verified LLM API key is mandatory before using the studio. "
+                "Please configure and test your LLM API credentials in Settings."
+            ),
+        )
 
 
 # WebSocket Connection Manager
@@ -168,6 +191,7 @@ class ArchitectChatRequest(BaseModel):
 @app.post("/api/v4/architect/chat", response_model=IntakeResponse)
 def architect_chat(req: ArchitectChatRequest):
     """Conversational Intake interview evaluating user intent across the 5 Pillars."""
+    require_verified_llm()
     dataset = ingested_datasets_store.get(req.dataset_id) if req.dataset_id else None
     architect = IntakeArchitectAgent()
     resp = architect.interview(
@@ -194,6 +218,7 @@ class SessionStartRequest(BaseModel):
 @app.post("/api/v4/sessions/start")
 async def start_session(req: SessionStartRequest):
     """Synthesizes env_module.py + arena.html, verifies via smoke tester, and runs autonomous loop."""
+    require_verified_llm()
     import uuid
     sid = req.session_id or f"sess_{uuid.uuid4().hex[:8]}"
     ws_dir = global_store.base_dir / sid
@@ -344,6 +369,7 @@ class NudgeRequest(BaseModel):
 @app.post("/api/v4/sessions/{session_id}/nudge")
 def session_nudge(session_id: str, req: NudgeRequest):
     """Applies human feedback prose and runs an extra targeted tuning round."""
+    require_verified_llm()
     try:
         tuning_res = global_controller.nudge_session(session_id, req.feedback)
         return tuning_res
@@ -427,13 +453,28 @@ def list_bundles():
 
 
 # -----------------------------------------------------------------------------
-# 5. Settings Validation & WebSocket Telemetry
+# 5. Settings Validation, LLM Activation & WebSocket Telemetry
 # -----------------------------------------------------------------------------
+
+@app.get("/api/v4/settings/llm")
+def get_llm_settings_endpoint():
+    """Returns current active LLM provider, verification state, and connectivity metrics."""
+    return get_llm_status()
+
+
+@app.post("/api/v4/settings/llm")
+def configure_llm_settings(config: LLMConfig):
+    """Tests and activates BYOK LLM credentials globally across all agents and synthesizers."""
+    success, msg, result = verify_and_set_llm_config(config, save_to_disk=True)
+    return result
+
 
 @app.post("/api/v4/settings/validate")
 def validate_settings(config: LLMConfig):
-    """Tests connectivity to DeepSeek, OpenAI, Anthropic, Ollama, or Fallback."""
-    return validate_llm_connection(config)
+    """Tests candidate credentials connectivity without altering global active client."""
+    res = validate_llm_connection(config)
+    res["valid"] = res.get("success", False)
+    return res
 
 
 @app.websocket("/ws/v4/{session_id}")

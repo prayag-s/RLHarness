@@ -175,6 +175,18 @@ export interface LLMSettings {
   modelName?: string
 }
 
+export interface LLMStatusResponse {
+  is_verified: boolean
+  provider: string
+  model_name: string
+  base_url?: string
+  has_api_key: boolean
+  masked_key?: string
+  error?: string | null
+  latency_ms?: number
+  last_verified_at?: number | null
+}
+
 export interface ActivityTimelineItem {
   id: string
   type: 'synthesis' | 'smoke_test' | 'arena' | 'round' | 'auto_tune' | 'mastery' | 'nudge' | 'error' | 'info'

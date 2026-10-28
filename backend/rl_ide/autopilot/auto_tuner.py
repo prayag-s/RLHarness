@@ -204,10 +204,10 @@ class AutoTunerAgent:
                 match = re.search(r"```(?:python)?\s*([\s\S]*?)\s*```", raw)
                 if match:
                     return match.group(1).strip()
-            except Exception:
-                pass
+            except Exception as exc:
+                raise RuntimeError(f"LLM auto-tuning reward rewrite failed: {exc}")
 
-        # Deterministic Rewrite
+        # Deterministic Rewrite (used for offline Fallback in test mode)
         code = current_code
 
         # Evolve reward weights in code

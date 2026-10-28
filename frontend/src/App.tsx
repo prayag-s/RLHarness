@@ -4,6 +4,7 @@ import { ArchitectPanel } from './components/ArchitectPanel'
 import { SandboxedArenaIframe } from './components/SandboxedArenaIframe'
 import { TelemetryPanel } from './components/TelemetryPanel'
 import { SettingsModal } from './components/SettingsModal'
+import { LLMVerificationGateModal } from './components/LLMVerificationGateModal'
 import { RegistryModal } from './components/RegistryModal'
 import { CodeInspectorModal } from './components/CodeInspectorModal'
 import { SQLIngestModal } from './components/SQLIngestModal'
@@ -30,6 +31,8 @@ import {
   fetchBundles,
   uploadDatasetFile,
   connectTelemetryWebSocket,
+  getLLMStatus,
+  saveAndVerifyLLMSettings,
 } from './services/api'
 
 export const App: React.FC = () => {
@@ -59,12 +62,17 @@ export const App: React.FC = () => {
   const [attachedDataset, setAttachedDataset] = useState<IngestedDatasetSummary | null>(null)
   const [timeline, setTimeline] = useState<ActivityTimelineItem[]>([])
 
-  // Modals
+  // Modals & Mandatory LLM Gate
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const [isRegistryOpen, setIsRegistryOpen] = useState(false)
   const [isCodeInspectorOpen, setIsCodeInspectorOpen] = useState(false)
   const [isSQLModalOpen, setIsSQLModalOpen] = useState(false)
   const [registryCount, setRegistryCount] = useState(0)
+
+  // Mandatory LLM Verification State
+  const [isLLMVerified, setIsLLMVerified] = useState<boolean>(false)
+  const [isCheckingLLM, setIsCheckingLLM] = useState<boolean>(true)
+  const [isGateModalOpen, setIsGateModalOpen] = useState<boolean>(false)
 
   // LLM Settings
   const [llmSettings, setLlmSettings] = useState<LLMSettings>(() => {
@@ -83,6 +91,76 @@ export const App: React.FC = () => {
       apiKey: '',
     }
   })
+
+  // Mandatory LLM Key Verification on Startup
+  useEffect(() => {
+    let isMounted = true
+    async function verifyStartupCredentials() {
+      setIsCheckingLLM(true)
+      try {
+        // 1. Check if backend already has an active verified LLM
+        const status = await getLLMStatus()
+        if (status.is_verified) {
+          if (isMounted) {
+            setIsLLMVerified(true)
+            setIsGateModalOpen(false)
+            setLlmSettings((prev) => ({
+              ...prev,
+              provider: (status.provider as any) || prev.provider,
+              modelName: status.model_name || prev.modelName,
+              baseUrl: status.base_url || prev.baseUrl,
+            }))
+          }
+          return
+        }
+
+        // 2. If backend is not verified, check if localStorage has saved credentials to test
+        const saved = localStorage.getItem('rl_ide_v4_llm_settings')
+        if (saved) {
+          try {
+            const parsed: LLMSettings = JSON.parse(saved)
+            if (parsed.apiKey && parsed.provider !== 'fallback') {
+              const verifyRes = await saveAndVerifyLLMSettings(parsed)
+              if (verifyRes.is_verified || verifyRes.success) {
+                if (isMounted) {
+                  setIsLLMVerified(true)
+                  setIsGateModalOpen(false)
+                  setLlmSettings(parsed)
+                  addTimelineItem(
+                    'LLM Connection Verified ⚡',
+                    `Active engine: ${parsed.provider.toUpperCase()} (${parsed.modelName || 'default'})`,
+                    'info',
+                    'success',
+                  )
+                }
+                return
+              }
+            }
+          } catch {
+            // Credentials failed verification
+          }
+        }
+
+        // 3. Not verified: Lock studio and trigger mandatory setup gate
+        if (isMounted) {
+          setIsLLMVerified(false)
+          setIsGateModalOpen(true)
+        }
+      } catch (err) {
+        if (isMounted) {
+          setIsLLMVerified(false)
+          setIsGateModalOpen(true)
+        }
+      } finally {
+        if (isMounted) setIsCheckingLLM(false)
+      }
+    }
+
+    verifyStartupCredentials()
+    return () => {
+      isMounted = false
+    }
+  }, [])
 
   const wsRef = useRef<WebSocket | null>(null)
 
@@ -158,6 +236,11 @@ export const App: React.FC = () => {
     answers: Record<string, string> = {},
     forceSmartDefaults: boolean = false,
   ): Promise<IntakeResponse> => {
+    if (!isLLMVerified) {
+      setIsGateModalOpen(true)
+      throw new Error('A verified LLM API key is mandatory before using the studio.')
+    }
+
     addTimelineItem(
       'Conversational Intake Consulted',
       `Evaluating requirements across 5 Pillars for: "${prompt.slice(0, 60)}..."`,
@@ -165,27 +248,40 @@ export const App: React.FC = () => {
       'info',
     )
 
-    const resp = await chatWithArchitect({
-      user_prompt: prompt,
-      dataset_id: attachedDataset?.dataset_id,
-      user_answers: answers,
-      force_smart_defaults: forceSmartDefaults,
-    })
+    try {
+      const resp = await chatWithArchitect({
+        user_prompt: prompt,
+        dataset_id: attachedDataset?.dataset_id,
+        user_answers: answers,
+        force_smart_defaults: forceSmartDefaults,
+      })
 
-    if (resp.status === 'ready_to_build') {
-      addTimelineItem(
-        'Agent Blueprint Locked',
-        `Objective: ${resp.blueprint?.objective || 'Agent specification complete'}`,
-        'synthesis',
-        'success',
-      )
+      if (resp.status === 'ready_to_build') {
+        addTimelineItem(
+          'Agent Blueprint Locked',
+          `Objective: ${resp.blueprint?.objective || 'Agent specification complete'}`,
+          'synthesis',
+          'success',
+        )
+      }
+
+      return resp
+    } catch (err: any) {
+      if (err.message && (err.message.includes('verified') || err.message.includes('mandatory') || err.message.includes('403'))) {
+        setIsLLMVerified(false)
+        setIsGateModalOpen(true)
+      }
+      throw err
     }
-
-    return resp
   }
 
   // 2. Start JIT Autonomous Session
   const handleStartSession = async (blueprint: AgentBlueprintSpec, datasetId?: string) => {
+    if (!isLLMVerified) {
+      setIsGateModalOpen(true)
+      throw new Error('A verified LLM API key is mandatory before synthesizing environments.')
+    }
+
     setIsSynthesizing(true)
     setIsTraining(true)
     setEpisodes([])
@@ -466,24 +562,38 @@ export const App: React.FC = () => {
     }
   }
 
-  // 8. Save LLM Settings
+  // 8. Save LLM Settings & Gate Unlock
   const handleSaveLLMSettings = (settings: LLMSettings) => {
     setLlmSettings(settings)
+    setIsLLMVerified(true)
     localStorage.setItem('rl_ide_v4_llm_settings', JSON.stringify(settings))
     addTimelineItem(
       'LLM Provider Updated',
-      `Switched engine to ${settings.provider.toUpperCase()} (${settings.modelName || 'default'})`,
+      `Active engine set to ${settings.provider.toUpperCase()} (${settings.modelName || 'default'})`,
       'info',
       'info',
     )
   }
 
+  const handleGateVerified = (settings: LLMSettings) => {
+    setLlmSettings(settings)
+    setIsLLMVerified(true)
+    setIsGateModalOpen(false)
+    addTimelineItem(
+      'LLM Connection Verified ⚡',
+      `Credentials verified with live probe: ${settings.provider.toUpperCase()} (${settings.modelName || 'default'}). Studio unlocked!`,
+      'info',
+      'success',
+    )
+  }
+
   return (
-    <div className="flex flex-col h-screen w-screen overflow-hidden bg-gray-950 text-gray-100 font-sans">
+    <div className="flex flex-col h-screen w-screen overflow-hidden bg-gray-950 text-gray-100 font-sans relative">
       {/* Top Header */}
       <Header
         llmSettings={llmSettings}
-        onOpenSettings={() => setIsSettingsOpen(true)}
+        isLLMVerified={isLLMVerified}
+        onOpenSettings={() => (isLLMVerified ? setIsSettingsOpen(true) : setIsGateModalOpen(true))}
         onOpenRegistry={() => setIsRegistryOpen(true)}
         registryCount={registryCount}
         onExport={handleExportPolicy}
@@ -493,7 +603,7 @@ export const App: React.FC = () => {
       />
 
       {/* Main Studio 3-Panel Workspace */}
-      <div className="flex-1 flex overflow-hidden">
+      <div className={`flex-1 flex overflow-hidden transition-all duration-300 ${!isLLMVerified ? 'filter blur-[1px] select-none' : ''}`}>
         {/* Left Panel: Conversational Intake Architect & Autonomous Stream */}
         <ArchitectPanel
           onStartSession={handleStartSession}
@@ -507,6 +617,8 @@ export const App: React.FC = () => {
           isTraining={isTraining}
           isSynthesizing={isSynthesizing}
           activeSessionId={activeSession?.session_id}
+          isLLMVerified={isLLMVerified}
+          onOpenSettings={() => setIsGateModalOpen(true)}
         />
 
         {/* Center Panel: Universal Sandboxed Arena Iframe */}
@@ -532,6 +644,13 @@ export const App: React.FC = () => {
           isRollingBack={isRollingBack}
         />
       </div>
+
+      {/* Mandatory LLM Verification Gate Modal (Unclosable until verified) */}
+      <LLMVerificationGateModal
+        isOpen={!isCheckingLLM && (!isLLMVerified || isGateModalOpen)}
+        currentSettings={llmSettings}
+        onVerified={handleGateVerified}
+      />
 
       {/* Modals */}
       <SettingsModal

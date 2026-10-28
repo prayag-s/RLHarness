@@ -41,6 +41,8 @@ interface ArchitectPanelProps {
   isTraining: boolean
   isSynthesizing: boolean
   activeSessionId?: string
+  isLLMVerified?: boolean
+  onOpenSettings?: () => void
 }
 
 export const ArchitectPanel: React.FC<ArchitectPanelProps> = ({
@@ -55,6 +57,8 @@ export const ArchitectPanel: React.FC<ArchitectPanelProps> = ({
   isTraining,
   isSynthesizing,
   activeSessionId,
+  isLLMVerified = false,
+  onOpenSettings,
 }) => {
   // Intake Chat State
   const [userPrompt, setUserPrompt] = useState('')
@@ -82,6 +86,10 @@ export const ArchitectPanel: React.FC<ArchitectPanelProps> = ({
 
   const handleSendPrompt = async (e?: React.FormEvent) => {
     if (e) e.preventDefault()
+    if (!isLLMVerified) {
+      if (onOpenSettings) onOpenSettings()
+      return
+    }
     if (!userPrompt.trim() || isAskingArchitect) return
 
     setIsAskingArchitect(true)
@@ -118,6 +126,10 @@ export const ArchitectPanel: React.FC<ArchitectPanelProps> = ({
   }
 
   const handleUseSmartDefaults = async () => {
+    if (!isLLMVerified) {
+      if (onOpenSettings) onOpenSettings()
+      return
+    }
     setIsAskingArchitect(true)
     try {
       const promptToUse = userPrompt.trim() || (attachedDataset ? `Train agent on ${attachedDataset.name}` : 'Train an unbeatable Tic-Tac-Toe agent')
@@ -136,6 +148,10 @@ export const ArchitectPanel: React.FC<ArchitectPanelProps> = ({
   }
 
   const handleConfirmAndBuild = async () => {
+    if (!isLLMVerified) {
+      if (onOpenSettings) onOpenSettings()
+      return
+    }
     setIsAskingArchitect(true)
     try {
       const resp = await onChatWithArchitect(userPrompt, selectedAnswers, false)
@@ -176,8 +192,25 @@ export const ArchitectPanel: React.FC<ArchitectPanelProps> = ({
 
   return (
     <aside className="w-96 flex flex-col h-full bg-gray-900 border-r border-gray-800 text-gray-200 select-none">
+      {/* Mandatory LLM Lockout Banner if Unverified */}
+      {!isLLMVerified && (
+        <div
+          onClick={onOpenSettings}
+          className="p-3 bg-red-950/90 border-b border-red-700/70 text-red-200 text-xs flex items-center space-x-2.5 cursor-pointer hover:bg-red-900/90 transition shadow-inner"
+          title="Click to configure and verify a working LLM API key"
+        >
+          <AlertCircle className="h-4 w-4 text-red-400 shrink-0 animate-pulse" />
+          <div className="flex-1">
+            <span className="font-bold block text-red-300">LLM Verification Mandatory</span>
+            <span className="text-[10px] text-gray-300">
+              Studio is locked until a working key is verified. Click to configure credentials.
+            </span>
+          </div>
+        </div>
+      )}
+
       {/* 1. Attachment Bar: Files & SQL */}
-      <div className="p-3 border-b border-gray-800 bg-gray-950/70">
+      <div className={`p-3 border-b border-gray-800 bg-gray-950/70 ${!isLLMVerified ? 'opacity-50 pointer-events-none' : ''}`}>
         <div className="flex items-center justify-between mb-2">
           <span className="text-xs font-bold uppercase tracking-wider text-gray-400 flex items-center space-x-1.5">
             <Upload className="h-3.5 w-3.5 text-indigo-400" />
@@ -185,7 +218,8 @@ export const ArchitectPanel: React.FC<ArchitectPanelProps> = ({
           </span>
           <button
             onClick={onOpenSQLModal}
-            className="flex items-center space-x-1 text-[11px] text-cyan-400 hover:text-cyan-300 font-medium px-2 py-0.5 rounded bg-cyan-950/50 border border-cyan-800/40 transition"
+            disabled={!isLLMVerified}
+            className="flex items-center space-x-1 text-[11px] text-cyan-400 hover:text-cyan-300 font-medium px-2 py-0.5 rounded bg-cyan-950/50 border border-cyan-800/40 transition disabled:opacity-50"
             title="Connect SQLite, PostgreSQL, or MySQL"
           >
             <Database className="h-3 w-3" />
@@ -407,15 +441,19 @@ export const ArchitectPanel: React.FC<ArchitectPanelProps> = ({
                 type="text"
                 value={userPrompt}
                 onChange={(e) => setUserPrompt(e.target.value)}
-                placeholder="e.g. 'Train an unbeatable Tic-Tac-Toe agent'..."
-                disabled={isAskingArchitect}
-                className="flex-1 bg-gray-900 border border-gray-700 focus:border-indigo-500 rounded-lg px-2.5 py-1.5 text-xs text-gray-200 focus:outline-none placeholder-gray-500"
+                placeholder={
+                  !isLLMVerified
+                    ? '⚠️ Verify working LLM key above to begin...'
+                    : "e.g. 'Train an unbeatable Tic-Tac-Toe agent'..."
+                }
+                disabled={!isLLMVerified || isAskingArchitect}
+                className="flex-1 bg-gray-900 border border-gray-700 focus:border-indigo-500 rounded-lg px-2.5 py-1.5 text-xs text-gray-200 focus:outline-none placeholder-gray-500 disabled:opacity-40 disabled:cursor-not-allowed"
               />
               <button
                 type="submit"
-                disabled={isAskingArchitect || !userPrompt.trim()}
-                className="p-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition disabled:opacity-50"
-                title="Send prompt to Conversational Architect"
+                disabled={!isLLMVerified || isAskingArchitect || !userPrompt.trim()}
+                className="p-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition disabled:opacity-40 disabled:cursor-not-allowed"
+                title={!isLLMVerified ? 'Verify LLM key first' : 'Send prompt to Conversational Architect'}
               >
                 {isAskingArchitect ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
               </button>

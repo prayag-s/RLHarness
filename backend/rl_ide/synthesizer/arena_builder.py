@@ -64,8 +64,8 @@ class JITArenaSynthesizer:
                 html = self._call_llm_arena_gen(blueprint, sample_arena_state)
                 if html:
                     return html
-            except Exception:
-                pass
+            except Exception as exc:
+                raise RuntimeError(f"LLM Arena HTML synthesis failed: {exc}")
 
         return self._generate_deterministic_arena_html(blueprint, sample_arena_state)
 

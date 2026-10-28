@@ -7,6 +7,7 @@ import {
   BundleMetadata,
   IngestedDatasetSummary,
   LLMSettings,
+  LLMStatusResponse,
 } from '../types'
 
 const API_V4 = '/api/v4'
@@ -241,12 +242,58 @@ export async function fetchBundles(): Promise<BundleMetadata[]> {
 }
 
 // -----------------------------------------------------------------------------
-// 5. Settings Validation
+// 5. Settings, LLM Status & Verification
 // -----------------------------------------------------------------------------
+
+export async function getLLMStatus(): Promise<LLMStatusResponse> {
+  const res = await fetch(`${API_V4}/settings/llm`)
+  if (!res.ok) {
+    throw new Error('Failed to retrieve LLM status')
+  }
+  return res.json()
+}
+
+export async function saveAndVerifyLLMSettings(
+  settings: LLMSettings,
+): Promise<{
+  success: boolean
+  valid: boolean
+  is_verified: boolean
+  provider?: string
+  model_name?: string
+  message?: string
+  error?: string
+  latency_ms?: number
+}> {
+  const res = await fetch(`${API_V4}/settings/llm`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      provider: settings.provider,
+      api_key: settings.apiKey,
+      base_url: settings.baseUrl,
+      model_name: settings.modelName,
+    }),
+  })
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Failed to configure LLM' }))
+    throw new Error(err.detail || 'Failed to configure LLM')
+  }
+
+  const data = await res.json()
+  return {
+    ...data,
+    valid: Boolean(data.valid || data.success),
+    success: Boolean(data.success || data.valid),
+    is_verified: Boolean(data.is_verified),
+    message: data.message || (data.success ? 'LLM connection verified' : data.error),
+  }
+}
 
 export async function validateLLMSettings(
   settings: LLMSettings,
-): Promise<{ valid: boolean; provider: string; message: string }> {
+): Promise<{ valid: boolean; success: boolean; provider: string; message: string; error?: string }> {
   const res = await fetch(`${API_V4}/settings/validate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -262,7 +309,13 @@ export async function validateLLMSettings(
     throw new Error('LLM validation request failed')
   }
 
-  return res.json()
+  const data = await res.json()
+  return {
+    ...data,
+    valid: Boolean(data.valid || data.success),
+    success: Boolean(data.success || data.valid),
+    message: data.message || data.error || (data.success ? 'Connection validated' : 'Validation failed'),
+  }
 }
 
 // -----------------------------------------------------------------------------

@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import { X, Key, Server, Cpu, Check, Save, Sparkles, AlertCircle, RefreshCw } from 'lucide-react'
 import { LLMSettings } from '../types'
-import { validateLLMSettings } from '../services/api'
+import { validateLLMSettings, saveAndVerifyLLMSettings } from '../services/api'
 
 interface SettingsModalProps {
   isOpen: boolean
@@ -33,7 +33,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setValResult(null)
     try {
       const res = await validateLLMSettings(localSettings)
-      setValResult(res)
+      setValResult({
+        valid: res.valid || res.success,
+        message: res.message || (res.success ? 'Connectivity verified!' : 'Connection failed'),
+      })
     } catch (e: any) {
       setValResult({ valid: false, message: e.message || 'Validation request failed' })
     } finally {
@@ -41,13 +44,32 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     }
   }
 
-  const handleSave = () => {
-    onSaveSettings(localSettings)
-    setSaved(true)
-    setTimeout(() => {
-      setSaved(false)
-      onClose()
-    }, 600)
+  const handleSave = async () => {
+    setIsValidating(true)
+    setValResult(null)
+    try {
+      const res = await saveAndVerifyLLMSettings(localSettings)
+      if (res.is_verified || res.success) {
+        onSaveSettings(localSettings)
+        setSaved(true)
+        setTimeout(() => {
+          setSaved(false)
+          onClose()
+        }, 700)
+      } else {
+        setValResult({
+          valid: false,
+          message: res.error || 'LLM connection check failed. Settings not applied.',
+        })
+      }
+    } catch (err: any) {
+      setValResult({
+        valid: false,
+        message: err.message || 'Failed to verify and activate LLM settings.',
+      })
+    } finally {
+      setIsValidating(false)
+    }
   }
 
   const providers = [
@@ -76,15 +98,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       id: 'ollama' as const,
       name: 'Ollama (Local / vLLM)',
       defaultBaseUrl: 'http://localhost:11434/v1',
-      defaultModel: 'llama3',
+      defaultModel: 'llama3.1',
       badge: 'Private',
-    },
-    {
-      id: 'fallback' as const,
-      name: 'Offline Synthesizer',
-      defaultBaseUrl: '',
-      defaultModel: 'fallback-deterministic',
-      badge: 'No API Key',
     },
   ]
 

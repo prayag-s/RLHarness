@@ -103,10 +103,10 @@ class JITEnvironmentSynthesizer:
                 code = self._call_llm_code_gen(blueprint, dataset)
                 if code:
                     return code
-            except Exception:
-                pass
+            except Exception as exc:
+                raise RuntimeError(f"LLM Gymnasium environment synthesis failed: {exc}")
 
-        # Deterministic Code Generation
+        # Deterministic Code Generation (used for offline Fallback in test mode)
         return self._generate_deterministic_env_code(blueprint, dataset)
 
     def _call_llm_code_gen(

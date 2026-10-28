@@ -12,6 +12,7 @@ import { LLMSettings } from '../types'
 
 interface HeaderProps {
   llmSettings: LLMSettings
+  isLLMVerified?: boolean
   onOpenSettings: () => void
   onOpenRegistry: () => void
   registryCount: number
@@ -23,6 +24,7 @@ interface HeaderProps {
 
 export const Header: React.FC<HeaderProps> = ({
   llmSettings,
+  isLLMVerified = false,
   onOpenSettings,
   onOpenRegistry,
   registryCount,
@@ -34,16 +36,16 @@ export const Header: React.FC<HeaderProps> = ({
   const getProviderLabel = () => {
     switch (llmSettings.provider) {
       case 'deepseek':
-        return { name: 'DeepSeek V3 / R1', color: 'bg-blue-950/80 text-blue-400 border-blue-800/60' }
+        return { name: 'DeepSeek V3 / R1', color: 'bg-blue-950/80 text-blue-300 border-blue-700/60' }
       case 'anthropic':
-        return { name: 'Claude 3.7 Sonnet', color: 'bg-amber-950/80 text-amber-400 border-amber-800/60' }
+        return { name: 'Claude 3.7 Sonnet', color: 'bg-amber-950/80 text-amber-300 border-amber-700/60' }
       case 'openai':
-        return { name: 'GPT-4o', color: 'bg-emerald-950/80 text-emerald-400 border-emerald-800/60' }
+        return { name: 'GPT-4o', color: 'bg-emerald-950/80 text-emerald-300 border-emerald-700/60' }
       case 'ollama':
-        return { name: 'Ollama (Local)', color: 'bg-purple-950/80 text-purple-400 border-purple-800/60' }
+        return { name: 'Ollama (Local)', color: 'bg-purple-950/80 text-purple-300 border-purple-700/60' }
       case 'fallback':
       default:
-        return { name: 'Offline Synthesizer', color: 'bg-gray-800 text-gray-300 border-gray-700' }
+        return { name: 'No Key Configured', color: 'bg-red-950/80 text-red-300 border-red-700/60' }
     }
   }
 
@@ -93,11 +95,34 @@ export const Header: React.FC<HeaderProps> = ({
         {/* LLM Engine Badge + Settings Button */}
         <button
           onClick={onOpenSettings}
-          className={`flex items-center space-x-1.5 px-3 py-1 rounded-lg text-xs font-semibold border transition hover:opacity-90 ${provider.color}`}
-          title="Click to configure LLM provider & API keys"
+          className={`flex items-center space-x-1.5 px-3 py-1 rounded-lg text-xs font-semibold border transition hover:opacity-90 ${
+            isLLMVerified
+              ? provider.color
+              : 'bg-red-950/80 border-red-600/70 text-red-300 animate-pulse'
+          }`}
+          title={isLLMVerified ? 'LLM Key Verified & Active. Click to modify.' : 'Mandatory LLM verification required. Click to setup.'}
         >
-          <Sparkles className="h-3.5 w-3.5" />
-          <span>{provider.name}</span>
+          {isLLMVerified ? (
+            <>
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+              </span>
+              <Sparkles className="h-3.5 w-3.5" />
+              <span>{provider.name}</span>
+              <span className="text-[10px] uppercase font-bold px-1.5 py-0.2 rounded bg-emerald-950/80 border border-emerald-500/50 text-emerald-300 ml-1">
+                Verified
+              </span>
+            </>
+          ) : (
+            <>
+              <AlertTriangle className="h-3.5 w-3.5 text-red-400" />
+              <span>LLM Not Verified</span>
+              <span className="text-[10px] uppercase font-bold px-1.5 py-0.2 rounded bg-red-900/80 border border-red-500/50 text-red-200 ml-1">
+                Required
+              </span>
+            </>
+          )}
           <Settings className="h-3.5 w-3.5 ml-1 opacity-70" />
         </button>
 

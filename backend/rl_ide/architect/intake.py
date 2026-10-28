@@ -111,17 +111,22 @@ class IntakeArchitectAgent:
             ])
         )
 
-        # If using live non-fallback LLM, attempt LLM call first
-        if not isinstance(self.client, FallbackCodeSynthesizer) and not wants_defaults:
+        # If using live non-fallback LLM, use live LLM directly
+        if not isinstance(self.client, FallbackCodeSynthesizer):
             try:
-                llm_response = self._call_llm_intake(prompt_clean, dataset, conversation_history, answers)
+                llm_response = self._call_llm_intake(
+                    prompt_clean,
+                    dataset,
+                    conversation_history,
+                    answers,
+                    wants_defaults=wants_defaults,
+                )
                 if llm_response:
                     return llm_response
-            except Exception:
-                # Gracefully fall back to deterministic intake engine
-                pass
+            except Exception as exc:
+                raise RuntimeError(f"LLM Architect Intake failed: {exc}")
 
-        # 2. Deterministic Intake Engine (used for Fallback, offline testing, and smart defaults)
+        # 2. Deterministic Intake Engine (used for offline Fallback in test mode)
         return self._deterministic_intake(
             prompt_clean,
             dataset,
@@ -136,6 +141,7 @@ class IntakeArchitectAgent:
         dataset: IngestedDataset | None,
         conversation_history: list[dict[str, str]] | None,
         answers: dict[str, str],
+        wants_defaults: bool = False,
     ) -> IntakeResponse | None:
         """Queries the configured LLM for intake evaluation."""
         context_parts = [f"User Prompt: {prompt}"]
@@ -148,10 +154,23 @@ class IntakeArchitectAgent:
             history_text = "\n".join(f"{m.get('role', 'user')}: {m.get('content', '')}" for m in conversation_history[-4:])
             context_parts.append(f"Recent Conversation:\n{history_text}")
 
-        instruction = (
-            "Analyze the above against the 5 Pillars. Respond in valid JSON adhering to IntakeResponse schema "
-            "with keys: status, assistant_message, questions, blueprint_spec."
-        )
+        if wants_defaults or answers:
+            instruction = (
+                "The user has either provided clarifying answers or requested smart defaults. "
+                "Synthesize the complete AgentBlueprintSpec tailored directly to this domain and problem. "
+                "Respond in valid JSON adhering to IntakeResponse schema with status: 'ready_to_build', "
+                "assistant_message, questions: [], and blueprint_spec populated with all 5 pillars: "
+                "task_title, domain_summary, data_source_type, observation_features, action_labels, "
+                "arena_visual_description, interactive_mode_description, success_metric_name, "
+                "target_metric_threshold, max_auto_tune_rounds, initial_reward_components."
+            )
+        else:
+            instruction = (
+                "Analyze the user's agent objective against the 5 Pillars (Observation, Action, Reward, "
+                "Arena UI, Expectations). If critical decisions require clarification, return status: "
+                "'needs_clarification' with clarifying questions. If intent is already clear, return "
+                "status: 'ready_to_build' with blueprint_spec."
+            )
         full_query = "\n\n".join(context_parts) + "\n\n" + instruction
 
         raw_json = self.client.generate_json(full_query, system_prompt=ARCHITECT_SYSTEM_PROMPT)

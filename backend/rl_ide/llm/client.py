@@ -3,7 +3,9 @@
 from __future__ import annotations
 import json
 import os
+from pathlib import Path
 import re
+import sys
 import time
 from abc import ABC, abstractmethod
 from typing import Any
@@ -383,18 +385,203 @@ class FallbackCodeSynthesizer(BaseLLMClient):
 FallbackLLMClient = FallbackCodeSynthesizer
 
 
+# -----------------------------------------------------------------------------
+# Global LLM State Management & Active Client Session
+# -----------------------------------------------------------------------------
+
+_llm_state: dict[str, Any] = {
+    "config": None,
+    "client": None,
+    "is_verified": False,
+    "last_error": None,
+    "latency_ms": None,
+    "last_verified_at": None,
+}
+
+
+def is_test_mode() -> bool:
+    """Detects whether running within pytest or automated test environment."""
+    return bool(
+        "pytest" in sys.modules
+        or os.environ.get("PYTEST_CURRENT_TEST")
+        or os.environ.get("RL_IDE_TEST_MODE") == "1"
+    )
+
+
+def get_config_persistence_path() -> Path:
+    """Returns local path where verified LLM config is persisted across restarts."""
+    base_dir = Path(os.environ.get("RL_IDE_WORKSPACE_DIR", "workspaces"))
+    base_dir.mkdir(parents=True, exist_ok=True)
+    return base_dir / ".llm_config.json"
+
+
+def get_llm_status() -> dict[str, Any]:
+    """Retrieves current LLM verification status and metadata."""
+    cfg: LLMConfig | None = _llm_state.get("config")
+    verified = bool(_llm_state.get("is_verified", False))
+    provider = cfg.provider if cfg else "none"
+    model = (cfg.model_name or "") if cfg else ""
+    base_url = (cfg.base_url or "") if cfg else ""
+    has_key = bool(cfg and cfg.api_key)
+    masked_key = ""
+    if cfg and cfg.api_key:
+        k = cfg.api_key
+        masked_key = f"{k[:4]}***{k[-4:]}" if len(k) > 8 else "***"
+
+    return {
+        "is_verified": verified,
+        "provider": provider,
+        "model_name": model,
+        "base_url": base_url,
+        "has_api_key": has_key,
+        "masked_key": masked_key,
+        "error": _llm_state.get("last_error"),
+        "latency_ms": _llm_state.get("latency_ms"),
+        "last_verified_at": _llm_state.get("last_verified_at"),
+    }
+
+
+def is_llm_ready() -> bool:
+    """Checks whether LLM is active and verified for studio tasks."""
+    if is_test_mode():
+        return True
+    return bool(_llm_state.get("is_verified") and _llm_state.get("client"))
+
+
+def is_llm_verified() -> bool:
+    """Returns whether active LLM has successfully passed live connectivity probe."""
+    return bool(_llm_state.get("is_verified", False))
+
+
+class UnconfiguredLLMClient(BaseLLMClient):
+    """Placeholder client instantiated when no LLM key has been verified yet."""
+
+    def __init__(self, config: LLMConfig | None = None):
+        super().__init__(config or LLMConfig(provider="unconfigured", model_name="none"))
+
+    def generate(self, prompt: str, system_prompt: str | None = None) -> str:
+        raise RuntimeError(
+            "A verified LLM API key is mandatory before executing studio tasks. "
+            "Please configure and verify your LLM settings."
+        )
+
+
+def get_active_llm_client() -> BaseLLMClient:
+    """Returns the globally active verified LLM client.
+    
+    Returns UnconfiguredLLMClient if LLM has not been verified yet (or fallback in test mode).
+    """
+    if _llm_state.get("is_verified") and _llm_state.get("client"):
+        return _llm_state["client"]
+
+    if is_test_mode():
+        cfg = _llm_state.get("config") or LLMConfig(provider="fallback")
+        return create_llm_client(cfg)
+
+    return UnconfiguredLLMClient()
+
+
+def verify_and_set_llm_config(
+    config: LLMConfig, save_to_disk: bool = True
+) -> tuple[bool, str, dict[str, Any]]:
+    """Validates connectivity to provider and activates it globally if successful."""
+    p = config.provider.lower()
+
+    # Block fallback from being set as verified active provider in non-test mode
+    if p in ("fallback", "mock") and not is_test_mode():
+        err = "Offline Fallback cannot be used as a verified LLM. A valid API key for DeepSeek, OpenAI, Anthropic, or Ollama is mandatory."
+        _llm_state["is_verified"] = False
+        _llm_state["last_error"] = err
+        return False, err, {
+            "success": False,
+            "valid": False,
+            "is_verified": False,
+            "error": err,
+        }
+
+    val_res = validate_llm_connection(config)
+    if not val_res.get("success"):
+        err = val_res.get("error", "LLM validation check failed.")
+        _llm_state["is_verified"] = False
+        _llm_state["last_error"] = err
+        _llm_state["latency_ms"] = val_res.get("latency_ms")
+        return False, err, {
+            "success": False,
+            "valid": False,
+            "is_verified": False,
+            "error": err,
+            "latency_ms": val_res.get("latency_ms"),
+        }
+
+    # Connectivity probe succeeded! Activate
+    client = create_llm_client(config)
+    _llm_state["config"] = config
+    _llm_state["client"] = client
+    _llm_state["is_verified"] = True
+    _llm_state["last_error"] = None
+    _llm_state["latency_ms"] = val_res.get("latency_ms")
+    _llm_state["last_verified_at"] = time.time()
+
+    if save_to_disk and p not in ("fallback", "mock"):
+        try:
+            p_file = get_config_persistence_path()
+            p_file.write_text(config.model_dump_json(indent=2), encoding="utf-8")
+            os.chmod(p_file, 0o600)
+        except Exception:
+            pass
+
+    msg = val_res.get("message", f"Successfully activated {config.provider} ({client.model})")
+    return True, msg, {
+        "success": True,
+        "valid": True,
+        "is_verified": True,
+        "provider": config.provider,
+        "model_name": client.model,
+        "message": msg,
+        "latency_ms": val_res.get("latency_ms"),
+    }
+
+
+def init_llm_state() -> None:
+    """Attempts to auto-load saved config or env variables on startup."""
+    # 1. Try saved config from disk
+    try:
+        p_file = get_config_persistence_path()
+        if p_file.exists():
+            data = json.loads(p_file.read_text(encoding="utf-8"))
+            config = LLMConfig.model_validate(data)
+            success, _, _ = verify_and_set_llm_config(config, save_to_disk=False)
+            if success:
+                return
+    except Exception:
+        pass
+
+    # 2. Try environment variables
+    for prov, env_key in [
+        ("deepseek", "DEEPSEEK_API_KEY"),
+        ("openai", "OPENAI_API_KEY"),
+        ("anthropic", "ANTHROPIC_API_KEY"),
+    ]:
+        val = os.environ.get(env_key)
+        if val:
+            try:
+                config = LLMConfig(provider=prov, api_key=val)
+                success, _, _ = verify_and_set_llm_config(config, save_to_disk=False)
+                if success:
+                    return
+            except Exception:
+                pass
+
+
 def create_llm_client(config: LLMConfig | None = None) -> BaseLLMClient:
     """Factory to instantiate the appropriate LLM client."""
     if config is None:
-        # Auto-detect from environment or fallback
-        if os.environ.get("DEEPSEEK_API_KEY"):
-            config = LLMConfig(provider="deepseek")
-        elif os.environ.get("OPENAI_API_KEY"):
-            config = LLMConfig(provider="openai")
-        elif os.environ.get("ANTHROPIC_API_KEY"):
-            config = LLMConfig(provider="anthropic")
-        else:
+        if _llm_state.get("is_verified") and _llm_state.get("client"):
+            return _llm_state["client"]
+        if is_test_mode():
             config = LLMConfig(provider="fallback")
+        else:
+            return UnconfiguredLLMClient()
 
     p = config.provider.lower()
     if p == "deepseek":
@@ -416,13 +603,22 @@ def validate_llm_connection(config: LLMConfig) -> dict[str, Any]:
     p = config.provider.lower()
 
     if p in ("fallback", "mock"):
-        return {
-            "success": True,
-            "provider": config.provider,
-            "model": config.model_name or "deterministic-fallback",
-            "latency_ms": 0.5,
-            "message": "Deterministic offline fallback active (100% offline & reproducible)",
-        }
+        if is_test_mode():
+            return {
+                "success": True,
+                "valid": True,
+                "provider": config.provider,
+                "model": config.model_name or "deterministic-fallback",
+                "latency_ms": 0.5,
+                "message": "Deterministic offline fallback active (100% offline & reproducible)",
+            }
+        else:
+            return {
+                "success": False,
+                "valid": False,
+                "provider": config.provider,
+                "error": "Deterministic fallback is not allowed. A verified API key for DeepSeek, OpenAI, Anthropic, or Ollama is mandatory.",
+            }
 
     # Check for missing API key
     if p in ("deepseek", "openai", "anthropic") and not config.api_key:
@@ -430,6 +626,7 @@ def validate_llm_connection(config: LLMConfig) -> dict[str, Any]:
         if not os.environ.get(env_var):
             return {
                 "success": False,
+                "valid": False,
                 "provider": config.provider,
                 "error": f"Missing API key for provider '{config.provider}'. Please set {env_var} or supply in config.",
             }
@@ -442,6 +639,7 @@ def validate_llm_connection(config: LLMConfig) -> dict[str, Any]:
         latency_ms = (time.perf_counter() - start) * 1000.0
         return {
             "success": True,
+            "valid": True,
             "provider": config.provider,
             "model": client.model,
             "latency_ms": round(latency_ms, 2),
@@ -451,6 +649,7 @@ def validate_llm_connection(config: LLMConfig) -> dict[str, Any]:
         latency_ms = (time.perf_counter() - start) * 1000.0
         return {
             "success": False,
+            "valid": False,
             "provider": config.provider,
             "latency_ms": round(latency_ms, 2),
             "error": str(exc),
