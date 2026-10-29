@@ -92,6 +92,44 @@ def is_tictactoe_spec(blueprint: AgentBlueprintSpec) -> bool:
     return False
 
 
+def is_blackjack_intent(text: str) -> bool:
+    """Fuzzy and regex domain intent detector for Blackjack and card game variants."""
+    if not text:
+        return False
+    t = text.lower().strip()
+    direct_kws = [
+        "blackjack", "black-jack", "black jack", "blacjack", "blakjack", "blackjak",
+        "blacckjack", "twenty-one", "twenty one", "21 card", "game of 21", "card game",
+        "casino card", "dealer card", "hit or stand", "hit and stand", "split or double",
+        "double down", "card counting", "card count", "playing cards", "card agent",
+        "blackjack table", "card table", "casino table"
+    ]
+    if any(kw in t for kw in direct_kws):
+        return True
+    if re.search(r"\bblackjack\b", t) or re.search(r"\bblack\s*jack\b", t):
+        return True
+    if re.search(r"\b(card|cards|dealer|shoe|deck|hand)\b", t) and any(w in t for w in ["21", "hit", "stand", "bust", "double", "table"]):
+        return True
+    return False
+
+
+def is_blackjack_spec(blueprint: AgentBlueprintSpec) -> bool:
+    """Checks if an AgentBlueprintSpec represents a Blackjack / card game domain."""
+    if not blueprint:
+        return False
+    if is_blackjack_intent(blueprint.task_title) or is_blackjack_intent(blueprint.domain_summary):
+        return True
+    action_str = " ".join(blueprint.action_labels or []).lower()
+    if "hit" in action_str and "stand" in action_str:
+        return True
+    obs_str = " ".join(blueprint.observation_features or []).lower()
+    if any(w in obs_str for w in ["player_total", "dealer_upcard", "usable_ace", "hand_total"]):
+        return True
+    if "blackjack" in (blueprint.arena_visual_description or "").lower():
+        return True
+    return False
+
+
 class IntakeArchitectAgent:
     """Interviews the user to establish the 5 Pillars and locks the AgentBlueprintSpec."""
 
@@ -215,14 +253,15 @@ class IntakeArchitectAgent:
 
         # Detect domain with fuzzy typo & abbreviation support
         is_tictactoe = is_tictactoe_intent(combined_text)
-        is_grid = any(kw in prompt_lower for kw in ["grid", "maze", "catcher", "navigation"]) and not is_tictactoe
-        is_data = (dataset is not None or any(kw in prompt_lower for kw in ["csv", "dataset", "table", "churn", "fraud", "classify", "predict"])) and not is_tictactoe
+        is_blackjack = is_blackjack_intent(combined_text) and not is_tictactoe
+        is_grid = any(kw in prompt_lower for kw in ["grid", "maze", "catcher", "navigation"]) and not is_tictactoe and not is_blackjack
+        is_data = (dataset is not None or any(kw in prompt_lower for kw in ["csv", "dataset", "table", "churn", "fraud", "classify", "predict"])) and not is_tictactoe and not is_blackjack
 
         # Check pillar coverage
         has_arena_ui = (
             "arena_ui" in answers or "q_arena_ui" in answers
             or (
-                any(kw in prompt_lower for kw in ["visualize", "arena", "dark-mode", "grid", "canvas", "board", "dashboard", "radar", "inspector"])
+                any(kw in prompt_lower for kw in ["visualize", "arena", "dark-mode", "grid", "canvas", "board", "dashboard", "radar", "inspector", "felt", "blackjack table", "card table"])
                 and not is_tictactoe
             )
         )
@@ -258,6 +297,20 @@ class IntakeArchitectAgent:
                         "Balanced self-play exploration with anti-loss penalty",
                     ],
                     default_option="Unbeatable minimax play: Win whenever possible and force a draw otherwise",
+                )
+            elif is_blackjack:
+                q_obj = ClarifyingQuestion(
+                    id="q_objective",
+                    question_id="q_objective",
+                    pillar=PILLAR_OBJECTIVE,
+                    question="What blackjack strategy and dealer rule profile should the agent learn?",
+                    suggested_options=[
+                        "Casino Basic Strategy: Mathematically optimal hit/stand/double decisions",
+                        "Aggressive Payout Maximizer: High-variance doubling and split play",
+                        "Conservative Anti-Bust Strategy: Stand early to force dealer busts",
+                        "Dynamic Card Counter: Risk-adjusted thresholds against shoe penetration",
+                    ],
+                    default_option="Casino Basic Strategy: Mathematically optimal hit/stand/double decisions",
                 )
             elif is_data:
                 q_obj = ClarifyingQuestion(
@@ -304,6 +357,20 @@ class IntakeArchitectAgent:
                     ],
                     default_option="Modern 3x3 dark-mode grid with neon glow and winning lines",
                 )
+            elif is_blackjack:
+                q_ui = ClarifyingQuestion(
+                    id="q_arena_ui",
+                    question_id="q_arena_ui",
+                    pillar=PILLAR_ARENA_UI,
+                    question="How would you like to style the Blackjack Casino Arena in the center stage?",
+                    suggested_options=[
+                        "Classic Emerald Felt: Casino oval card table with dealer/player cards & chip bankroll",
+                        "High-Roller Neon Casino: Glowing neon felt with live odds and probability bars",
+                        "Slate Card Room: Clean modern table with crisp SVG cards and payout telemetry",
+                        "Retro Casino Arcade: 8-bit pixel art blackjack table with animated chip stacks",
+                    ],
+                    default_option="Classic Emerald Felt: Casino oval card table with dealer/player cards & chip bankroll",
+                )
             elif is_data:
                 q_ui = ClarifyingQuestion(
                     id="q_arena_ui",
@@ -349,6 +416,20 @@ class IntakeArchitectAgent:
                     ],
                     default_option="Click-to-place human vs agent interactive board with reset button",
                 )
+            elif is_blackjack:
+                q_int = ClarifyingQuestion(
+                    id="q_interaction",
+                    question_id="q_interaction",
+                    pillar=PILLAR_INTERACTION,
+                    question="How do you want to interactively play against or test the Blackjack agent?",
+                    suggested_options=[
+                        "Live Player Mode: Deal cards and play Hit/Stand/Double decisions as a human",
+                        "Agent Advisor Mode: Inspect real-time action probabilities and recommended moves",
+                        "Continuous Auto-Play: Watch the policy play successive hands with speed controls",
+                        "Dealer Rule Simulator: Toggle dealer stands on soft 17 vs hits soft 17",
+                    ],
+                    default_option="Live Player Mode: Deal cards and play Hit/Stand/Double decisions as a human",
+                )
             elif is_data:
                 q_int = ClarifyingQuestion(
                     id="q_interaction",
@@ -393,6 +474,20 @@ class IntakeArchitectAgent:
                         "75% Fast Prototyping (2 rounds)",
                     ],
                     default_option="90% Win/Draw Rate (5 rounds)",
+                )
+            elif is_blackjack:
+                q_exp = ClarifyingQuestion(
+                    id="q_expectations",
+                    question_id="q_expectations",
+                    pillar=PILLAR_EXPECTATIONS,
+                    question="What target win/non-bust success rate and auto-tuning round budget should we target?",
+                    suggested_options=[
+                        "50% Win / Non-Bust Rate (5 rounds)",
+                        "55% Advantage Play (8 rounds)",
+                        "45% Baseline Mastery (3 rounds)",
+                        "40% Rapid Prototype (2 rounds)",
+                    ],
+                    default_option="50% Win / Non-Bust Rate (5 rounds)",
                 )
             elif is_data:
                 q_exp = ClarifyingQuestion(
@@ -531,6 +626,31 @@ class IntakeArchitectAgent:
                 {"name": "draw_bonus", "weight": 3.0, "description": "Reward for achieving a draw"},
                 {"name": "loss_penalty", "weight": -10.0, "description": "Penalty for losing the game"},
                 {"name": "illegal_move_penalty", "weight": -5.0, "description": "Penalty for selecting an occupied cell"},
+            ]
+        elif is_blackjack:
+            task_title = "Blackjack 21 Card Agent"
+            domain_summary = (
+                f"Classic Blackjack (Twenty-One) casino card game. Strategy: {objective_choice}"
+                if objective_choice
+                else "Classic Blackjack (Twenty-One) casino card game learning optimal hit, stand, and double-down decisions against a dealer."
+            )
+            data_source_type = "pure_simulation"
+            dataset_id = None
+            observation_features = [
+                "player_total", "dealer_upcard_value", "has_usable_ace", "can_double_down"
+            ]
+            action_labels = [
+                "Hit (Draw Card)", "Stand (Hold Hand)", "Double Down (2x Bet)"
+            ]
+            interactive_mode = interactive_choice or "Interactive casino card table: play live hands as a human with Hit/Stand/Double controls, or inspect agent decisions."
+            success_metric = "Win / Non-Bust Rate (%)"
+            threshold = 50.0 if threshold == 90.0 else threshold
+            reward_components = [
+                {"name": "win_payout", "weight": 1.0, "description": "Standard 1:1 payout for beating dealer hand"},
+                {"name": "blackjack_bonus", "weight": 1.5, "description": "3:2 bonus payout for natural 21 Blackjack"},
+                {"name": "loss_penalty", "weight": -1.0, "description": "Loss penalty when dealer total beats player"},
+                {"name": "bust_penalty", "weight": -1.5, "description": "Penalty for exceeding 21 (busting)"},
+                {"name": "push_reward", "weight": 0.0, "description": "Zero return for tied hand (push)"},
             ]
         elif is_energy:
             task_title = "Solar & Commercial Battery Arbitrage Controller"

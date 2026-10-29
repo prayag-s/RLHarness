@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from rl_ide.architect.models import AgentBlueprintSpec
-from rl_ide.architect.intake import is_tictactoe_spec
+from rl_ide.architect.intake import is_tictactoe_spec, is_blackjack_spec
 from rl_ide.llm.client import BaseLLMClient, create_llm_client, FallbackCodeSynthesizer, get_active_llm_client
 from rl_ide.llm.prompts import ARENA_SYNTHESIZER_SYSTEM_PROMPT, ARENA_BUILDER_SYSTEM_PROMPT
 
@@ -217,6 +217,14 @@ class JITArenaSynthesizer:
         style_query = ((visual_style or "") + " " + (blueprint.arena_visual_description or "")).lower()
         if base_html:
             style_query += " " + base_html.lower()
+
+        is_blackjack = (
+            is_blackjack_spec(blueprint)
+            or any(
+                kw in task_title.lower() or kw in style_query
+                for kw in ["blackjack", "black jack", "card table", "dealer card", "card game", "hit or stand", "felt", "cards", "dealer"]
+            )
+        ) and not is_tictactoe
 
         has_scoreboard = "scoreboard" in style_query or "score" in style_query
         has_gold = "gold" in style_query or "golden" in style_query
@@ -490,6 +498,308 @@ class JITArenaSynthesizer:
                   winner: null
                 }}
               }});
+            }}
+            """
+        elif is_blackjack:
+            domain_html = f"""
+            {victory_badge_html}
+            {scoreboard_html}
+            <!-- 21 Blackjack Casino Felt Table Stage -->
+            <div class="flex flex-col items-center justify-center py-2 w-full max-w-2xl mx-auto">
+              <!-- Casino Table Outer Border & Felt -->
+              <div class="w-full bg-emerald-950 border-4 border-amber-600/60 rounded-3xl p-5 shadow-2xl relative overflow-hidden backdrop-blur-md">
+                
+                <!-- Table Felt Felt Curve / Ring Branding -->
+                <div class="border border-emerald-500/30 rounded-2xl p-4 bg-emerald-900/60 shadow-inner flex flex-col gap-4">
+                  
+                  <!-- Top Row: Dealer Section -->
+                  <div class="flex flex-col items-center gap-1.5 pb-3 border-b border-emerald-600/40">
+                    <div class="flex items-center justify-between w-full px-2">
+                      <div class="flex items-center gap-2">
+                        <span class="text-xs font-black tracking-wider uppercase text-amber-300 flex items-center gap-1">
+                          <span>🎩</span>
+                          <span>Dealer Hand</span>
+                        </span>
+                        <span id="dealer-score-badge" class="px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-slate-900/80 border border-slate-700 text-slate-300">Total: ?</span>
+                      </div>
+                      <div class="text-[10px] font-mono uppercase tracking-widest text-emerald-400/80">Dealer stands on 17</div>
+                    </div>
+                    
+                    <!-- Dealer Card Row -->
+                    <div id="dealer-cards" class="flex items-center justify-center gap-2 min-h-[92px] py-1">
+                      <!-- Cards rendered via JS -->
+                    </div>
+                  </div>
+
+                  <!-- Middle Felt Banner & Status -->
+                  <div class="flex flex-col items-center justify-center py-1">
+                    <div class="text-[11px] font-black uppercase tracking-widest text-amber-400/90 text-center drop-shadow">
+                      ♠ BLACKJACK PAYS 3 TO 2 ♦ DEALER MUST STAND ON 17 ♣
+                    </div>
+                    <div id="hand-result-banner" class="mt-2 px-4 py-1.5 rounded-xl text-xs font-bold font-mono text-center bg-slate-900/90 border border-slate-700 text-slate-200 shadow-lg min-w-[240px]">
+                      Turn: Player Action
+                    </div>
+                  </div>
+
+                  <!-- Bottom Row: Player Section -->
+                  <div class="flex flex-col items-center gap-1.5 pt-2 border-t border-emerald-600/40">
+                    <div class="flex items-center justify-between w-full px-2">
+                      <div class="flex items-center gap-2">
+                        <span class="text-xs font-black tracking-wider uppercase text-emerald-300 flex items-center gap-1">
+                          <span>👤</span>
+                          <span>Player Hand</span>
+                        </span>
+                        <span id="player-score-badge" class="px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-slate-900/80 border border-slate-700 text-slate-300">Total: 0</span>
+                      </div>
+                      <div id="player-bet-badge" class="text-[11px] font-mono font-bold text-amber-300 bg-amber-950/60 border border-amber-600/60 px-2 py-0.5 rounded">Bet: $25</div>
+                    </div>
+
+                    <!-- Player Card Row -->
+                    <div id="player-cards" class="flex items-center justify-center gap-2 min-h-[92px] py-1">
+                      <!-- Cards rendered via JS -->
+                    </div>
+                  </div>
+
+                </div>
+
+                <!-- Interactive Player Decision Control Strip -->
+                <div class="mt-4 flex flex-wrap items-center justify-center gap-2.5">
+                  <button id="btn-hit" onclick="playerAction(0)" class="px-4 py-2 text-xs font-black rounded-xl transition-all border border-emerald-500/80 bg-emerald-700 hover:bg-emerald-600 text-white shadow-lg shadow-emerald-950 flex items-center gap-1.5 cursor-pointer">
+                    <span>🟢</span>
+                    <span>Hit (+1 Card)</span>
+                  </button>
+                  <button id="btn-stand" onclick="playerAction(1)" class="px-4 py-2 text-xs font-black rounded-xl transition-all border border-rose-500/80 bg-rose-700 hover:bg-rose-600 text-white shadow-lg shadow-rose-950 flex items-center gap-1.5 cursor-pointer">
+                    <span>🛑</span>
+                    <span>Stand (Hold Hand)</span>
+                  </button>
+                  <button id="btn-double" onclick="playerAction(2)" class="px-4 py-2 text-xs font-black rounded-xl transition-all border border-amber-500/80 bg-amber-700 hover:bg-amber-600 text-white shadow-lg shadow-amber-950 flex items-center gap-1.5 cursor-pointer">
+                    <span>⚡</span>
+                    <span>Double Down (2x)</span>
+                  </button>
+                  <button id="btn-new-deal" onclick="resetHand()" class="px-3.5 py-2 text-xs font-bold rounded-xl transition-all border border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-200 shadow-md flex items-center gap-1.5 cursor-pointer">
+                    <span>🔄</span>
+                    <span>New Deal</span>
+                  </button>
+                </div>
+
+              </div>
+            </div>
+            """
+            domain_js = f"""
+            let currentHandOver = false;
+
+            function renderCardHTML(rank, suit, isHidden) {{
+              if (isHidden) {{
+                return `
+                  <div class="w-14 h-20 rounded-lg bg-gradient-to-br from-indigo-900 via-indigo-950 to-slate-900 border-2 border-indigo-400/60 shadow-xl flex items-center justify-center flex-shrink-0 transition-transform duration-200">
+                    <span class="text-indigo-400/70 text-lg font-black select-none">🂠</span>
+                  </div>
+                `;
+              }}
+              const isRed = (suit === '♥' || suit === '♦' || suit === 'H' || suit === 'D');
+              const suitChar = suit === 'H' ? '♥' : (suit === 'D' ? '♦' : (suit === 'S' ? '♠' : (suit === 'C' ? '♣' : suit)));
+              const textColor = isRed ? 'text-rose-600' : 'text-slate-900';
+              return `
+                <div class="w-14 h-20 rounded-lg bg-white border border-slate-300 shadow-xl p-1 flex flex-col justify-between flex-shrink-0 transition-transform duration-200 font-sans select-none">
+                  <div class="flex justify-between items-start leading-none">
+                    <span class="text-[12px] font-black ${{textColor}}">${{rank}}</span>
+                    <span class="text-[10px] ${{textColor}}">${{suitChar}}</span>
+                  </div>
+                  <div class="text-center text-lg leading-none ${{textColor}}">${{suitChar}}</div>
+                  <div class="flex justify-between items-end leading-none rotate-180">
+                    <span class="text-[12px] font-black ${{textColor}}">${{rank}}</span>
+                    <span class="text-[10px] ${{textColor}}">${{suitChar}}</span>
+                  </div>
+                </div>
+              `;
+            }}
+
+            function updateDomainState(state) {{
+              if (!state) return;
+
+              // 1. Update Dealer Cards
+              const dealerCardsEl = document.getElementById('dealer-cards');
+              const dealerScoreEl = document.getElementById('dealer-score-badge');
+              if (dealerCardsEl && state.dealer_cards) {{
+                dealerCardsEl.innerHTML = state.dealer_cards.map(c => {{
+                  return renderCardHTML(c.rank || c.value, c.suit || '♠', Boolean(c.hidden));
+                }}).join('');
+              }}
+              if (dealerScoreEl && state.dealer_total !== undefined) {{
+                dealerScoreEl.innerText = state.dealer_hidden ? 'Showing: ' + state.dealer_visible : 'Total: ' + state.dealer_total;
+              }}
+
+              // 2. Update Player Cards
+              const playerCardsEl = document.getElementById('player-cards');
+              const playerScoreEl = document.getElementById('player-score-badge');
+              if (playerCardsEl && state.player_cards) {{
+                playerCardsEl.innerHTML = state.player_cards.map(c => {{
+                  return renderCardHTML(c.rank || c.value, c.suit || '♠', false);
+                }}).join('');
+              }}
+              if (playerScoreEl && state.player_total !== undefined) {{
+                const softStr = state.is_soft ? ' (Soft)' : '';
+                playerScoreEl.innerText = 'Total: ' + state.player_total + softStr;
+              }}
+
+              // 3. Update Status Banner
+              const banner = document.getElementById('hand-result-banner');
+              if (banner) {{
+                if (state.game_status) {{
+                  banner.innerText = state.game_status;
+                  if (state.result === 'win' || state.result === 'blackjack' || state.result === 'player_win') {{
+                    banner.className = 'mt-2 px-4 py-1.5 rounded-xl text-xs font-bold font-mono text-center bg-emerald-950/90 border border-emerald-500 text-emerald-300 shadow-lg animate-pulse min-w-[240px]';
+                  }} else if (state.result === 'loss' || state.result === 'bust' || state.result === 'dealer_win') {{
+                    banner.className = 'mt-2 px-4 py-1.5 rounded-xl text-xs font-bold font-mono text-center bg-rose-950/90 border border-rose-500 text-rose-300 shadow-lg min-w-[240px]';
+                  }} else if (state.result === 'push') {{
+                    banner.className = 'mt-2 px-4 py-1.5 rounded-xl text-xs font-bold font-mono text-center bg-amber-950/90 border border-amber-500 text-amber-300 shadow-lg min-w-[240px]';
+                  }} else {{
+                    banner.className = 'mt-2 px-4 py-1.5 rounded-xl text-xs font-bold font-mono text-center bg-slate-900/90 border border-slate-700 text-slate-200 shadow-lg min-w-[240px]';
+                  }}
+                }}
+              }}
+            }}
+
+            function playerAction(idx) {{
+              sendInteraction({{
+                user_action: idx,
+                action_name: idx === 0 ? 'hit' : (idx === 1 ? 'stand' : 'double')
+              }});
+            }}
+
+            function resetHand() {{
+              sendInteraction({{
+                reset: true
+              }});
+            }}
+
+            // --- Mock Animation Engine for Blackjack Casino Table ---
+            const mockRanks = ['2','3','4','5','6','7','8','9','10','J','Q','K','A'];
+            const mockSuits = ['♠','♥','♦','♣'];
+            function randomCard() {{
+              const r = mockRanks[Math.floor(Math.random() * mockRanks.length)];
+              const s = mockSuits[Math.floor(Math.random() * mockSuits.length)];
+              let val = parseInt(r);
+              if (isNaN(val)) {{
+                val = r === 'A' ? 11 : 10;
+              }}
+              return {{ rank: r, suit: s, val: val }};
+            }}
+
+            function calcHandTotal(cards) {{
+              let total = 0;
+              let aces = 0;
+              for (const c of cards) {{
+                total += c.val;
+                if (c.rank === 'A') aces++;
+              }}
+              while (total > 21 && aces > 0) {{
+                total -= 10;
+                aces--;
+              }}
+              return total;
+            }}
+
+            let mockRound = 1;
+            let mockPhase = 0; // 0: deal, 1: player turn, 2: dealer turn, 3: result
+            let mPlayerCards = [];
+            let mDealerCards = [];
+
+            function stepMockDomain() {{
+              if (mockPhase === 0) {{
+                // Deal
+                mPlayerCards = [randomCard(), randomCard()];
+                mDealerCards = [randomCard(), {{ ...randomCard(), hidden: true }}];
+                const pTot = calcHandTotal(mPlayerCards);
+                mockPhase = (pTot >= 17) ? 2 : 1;
+
+                applyArenaPayload({{
+                  episode_id: 'MOCK-HAND-' + mockRound,
+                  step: 1,
+                  total_reward: 0.0,
+                  reward_breakdown: {{ deal_cost: 0.0 }},
+                  action_probs: [0.35, 0.55, 0.10],
+                  arena_state: {{
+                    player_cards: mPlayerCards,
+                    dealer_cards: mDealerCards,
+                    player_total: pTot,
+                    dealer_visible: mDealerCards[0].val,
+                    dealer_total: mDealerCards[0].val,
+                    dealer_hidden: true,
+                    game_status: 'Hand #' + mockRound + ' Dealt — Turn: Player Action',
+                    result: 'in_progress'
+                  }}
+                }});
+              }} else if (mockPhase === 1) {{
+                // Player Action (Hit or Stand)
+                const pTotBefore = calcHandTotal(mPlayerCards);
+                if (pTotBefore < 16) {{
+                  mPlayerCards.push(randomCard());
+                }}
+                const pTot = calcHandTotal(mPlayerCards);
+                if (pTot > 21) {{
+                  mockPhase = 3;
+                  applyArenaPayload({{
+                    episode_id: 'MOCK-HAND-' + mockRound,
+                    step: 2,
+                    total_reward: -1.5,
+                    reward_breakdown: {{ bust_penalty: -1.5, win_payout: 0.0 }},
+                    action_probs: [0.10, 0.85, 0.05],
+                    arena_state: {{
+                      player_cards: mPlayerCards,
+                      dealer_cards: mDealerCards.map(c => ({{ ...c, hidden: false }})),
+                      player_total: pTot,
+                      dealer_total: calcHandTotal(mDealerCards),
+                      dealer_hidden: false,
+                      game_status: '💥 Player Busts with ' + pTot + '! Dealer Wins.',
+                      result: 'bust'
+                    }}
+                  }});
+                  mockRound++;
+                  mockPhase = 0;
+                  return;
+                }}
+                mockPhase = 2;
+              }} else if (mockPhase === 2) {{
+                // Dealer Turn
+                mDealerCards = mDealerCards.map(c => ({{ ...c, hidden: false }}));
+                while (calcHandTotal(mDealerCards) < 17) {{
+                  mDealerCards.push(randomCard());
+                }}
+                const pTot = calcHandTotal(mPlayerCards);
+                const dTot = calcHandTotal(mDealerCards);
+                let res = 'push';
+                let rw = 0.0;
+                let statusMsg = '🤝 Push! Tie hand at ' + pTot;
+                if (dTot > 21 || pTot > dTot) {{
+                  res = 'win';
+                  rw = 1.0;
+                  statusMsg = '🎉 Player Wins! ' + pTot + ' beats Dealer ' + (dTot > 21 ? 'Bust' : dTot);
+                }} else if (dTot > pTot) {{
+                  res = 'loss';
+                  rw = -1.0;
+                  statusMsg = '💥 Dealer Wins with ' + dTot + ' vs Player ' + pTot;
+                }}
+
+                applyArenaPayload({{
+                  episode_id: 'MOCK-HAND-' + mockRound,
+                  step: 3,
+                  total_reward: rw,
+                  reward_breakdown: {{ win_payout: rw, bet_return: rw >= 0 ? 1.0 : -1.0 }},
+                  action_probs: [0.05, 0.90, 0.05],
+                  arena_state: {{
+                    player_cards: mPlayerCards,
+                    dealer_cards: mDealerCards,
+                    player_total: pTot,
+                    dealer_total: dTot,
+                    dealer_hidden: false,
+                    game_status: statusMsg,
+                    result: res
+                  }}
+                }});
+                mockRound++;
+                mockPhase = 0;
+              }}
             }}
             """
         elif is_energy:

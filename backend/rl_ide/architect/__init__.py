@@ -13,6 +13,10 @@ from rl_ide.architect.models import (
 from rl_ide.architect.intake import (
     IntakeArchitectAgent,
     ARCHITECT_SYSTEM_PROMPT,
+    is_tictactoe_intent,
+    is_tictactoe_spec,
+    is_blackjack_intent,
+    is_blackjack_spec,
 )
 
 __all__ = [
@@ -30,6 +34,10 @@ __all__ = [
     "PILLAR_ARENA_UI",
     "PILLAR_EXPECTATIONS",
     "PILLAR_INTERACTION",
+    "is_tictactoe_intent",
+    "is_tictactoe_spec",
+    "is_blackjack_intent",
+    "is_blackjack_spec",
 ]
 
 

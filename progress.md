@@ -1,12 +1,12 @@
 # RL-Native Agent IDE — Progress & Session Handoff Log
 
-**Project:** RL-Native Agent Studio v4.3 (Agentic Chat Planner & Multi-Layer Code Executor)  
+**Project:** RL-Native Agent Studio v4.3 (Agentic Chat Planner & Blackjack Casino Domain Synthesis)  
 **Last Updated:** 2026-10-29  
-**Current Status:** v4.3 Agentic Chat Planner & Multi-Layer Code Executor Implemented & Verified. Replaces rigid intent routing with context-aware ChatActionPlan, AST-validated inference patching, multi-target execution chaining, and strict zero-mutation honesty guardrails.  
-- **Backend Tests:** 43 / 43 Core Tests Passing (100% Green across all suites, including `test_agentic_chat_planner.py`).
+**Current Status:** v4.3 Verified. First-class Blackjack & Casino Card Domain synthesis implemented across Intake, Arena Synthesizer, Gymnasium Environment, and Chat Agent, resolving generic 2D rover canvas fallbacks.  
+- **Backend Tests:** 47 / 47 Core Tests Passing (100% Green across all suites, including `test_agentic_chat_planner.py` and `test_blackjack_arena_and_env.py`).
 - **Live Browser Audit:** 11 / 11 Scenarios Passing (0 browser console errors, 0 duplicate key warnings, 0 unhandled promise rejections).
 - **Frontend Build:** `npm run build` clean (0 TypeScript / Vite errors, 1599 modules transformed).
-- **Git Commit:** `f3ed087` (`feat(conversations): add clear all conversations endpoint and UI action, purge stale test runs`) & `26813d2` (`feat(v4.2): complete 10-domain commercial e2e audit with onnx parity and full browser verification`).
+- **Git Commit:** `2ee022b` (`feat(planner): implement code-aware agentic chat planner with multi-layer code executor`).
 
 ---
 
@@ -488,6 +488,47 @@ Automated verification suite `backend/tests/test_agentic_chat_planner.py` execut
 - `test_first_move_randomization_inference_patch`: Verifies opening move randomization in Tic-Tac-Toe across 30 games with zero retraining.
 - `test_multi_layer_arena_and_training_patch`: Verifies chained reward shaping and inference strategy patching in a single invocation.
 - `test_unsupported_capability_honest_refusal`: Verifies zero code mutations and honest rejection response.
+
+---
+
+## 7. Blackjack 21 Card Domain & Casino Table Arena Synthesis
+
+### 7.1 Issue & Root Cause Analysis
+- **User Issue**: Starting a new session with `"train a blackjack playing agent which winws everyttime"` resulted in an `"Autonomous Task Synthesizer"` arena showing a 2D rover navigation waypoint coordinate grid with actions `"Move Left"`, `"Move Right"`, `"Move Up"`, `"Move Down"`, `"Hold Position"` and telemetry `distance_reward`, `velocity_cost`. Subsequent requests (`"arena should have blackjack table etc"`) did not change the canvas.
+- **Root Cause**:
+  1. `IntakeArchitectAgent._deterministic_intake()` only contained rules for Tic-Tac-Toe, Solar Energy, CartPole, and Uploaded Datasets. Any other prompt defaulted to an "Autonomous Task Synthesizer" 2D rover.
+  2. `JITArenaSynthesizer._generate_deterministic_arena_html()` defaulted non-TicTacToe / non-dataset domains to a 2D canvas with `agent_pos` / `target_pos`.
+  3. `JITEnvironmentSynthesizer` lacked a dedicated Blackjack Gymnasium synthesis template, falling back to `_build_general_sim_code` (2D rover physics).
+  4. In `ContinuousStudioOmniAgent.classify_intents()` and `process_message()`, visual keywords did not match "table", "card", or "blackjack", preventing live re-anchoring when users requested table redesigns.
+
+### 7.2 Resolution & Capabilities Added
+1. **Blackjack Intake Classification (`backend/rl_ide/architect/intake.py`)**:
+   - Implemented `is_blackjack_intent(text)` with fuzzy keyword matching (`blackjack`, `21`, `card table`, `dealer`, `hit or stand`, `double down`).
+   - Implemented `is_blackjack_spec(blueprint)` detection.
+   - Added 5-pillar clarifying questions tailored for Blackjack (`Casino Basic Strategy`, `Emerald Felt Table`, `Live Player / Agent Advisor Mode`, `Win/Non-Bust Expectations`).
+   - Synthesizes first-class `AgentBlueprintSpec` for `Blackjack 21 Card Agent` with observations `["player_total", "dealer_upcard_value", "has_usable_ace", "can_double_down"]` and actions `["Hit (Draw Card)", "Stand (Hold Hand)", "Double Down (2x Bet)"]`.
+
+2. **Casino Felt Table Arena (`backend/rl_ide/synthesizer/arena_builder.py`)**:
+   - Implemented self-contained emerald casino felt table with dealer card row, player card row, and center table branding (`♠ BLACKJACK PAYS 3 TO 2 ♦ DEALER MUST STAND ON 17 ♣`).
+   - SVG/CSS card renderer with suits (♠ ♥ ♦ ♣), ranks (A, 2-10, J, Q, K), and card-back patterns for hidden hole cards.
+   - Built-in Mock Simulation & Animation Loop (`startMockAnimationLoop()`): simulates deals, hits, stands, dealer reveals, win/loss banners, reward breakdown (`win_payout`, `blackjack_bonus`, `bust_penalty`), and action probabilities.
+   - Interactive buttons: `🟢 Hit (+1 Card)`, `🛑 Stand (Hold Hand)`, `⚡ Double Down (2x)`, and `🔄 New Deal`.
+   - Full bi-directional `postMessage` protocol: `ARENA_UPDATE`, `SET_ARENA_MODE`, `ARENA_INTERACT`.
+
+3. **Gymnasium Environment Synthesizer (`backend/rl_ide/synthesizer/env_builder.py`)**:
+   - Implemented `_build_blackjack_code()` producing standard Gymnasium `SynthesizedGymEnv`.
+   - Card deck logic, soft/usable Ace handling, dealer hit-to-17 rules, double down multiplier.
+   - Passed all 6 criteria of `SandboxSmokeTester.run_smoke_test(env_cls)` (25 runtime steps, JSON serializable `arena_state`, demonstration dataset generation, and `interactive_step`).
+
+4. **Omni-Agent Domain Re-Anchoring (`backend/rl_ide/architect/omni_agent.py`)**:
+   - Added table/card visual keywords (`table`, `cards`, `felt`, `blackjack`, `dealer`, `chips`) to `classify_intents` and `has_visual_intent`.
+   - Added domain re-anchoring logic: if a session was previously initialized with generic rover fallback and the user requests blackjack or card play, the agent dynamically upgrades the blueprint and hot-reloads the Blackjack table arena live.
+   - Upgraded user's active session (`conv_1793265260777_j059x`) to the Blackjack 21 Card Table.
+
+### 7.3 Verification Suite
+- Created `backend/tests/test_blackjack_arena_and_env.py` (4/4 tests passing).
+- Verified 47 / 47 total core tests passing (100% green).
+
 
 
 

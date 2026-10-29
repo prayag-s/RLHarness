@@ -19,7 +19,7 @@ import gymnasium as gym
 import numpy as np
 
 from rl_ide.architect.models import AgentBlueprintSpec
-from rl_ide.architect.intake import is_tictactoe_spec
+from rl_ide.architect.intake import is_tictactoe_spec, is_blackjack_spec
 from rl_ide.ingest.loader import IngestedDataset
 from rl_ide.llm.client import BaseLLMClient, create_llm_client, FallbackCodeSynthesizer, get_active_llm_client
 from rl_ide.llm.prompts import ENV_SYNTHESIZER_SYSTEM_PROMPT, ENV_BUILDER_SYSTEM_PROMPT
@@ -147,6 +147,8 @@ class JITEnvironmentSynthesizer:
 
         if is_tictactoe_spec(blueprint):
             return self._build_tictactoe_code(blueprint)
+        if is_blackjack_spec(blueprint) or any(kw in title_lower or kw in summary_lower for kw in ["blackjack", "black jack", "card game", "dealer"]):
+            return self._build_blackjack_code(blueprint)
         if any(kw in title_lower or kw in summary_lower for kw in ["solar", "battery", "energy", "tariff"]):
             return self._build_energy_arbitrage_code(blueprint)
         if any(kw in title_lower or kw in summary_lower for kw in ["rover", "maze", "navigation", "grid", "catcher"]):
@@ -200,6 +202,7 @@ class JITEnvironmentSynthesizer:
         task_title = (blueprint.task_title or "").lower()
         summary = (blueprint.domain_summary or "").lower()
         is_tictactoe = is_tictactoe_spec(blueprint)
+        is_blackjack = is_blackjack_spec(blueprint) or any(kw in task_title or kw in summary for kw in ["blackjack", "black jack", "card game", "dealer"])
         is_rover = any(kw in task_title or kw in summary for kw in ["rover", "maze", "navigation", "grid", "catcher", "robot", "amr", "warehouse"])
         is_energy = any(kw in task_title or kw in summary for kw in ["solar", "battery arbitrage", "energy arbitrage", "tariff", "power grid", "power-flow"])
         is_cartpole = any(kw in task_title or kw in summary for kw in ["cartpole", "pendulum", "pole balance", "pole balancing", "inverted pendulum"])
@@ -207,6 +210,8 @@ class JITEnvironmentSynthesizer:
 
         if is_tictactoe:
             return self._build_tictactoe_code(blueprint)
+        elif is_blackjack:
+            return self._build_blackjack_code(blueprint)
         elif is_rover:
             return self._build_general_sim_code(blueprint)
         elif is_energy:
@@ -217,6 +222,322 @@ class JITEnvironmentSynthesizer:
             return self._build_dataset_code(blueprint, dataset)
         else:
             return self._build_general_sim_code(blueprint)
+
+    def _build_blackjack_code(self, blueprint: AgentBlueprintSpec) -> str:
+        """Generates self-contained Gymnasium environment for Blackjack Card Game."""
+        action_labels = blueprint.action_labels or ["Hit (Draw Card)", "Stand (Hold Hand)", "Double Down (2x Bet)"]
+        obs_features = blueprint.observation_features or ["player_total", "dealer_upcard_value", "has_usable_ace", "can_double_down"]
+
+        return f'''"""Auto-synthesized Gymnasium environment for Blackjack 21 Card Agent."""
+
+from __future__ import annotations
+import math
+import random
+from typing import Any, Callable
+import gymnasium as gym
+from gymnasium import spaces
+import numpy as np
+
+
+class SynthesizedGymEnv(gym.Env):
+    """Auto-synthesized Gymnasium environment for: {blueprint.task_title}"""
+    metadata = {{"render_modes": ["json"]}}
+
+    def __init__(self, dataset_records=None, config=None):
+        super().__init__()
+        self.action_labels = {action_labels}
+        self.observation_features = {obs_features}
+        self.obs_dim = 4
+        self.n_actions = len(self.action_labels)
+
+        # Obs: [player_total (4..35), dealer_upcard_value (1..11), has_usable_ace (0..1), can_double (0..1)]
+        self.observation_space = spaces.Box(
+            low=np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32),
+            high=np.array([35.0, 11.0, 1.0, 1.0], dtype=np.float32),
+            dtype=np.float32,
+        )
+        self.action_space = spaces.Discrete(self.n_actions)
+
+        self.player_cards = []
+        self.dealer_cards = []
+        self.player_total = 0
+        self.dealer_total = 0
+        self.usable_ace = False
+        self.can_double = True
+        self.bet_multiplier = 1.0
+        self.done = False
+        self.game_status = "New hand dealt"
+        self.result = "in_progress"
+
+    def _draw_card(self) -> dict[str, Any]:
+        ranks = ["2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A"]
+        suits = ["♠", "♥", "♦", "♣"]
+        r = random.choice(ranks)
+        s = random.choice(suits)
+        if r == "A":
+            v = 11
+        elif r in ["10", "J", "Q", "K"]:
+            v = 10
+        else:
+            v = int(r)
+        return {{"rank": r, "suit": s, "val": v}}
+
+    def _calculate_hand(self, cards: list[dict[str, Any]]) -> tuple[int, bool]:
+        total = sum(c["val"] for c in cards)
+        aces = sum(1 for c in cards if c["rank"] == "A")
+        usable_ace = False
+        while total > 21 and aces > 0:
+            total -= 10
+            aces -= 1
+        if aces > 0 and total <= 21:
+            usable_ace = True
+        return total, usable_ace
+
+    def _get_obs(self) -> np.ndarray:
+        dealer_val = self.dealer_cards[0]["val"] if self.dealer_cards else 10.0
+        return np.array([
+            float(self.player_total),
+            float(dealer_val),
+            1.0 if self.usable_ace else 0.0,
+            1.0 if self.can_double else 0.0,
+        ], dtype=np.float32)
+
+    def reset(self, seed=None, options=None) -> tuple[np.ndarray, dict[str, Any]]:
+        super().reset(seed=seed)
+        if seed is not None:
+            random.seed(seed)
+            np.random.seed(seed)
+
+        self.player_cards = [self._draw_card(), self._draw_card()]
+        self.dealer_cards = [self._draw_card(), self._draw_card()]
+        self.player_total, self.usable_ace = self._calculate_hand(self.player_cards)
+        self.dealer_total, _ = self._calculate_hand(self.dealer_cards)
+        self.can_double = True
+        self.bet_multiplier = 1.0
+        self.done = False
+
+        # Natural 21 Blackjack check on deal
+        if self.player_total == 21:
+            self.done = True
+            if self.dealer_total == 21:
+                self.result = "push"
+                self.game_status = "Both player and dealer have Blackjack! Push (Tie)."
+            else:
+                self.result = "blackjack"
+                self.game_status = "Natural Blackjack! 21 on the deal (Pays 3:2)!"
+        else:
+            self.result = "in_progress"
+            self.game_status = f"Player hand: {{self.player_total}}. Dealer shows {{self.dealer_cards[0]['val']}}."
+
+        obs = self._get_obs()
+        info = {{
+            "reward_breakdown": {{"deal_cost": 0.0}},
+            "is_success": self.result in ("blackjack", "win"),
+            "arena_state": self.render_arena_state(),
+        }}
+        return obs, info
+
+    def compute_reward(self, state: dict, action: int, next_state: dict, info: dict) -> tuple[float, dict[str, float]]:
+        res = info.get("result", self.result)
+        mult = self.bet_multiplier
+        breakdown = {{
+            "win_payout": 0.0,
+            "blackjack_bonus": 0.0,
+            "loss_penalty": 0.0,
+            "bust_penalty": 0.0,
+            "push_reward": 0.0,
+        }}
+        if res == "blackjack":
+            breakdown["blackjack_bonus"] = 1.5 * mult
+            breakdown["win_payout"] = 1.0 * mult
+            return 1.5 * mult, breakdown
+        elif res in ("win", "player_win"):
+            breakdown["win_payout"] = 1.0 * mult
+            return 1.0 * mult, breakdown
+        elif res == "push":
+            breakdown["push_reward"] = 0.0
+            return 0.0, breakdown
+        elif res == "bust":
+            breakdown["bust_penalty"] = -1.5 * mult
+            return -1.5 * mult, breakdown
+        elif res in ("loss", "dealer_win"):
+            breakdown["loss_penalty"] = -1.0 * mult
+            return -1.0 * mult, breakdown
+        return 0.0, breakdown
+
+    def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
+        if self.done:
+            obs, info = self.reset()
+            return obs, 0.0, False, False, info
+
+        reward = 0.0
+        terminated = False
+        truncated = False
+
+        if action == 2 and self.can_double:
+            # Double Down: 2x bet, draw exactly 1 card, then stand
+            self.bet_multiplier = 2.0
+            self.can_double = False
+            self.player_cards.append(self._draw_card())
+            self.player_total, self.usable_ace = self._calculate_hand(self.player_cards)
+            if self.player_total > 21:
+                terminated = True
+                self.done = True
+                self.result = "bust"
+                self.game_status = f"Player doubled and busted with {{self.player_total}}!"
+                reward = -2.0
+            else:
+                # Stand and dealer plays
+                action = 1
+        else:
+            self.can_double = False
+
+        if action == 0 and not terminated:
+            # Hit: draw one card
+            self.player_cards.append(self._draw_card())
+            self.player_total, self.usable_ace = self._calculate_hand(self.player_cards)
+            if self.player_total > 21:
+                terminated = True
+                self.done = True
+                self.result = "bust"
+                self.game_status = f"Player busts with {{self.player_total}}! Dealer wins."
+                reward = -1.5 * self.bet_multiplier
+            elif self.player_total == 21:
+                # Stand automatically on 21
+                action = 1
+            else:
+                self.game_status = f"Player hits. Total is now {{self.player_total}}."
+                reward = 0.0
+
+        if action == 1 and not terminated:
+            # Stand: Dealer reveals hole card and draws until total >= 17
+            terminated = True
+            self.done = True
+            while True:
+                self.dealer_total, _ = self._calculate_hand(self.dealer_cards)
+                if self.dealer_total < 17:
+                    self.dealer_cards.append(self._draw_card())
+                else:
+                    break
+
+            if self.dealer_total > 21:
+                self.result = "win"
+                self.game_status = f"Dealer busts with {{self.dealer_total}}! Player wins."
+                reward = 1.0 * self.bet_multiplier
+            elif self.player_total > self.dealer_total:
+                self.result = "win"
+                self.game_status = f"Player wins! {{self.player_total}} beats dealer {{self.dealer_total}}."
+                reward = 1.0 * self.bet_multiplier
+            elif self.player_total < self.dealer_total:
+                self.result = "loss"
+                self.game_status = f"Dealer wins with {{self.dealer_total}} vs player {{self.player_total}}."
+                reward = -1.0 * self.bet_multiplier
+            else:
+                self.result = "push"
+                self.game_status = f"Push (Tie) at {{self.player_total}}."
+                reward = 0.0
+
+        info = {{
+            "result": self.result,
+            "player_total": self.player_total,
+            "dealer_total": self.dealer_total,
+            "is_success": self.result in ("win", "blackjack"),
+            "reward_breakdown": {{
+                "win_payout": reward if reward > 0 else 0.0,
+                "loss_penalty": reward if reward < 0 else 0.0,
+            }},
+            "arena_state": self.render_arena_state(),
+        }}
+        return self._get_obs(), float(reward), terminated, truncated, info
+
+    def render_arena_state(self) -> dict[str, Any]:
+        d_cards_rendered = []
+        for i, c in enumerate(self.dealer_cards):
+            if not self.done and i > 0:
+                d_cards_rendered.append({{"rank": "?", "suit": "♠", "val": 0, "hidden": True}})
+            else:
+                d_cards_rendered.append({{"rank": c["rank"], "suit": c["suit"], "val": c["val"], "hidden": False}})
+
+        return {{
+            "player_cards": self.player_cards,
+            "dealer_cards": d_cards_rendered,
+            "player_total": self.player_total,
+            "dealer_total": self.dealer_total if self.done else (self.dealer_cards[0]["val"] if self.dealer_cards else 10),
+            "dealer_visible": self.dealer_cards[0]["val"] if self.dealer_cards else 10,
+            "dealer_hidden": not self.done,
+            "is_soft": self.usable_ace,
+            "game_status": self.game_status,
+            "result": self.result,
+        }}
+
+    def interactive_step(self, payload: dict[str, Any], policy_predict_fn: Callable) -> dict[str, Any]:
+        if payload.get("reset"):
+            obs, info = self.reset()
+            return {{
+                "arena_state": self.render_arena_state(),
+                "agent_action_label": "New Deal",
+                "action_probs": [0.33, 0.33, 0.34],
+                "status_text": "New hand dealt.",
+            }}
+
+        user_action = payload.get("user_action")
+        if user_action is not None:
+            act_idx = int(user_action)
+            obs, reward, term, trunc, info = self.step(act_idx)
+            act_label = self.action_labels[min(act_idx, len(self.action_labels) - 1)]
+            probs = [0.0] * self.n_actions
+            probs[min(act_idx, len(probs) - 1)] = 1.0
+            return {{
+                "arena_state": self.render_arena_state(),
+                "agent_action_label": act_label,
+                "action_probs": probs,
+                "status_text": self.game_status,
+            }}
+
+        obs = self._get_obs()
+        action_idx, probs = policy_predict_fn(obs)
+        if probs is not None:
+            action_probs = [float(p) for p in probs]
+        else:
+            action_probs = [0.0] * self.n_actions
+            action_probs[min(action_idx, len(action_probs) - 1)] = 1.0
+
+        act_label = self.action_labels[min(action_idx, len(self.action_labels) - 1)]
+        return {{
+            "arena_state": self.render_arena_state(),
+            "agent_action_label": act_label,
+            "action_probs": action_probs,
+            "status_text": self.game_status,
+        }}
+
+    def get_demonstrations(self, num_samples: int = 200) -> tuple[np.ndarray, np.ndarray]:
+        X_list = []
+        y_list = []
+        for _ in range(num_samples):
+            obs, _ = self.reset()
+            p_tot = obs[0]
+            d_val = obs[1]
+            is_soft = bool(obs[2])
+            can_dbl = bool(obs[3])
+
+            if can_dbl and (p_tot in (10, 11)) and d_val <= 9:
+                act = 2  # Double down
+            elif is_soft:
+                act = 1 if p_tot >= 18 else 0
+            else:
+                if p_tot >= 17:
+                    act = 1  # Stand
+                elif p_tot <= 11:
+                    act = 0  # Hit
+                else:
+                    # 12-16: Stand on dealer 2-6, hit otherwise
+                    act = 1 if 2 <= d_val <= 6 else 0
+
+            X_list.append(obs)
+            y_list.append(act)
+
+        return np.array(X_list, dtype=np.float32), np.array(y_list, dtype=np.int64)
+'''
 
     def _build_cartpole_code(self, blueprint: AgentBlueprintSpec) -> str:
         """Generates self-contained CartPole Inverted Pendulum Gym environment."""

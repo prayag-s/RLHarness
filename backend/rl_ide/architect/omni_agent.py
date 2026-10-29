@@ -26,7 +26,13 @@ from rl_ide.architect.models import (
     ExecutionTarget,
     ChatActionPlan,
 )
-from rl_ide.architect.intake import IntakeArchitectAgent, is_tictactoe_intent, is_tictactoe_spec
+from rl_ide.architect.intake import (
+    IntakeArchitectAgent,
+    is_tictactoe_intent,
+    is_tictactoe_spec,
+    is_blackjack_intent,
+    is_blackjack_spec,
+)
 from rl_ide.synthesizer.arena_builder import JITArenaSynthesizer
 from rl_ide.synthesizer.env_builder import JITEnvironmentSynthesizer, load_synthesized_env_class, instantiate_env
 from rl_ide.synthesizer.verifier import SandboxSmokeTester
@@ -151,7 +157,7 @@ class StudioOmniAgent:
             "ui", "chart", "gauge", "burn-rate", "play", "player", "play as", "play both",
             "x and o", "x or o", "switch", "toggle", "first turn", "who goes first", "side", "sides",
             "human", "symbol", "grid", "board", "controls", "button", "buttons", "interactive",
-            "interface", "layout", "click", "clickable"
+            "interface", "layout", "click", "clickable", "table", "tables", "card", "cards", "felt", "blackjack", "dealer", "chips", "chip"
         ]
         has_arena_intent = any(kw in text for kw in arena_kws) and not any(
             kw in text for kw in ["lock arena", "lock & start", "lock and start", "confirm and start", "start training"]
@@ -303,7 +309,8 @@ class StudioOmniAgent:
                     f"Strict System Rules:\n"
                     f"1. If user asks to change how the agent selects moves in the Arena (e.g. randomizing its first/opening move among good options), route to \"inference_strategy\" so interactive_step() is patched directly—do NOT route solely to \"reward_shaping\".\n"
                     f"2. If user requests both a training reward/mechanic and an arena inference change, include both targets and set scope_classification=\"both\", requires_retrain=true.\n"
-                    f"3. If user requests an unsupported capability, set supported=false and targets=[\"unsupported_capability\"].\n\n"
+                    f"3. Arena visual styling & UI changes (e.g. arena look, tables, cards, felt, blackjack table, colors, themes, boards, HUD) are fully supported in the studio! Route them to supported=true, scope_classification=\"arena_only\", targets=[\"inference_strategy\"], requires_retrain=false.\n"
+                    f"4. If user requests an unsupported capability (e.g. Discord, WebGL shaders, multiplayer matchmaking, voice), set supported=false and targets=[\"unsupported_capability\"].\n\n"
                     f"Respond with JSON adhering to:\n"
                     f"{{\n"
                     f"  \"supported\": true,\n"
@@ -707,6 +714,29 @@ class StudioOmniAgent:
         # CASE 2: MID / POST-TRAINING CONVERSATIONAL ACTIONS (Multi-Target Chaining)
         # ---------------------------------------------------------------------
 
+        # Domain Re-Anchoring: Check if conversation was initialized with generic fallback
+        first_prompt = history[0].get("content", "") if history else user_message
+        is_card_session = is_blackjack_intent(user_message) or is_blackjack_intent(first_prompt)
+        if is_card_session and blueprint and not is_blackjack_spec(blueprint):
+            intake_agent = IntakeArchitectAgent(self._llm_client)
+            fallback_resp = intake_agent._deterministic_intake(
+                prompt=user_message if is_blackjack_intent(user_message) else first_prompt,
+                dataset=active_dataset,
+                answers=selected_opts,
+                wants_defaults=True,
+                training_params=t_params,
+            )
+            blueprint = fallback_resp.blueprint_spec
+            arena_html_str, _ = self.arena_synthesizer.synthesize(
+                blueprint=blueprint,
+                sample_arena_state=None,
+                session_id=conversation_id,
+                workspace_dir=ws_dir,
+            )
+            current_arena_html = arena_html_str
+            if broadcast_callback:
+                broadcast_callback({"event": "arena_updated", "arena_html": current_arena_html})
+
         # Multi-Target Layer 1: ENV_SIM_MECHANICS (Gym mechanics / rules)
         if ExecutionTarget.ENV_SIM_MECHANICS in action_plan.targets or StudioActionType.UPDATE_ENV_MECHANICS in intents:
             env_file = ws_dir / "env_module.py"
@@ -803,7 +833,8 @@ class StudioOmniAgent:
         has_visual_intent = any(kw in user_message.lower() for kw in [
             "look", "theme", "color", "canvas", "neon", "cyberpunk", "restyle", "dark", "gold",
             "scoreboard", "badge", "display", "larger", "bigger", "retro", "hud", "layout",
-            "x and o", "x or o", "play as", "switch", "both", "who goes first", "player side", "symbol"
+            "x and o", "x or o", "play as", "switch", "both", "who goes first", "player side", "symbol",
+            "table", "tables", "card", "cards", "felt", "blackjack", "dealer", "chips", "chip", "arena"
         ])
         if (StudioActionType.PREVIEW_OR_UPDATE_ARENA in intents and has_visual_intent) or (has_visual_intent and not assistant_reply):
             new_arena_html = self.arena_synthesizer.update_arena(
