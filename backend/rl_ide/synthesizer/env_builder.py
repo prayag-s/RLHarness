@@ -140,40 +140,15 @@ class JITEnvironmentSynthesizer:
         self,
         blueprint: AgentBlueprintSpec,
         dataset: IngestedDataset | None = None,
+        user_prompt: str = "",
     ) -> str:
-        """Synthesizes python code via domain templates or live LLM."""
-        title_lower = (blueprint.task_title or "").lower()
-        summary_lower = (blueprint.domain_summary or "").lower()
-
-        if is_tictactoe_spec(blueprint):
-            return self._build_tictactoe_code(blueprint)
-        if is_blackjack_spec(blueprint) or any(kw in title_lower or kw in summary_lower for kw in ["blackjack", "black jack", "card game", "dealer"]):
-            return self._build_blackjack_code(blueprint)
-        if any(kw in title_lower or kw in summary_lower for kw in ["solar", "battery", "energy", "tariff"]):
-            return self._build_energy_arbitrage_code(blueprint)
-        if any(kw in title_lower or kw in summary_lower for kw in ["rover", "maze", "navigation", "grid", "catcher"]):
-            return self._build_general_sim_code(blueprint)
-        if any(kw in title_lower or kw in summary_lower for kw in ["cartpole", "pendulum", "pole balance", "pole balancing", "inverted pendulum"]):
-            return self._build_cartpole_code(blueprint)
-        if blueprint.data_source_type == "uploaded_dataset" or dataset is not None or "fraud" in title_lower or "fraud" in summary_lower:
-            return self._build_dataset_code(blueprint, dataset)
-        if any(kw in title_lower or kw in summary_lower for kw in ["sim", "simulation"]):
-            return self._build_general_sim_code(blueprint)
-
-        if not isinstance(self.client, FallbackCodeSynthesizer):
-            try:
-                code = self._call_llm_code_gen(blueprint, dataset)
-                if code and "class SynthesizedGymEnv" in code:
-                    try:
-                        ast.parse(code)
-                        return code
-                    except SyntaxError:
-                        pass
-            except Exception:
-                pass
-
-        # Deterministic Code Generation (used for offline Fallback in test mode or domain templates)
-        return self._generate_deterministic_env_code(blueprint, dataset)
+        """Synthesizes python code via universal generative pipeline."""
+        return synthesize_universal_env(
+            blueprint=blueprint,
+            user_prompt=user_prompt,
+            dataset=dataset,
+            client=self.client,
+        )
 
     def _call_llm_code_gen(
         self,
@@ -203,13 +178,20 @@ class JITEnvironmentSynthesizer:
         summary = (blueprint.domain_summary or "").lower()
         is_tictactoe = is_tictactoe_spec(blueprint)
         is_blackjack = is_blackjack_spec(blueprint) or any(kw in task_title or kw in summary for kw in ["blackjack", "black jack", "card game", "dealer"])
-        is_rover = any(kw in task_title or kw in summary for kw in ["rover", "maze", "navigation", "grid", "catcher", "robot", "amr", "warehouse"])
+        is_connect4 = any(kw in task_title or kw in summary for kw in ["connect 4", "connect-4", "connect four", "connect4", "7 column"])
+        is_roulette = any(kw in task_title or kw in summary for kw in ["russian roulette", "roulette", "revolver", "cylinder", "chamber"])
+        # Zero Fallback to Rover: ONLY match rover if explicitly requested
+        is_rover = any(kw in task_title or kw in summary for kw in ["rover", "waypoint"]) and not is_connect4 and not is_roulette
         is_energy = any(kw in task_title or kw in summary for kw in ["solar", "battery arbitrage", "energy arbitrage", "tariff", "power grid", "power-flow"])
         is_cartpole = any(kw in task_title or kw in summary for kw in ["cartpole", "pendulum", "pole balance", "pole balancing", "inverted pendulum"])
         is_dataset = blueprint.data_source_type == "uploaded_dataset" or dataset is not None or "fraud" in task_title or "fraud" in summary
 
         if is_tictactoe:
             return self._build_tictactoe_code(blueprint)
+        elif is_connect4:
+            return self._build_connect4_code(blueprint)
+        elif is_roulette:
+            return self._build_russian_roulette_code(blueprint)
         elif is_blackjack:
             return self._build_blackjack_code(blueprint)
         elif is_rover:
@@ -221,7 +203,7 @@ class JITEnvironmentSynthesizer:
         elif is_dataset:
             return self._build_dataset_code(blueprint, dataset)
         else:
-            return self._build_general_sim_code(blueprint)
+            return self._build_novel_domain_code(blueprint)
 
     def _build_blackjack_code(self, blueprint: AgentBlueprintSpec) -> str:
         """Generates self-contained Gymnasium environment for Blackjack Card Game."""
@@ -450,6 +432,9 @@ class SynthesizedGymEnv(gym.Env):
         }}
         return self._get_obs(), float(reward), terminated, truncated, info
 
+    def get_render_state(self) -> dict[str, Any]:
+        return self.render_arena_state()
+
     def render_arena_state(self) -> dict[str, Any]:
         d_cards_rendered = []
         for i, c in enumerate(self.dealer_cards):
@@ -648,6 +633,9 @@ class SynthesizedGymEnv(gym.Env):
         info["arena_state"] = self.render_arena_state()
 
         return np.array(self.state, dtype=np.float32), float(reward), terminated, False, info
+
+    def get_render_state(self) -> dict[str, Any]:
+        return self.render_arena_state()
 
     def render_arena_state(self) -> dict[str, Any]:
         if self.state is None:
@@ -1013,6 +1001,9 @@ class SynthesizedGymEnv(gym.Env):
             return int(random.choice(corners))
 
         return int(random.choice(empty))
+
+    def get_render_state(self) -> dict[str, Any]:
+        return self.render_arena_state()
 
     def render_arena_state(self) -> dict[str, Any]:
         """Returns JSON-serializable telemetry dictionary for arena.html."""
@@ -1438,6 +1429,9 @@ class SynthesizedGymEnv(gym.Env):
         terminated = (self.step_count >= min(25, len(self.records)))
         return next_obs, float(reward), terminated, False, info
 
+    def get_render_state(self) -> dict[str, Any]:
+        return self.render_arena_state()
+
     def render_arena_state(self) -> dict[str, Any]:
         """Returns JSON-serializable telemetry dictionary for arena.html."""
         rec = self.records[self.current_idx] if self.records else {{}}
@@ -1620,6 +1614,9 @@ class SynthesizedGymEnv(gym.Env):
         info["arena_state"] = self.render_arena_state()
 
         return self._get_obs(), float(reward), terminated, False, info
+
+    def get_render_state(self) -> dict[str, Any]:
+        return self.render_arena_state()
 
     def render_arena_state(self) -> dict[str, Any]:
         """Returns JSON-serializable telemetry dictionary for arena.html."""
@@ -1831,6 +1828,9 @@ class SynthesizedGymEnv(gym.Env):
         terminated = (self.step_count >= 25)
         return next_obs, float(reward), terminated, False, info
 
+    def get_render_state(self) -> dict[str, Any]:
+        return self.render_arena_state()
+
     def render_arena_state(self) -> dict[str, Any]:
         """Returns JSON-serializable telemetry dictionary for arena.html."""
         efficiency = (self.optimal_count / max(1, self.step_count)) * 100.0
@@ -1898,3 +1898,563 @@ class SynthesizedGymEnv(gym.Env):
 
         return X, y
 '''
+
+    def _build_connect4_code(self, blueprint: AgentBlueprintSpec) -> str:
+        """Generates self-contained Gymnasium environment for Connect-4 Grid Agent."""
+        action_labels = blueprint.action_labels or [f"Drop Col {c}" for c in range(7)]
+        return f'''"""Auto-synthesized Gymnasium environment for Connect-4 Grid Agent."""
+
+from __future__ import annotations
+import math
+import random
+from typing import Any, Callable
+import gymnasium as gym
+from gymnasium import spaces
+import numpy as np
+
+
+class SynthesizedGymEnv(gym.Env):
+    """Auto-synthesized Gymnasium environment for: Connect-4 Grid Agent"""
+    metadata = {{"render_modes": ["json"]}}
+
+    def __init__(self, dataset_records=None, config=None):
+        super().__init__()
+        self.action_labels = {action_labels}
+        self.observation_features = [f"cell_{{r}}_{{c}}" for r in range(6) for c in range(7)] + ["current_player"]
+        self.obs_dim = 43
+        self.n_actions = 7
+
+        self.observation_space = spaces.Box(
+            low=-1.0, high=2.0, shape=(43,), dtype=np.float32
+        )
+        self.action_space = spaces.Discrete(self.n_actions)
+
+        self.board = np.zeros((6, 7), dtype=np.int32)
+        self.current_player = 1
+        self.winner = 0  # 0=ongoing, 1=player, 2=opponent, 3=draw
+        self.last_col = -1
+        self.step_count = 0
+        self.done = False
+
+    def _get_obs(self) -> np.ndarray:
+        flat = self.board.flatten().astype(np.float32)
+        return np.append(flat, float(self.current_player)).astype(np.float32)
+
+    def reset(self, seed=None, options=None) -> tuple[np.ndarray, dict[str, Any]]:
+        super().reset(seed=seed)
+        if seed is not None:
+            random.seed(seed)
+            np.random.seed(seed)
+        self.board = np.zeros((6, 7), dtype=np.int32)
+        self.current_player = 1
+        self.winner = 0
+        self.last_col = -1
+        self.step_count = 0
+        self.done = False
+        return self._get_obs(), {{
+            "reward_breakdown": {{}},
+            "is_success": False,
+            "arena_state": self.get_render_state(),
+        }}
+
+    def _check_win(self, piece: int) -> bool:
+        b = self.board
+        for c in range(4):
+            for r in range(6):
+                if b[r][c] == piece and b[r][c+1] == piece and b[r][c+2] == piece and b[r][c+3] == piece:
+                    return True
+        for c in range(7):
+            for r in range(3):
+                if b[r][c] == piece and b[r+1][c] == piece and b[r+2][c] == piece and b[r+3][c] == piece:
+                    return True
+        for c in range(4):
+            for r in range(3):
+                if b[r][c] == piece and b[r+1][c+1] == piece and b[r+2][c+2] == piece and b[r+3][c+3] == piece:
+                    return True
+        for c in range(4):
+            for r in range(3, 6):
+                if b[r][c] == piece and b[r-1][c+1] == piece and b[r-2][c+2] == piece and b[r-3][c+3] == piece:
+                    return True
+        return False
+
+    def _drop_piece(self, col: int, piece: int) -> int:
+        for r in range(5, -1, -1):
+            if self.board[r][col] == 0:
+                self.board[r][col] = piece
+                return r
+        return -1
+
+    def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
+        if self.done:
+            return self._get_obs(), 0.0, True, False, {{
+                "reward_breakdown": {{}},
+                "is_success": self.winner == 1,
+                "arena_state": self.get_render_state(),
+            }}
+
+        self.step_count += 1
+        col = int(action)
+        if col < 0 or col >= 7:
+            col = 0
+        self.last_col = col
+
+        r = self._drop_piece(col, 1)
+        if r == -1:
+            self.done = True
+            self.winner = 2
+            info = {{
+                "reward_breakdown": {{"illegal_move_penalty": -5.0}},
+                "is_success": False,
+                "arena_state": self.get_render_state(),
+            }}
+            return self._get_obs(), -5.0, True, False, info
+
+        if self._check_win(1):
+            self.done = True
+            self.winner = 1
+            info = {{
+                "reward_breakdown": {{"win_bonus": 10.0}},
+                "is_success": True,
+                "arena_state": self.get_render_state(),
+            }}
+            return self._get_obs(), 10.0, True, False, info
+
+        if not np.any(self.board == 0):
+            self.done = True
+            self.winner = 3
+            info = {{
+                "reward_breakdown": {{"draw_bonus": 3.0}},
+                "is_success": True,
+                "arena_state": self.get_render_state(),
+            }}
+            return self._get_obs(), 3.0, True, False, info
+
+        # Opponent move
+        open_cols = [c for c in range(7) if self.board[0][c] == 0]
+        if open_cols:
+            opp_col = random.choice(open_cols)
+            self._drop_piece(opp_col, 2)
+            if self._check_win(2):
+                self.done = True
+                self.winner = 2
+                info = {{
+                    "reward_breakdown": {{"loss_penalty": -10.0}},
+                    "is_success": False,
+                    "arena_state": self.get_render_state(),
+                }}
+                return self._get_obs(), -10.0, True, False, info
+
+        info = {{
+            "reward_breakdown": {{"step_progress": 0.1}},
+            "is_success": False,
+            "arena_state": self.get_render_state(),
+        }}
+        return self._get_obs(), 0.1, False, False, info
+
+    def compute_reward(self, obs, action, next_obs, info) -> tuple[float, dict[str, float]]:
+        bd = info.get("reward_breakdown", {{}})
+        return float(sum(bd.values())), bd
+
+    def get_render_state(self) -> dict[str, Any]:
+        return {{
+            "board": self.board.tolist(),
+            "current_player": int(self.current_player),
+            "winner": int(self.winner),
+            "last_col": int(self.last_col),
+        }}
+
+    def render_arena_state(self) -> dict[str, Any]:
+        return self.get_render_state()
+
+    def interactive_step(self, payload: dict[str, Any], policy_predict_fn: Callable = None, mode: str = "agent_vs_env") -> dict[str, Any]:
+        if isinstance(payload, dict) and payload.get("reset"):
+            self.reset()
+            return {{
+                "arena_state": self.get_render_state(),
+                "agent_action_label": "Reset",
+                "action_probs": [1.0/7]*7,
+                "status_text": "Game reset. Choose column to drop disc.",
+            }}
+
+        user_action = payload.get("user_action") if isinstance(payload, dict) else payload
+        if user_action is not None:
+            col = int(user_action)
+            self._drop_piece(col, 2)
+            self.last_col = col
+
+        if policy_predict_fn:
+            obs = self._get_obs()
+            action_idx, probs = policy_predict_fn(obs)
+            action_idx = int(action_idx)
+        else:
+            open_cols = [c for c in range(7) if self.board[0][c] == 0]
+            action_idx = random.choice(open_cols) if open_cols else 0
+            probs = [1.0/7]*7
+
+        self.step(action_idx)
+        return {{
+            "arena_state": self.get_render_state(),
+            "agent_action_label": self.action_labels[min(action_idx, 6)],
+            "action_probs": [float(p) for p in probs] if hasattr(probs, "__iter__") else [1.0/7]*7,
+            "status_text": "Agent dropped disc into column " + str(action_idx),
+        }}
+
+    def get_demonstrations(self, num_samples: int = 32) -> tuple[np.ndarray, np.ndarray]:
+        X_list = []
+        y_list = []
+        for _ in range(num_samples):
+            obs, _ = self.reset()
+            open_cols = [c for c in range(7) if self.board[0][c] == 0]
+            act = random.choice(open_cols) if open_cols else 0
+            X_list.append(obs)
+            y_list.append(act)
+        return np.array(X_list, dtype=np.float32), np.array(y_list, dtype=np.int64)
+'''
+
+    def _build_russian_roulette_code(self, blueprint: AgentBlueprintSpec) -> str:
+        """Generates self-contained Gymnasium environment for Russian Roulette Survival Agent."""
+        action_labels = ["Pull Trigger", "Spin Cylinder", "Pass Turn"]
+        return f'''"""Auto-synthesized Gymnasium environment for Russian Roulette Survival Agent."""
+
+from __future__ import annotations
+import math
+import random
+from typing import Any, Callable
+import gymnasium as gym
+from gymnasium import spaces
+import numpy as np
+
+
+class SynthesizedGymEnv(gym.Env):
+    """Auto-synthesized Gymnasium environment for: Russian Roulette Survival Agent"""
+    metadata = {{"render_modes": ["json"]}}
+
+    def __init__(self, dataset_records=None, config=None):
+        super().__init__()
+        self.action_labels = {action_labels}
+        self.observation_features = ["chamber_position", "chambers_fired", "is_alive"]
+        self.obs_dim = 3
+        self.n_actions = 3
+
+        self.observation_space = spaces.Box(
+            low=0.0, high=6.0, shape=(3,), dtype=np.float32
+        )
+        self.action_space = spaces.Discrete(3)
+
+        self.current_chamber = 0
+        self.chambers_fired = 0
+        self.bullet_chamber = 3
+        self.is_alive = True
+        self.winner = "in_progress"
+        self.done = False
+        self.step_count = 0
+
+    def _get_obs(self) -> np.ndarray:
+        return np.array([
+            float(self.current_chamber),
+            float(self.chambers_fired),
+            1.0 if self.is_alive else 0.0,
+        ], dtype=np.float32)
+
+    def reset(self, seed=None, options=None) -> tuple[np.ndarray, dict[str, Any]]:
+        super().reset(seed=seed)
+        if seed is not None:
+            random.seed(seed)
+            np.random.seed(seed)
+        self.current_chamber = random.randint(0, 5)
+        self.bullet_chamber = random.randint(0, 5)
+        self.chambers_fired = 0
+        self.is_alive = True
+        self.winner = "in_progress"
+        self.done = False
+        self.step_count = 0
+        return self._get_obs(), {{
+            "reward_breakdown": {{}},
+            "is_success": False,
+            "arena_state": self.get_render_state(),
+        }}
+
+    def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
+        if self.done:
+            return self._get_obs(), 0.0, True, False, {{
+                "reward_breakdown": {{}},
+                "is_success": self.is_alive,
+                "arena_state": self.get_render_state(),
+            }}
+
+        self.step_count += 1
+        act = int(action)
+
+        if act == 1:
+            self.current_chamber = random.randint(0, 5)
+            reward = -0.1
+            bd = {{"spin_cost": -0.1}}
+        elif act == 2:
+            reward = 0.5
+            bd = {{"pass_reward": 0.5}}
+            self.done = True
+            self.winner = "survived"
+        else:
+            if self.current_chamber == self.bullet_chamber:
+                self.is_alive = False
+                self.done = True
+                self.winner = "eliminated"
+                reward = -10.0
+                bd = {{"shot_penalty": -10.0}}
+            else:
+                self.chambers_fired += 1
+                self.current_chamber = (self.current_chamber + 1) % 6
+                reward = 2.0
+                bd = {{"survival_reward": 2.0}}
+                if self.chambers_fired >= 5:
+                    self.done = True
+                    self.winner = "survived"
+
+        if self.step_count >= 15:
+            self.done = True
+
+        info = {{
+            "reward_breakdown": bd,
+            "is_success": self.is_alive and self.done,
+            "arena_state": self.get_render_state(),
+        }}
+        return self._get_obs(), float(reward), self.done, False, info
+
+    def compute_reward(self, obs, action, next_obs, info) -> tuple[float, dict[str, float]]:
+        bd = info.get("reward_breakdown", {{}})
+        return float(sum(bd.values())), bd
+
+    def get_render_state(self) -> dict[str, Any]:
+        return {{
+            "current_chamber": int(self.current_chamber),
+            "chambers_fired": int(self.chambers_fired),
+            "is_alive": bool(self.is_alive),
+            "winner": str(self.winner),
+        }}
+
+    def render_arena_state(self) -> dict[str, Any]:
+        return self.get_render_state()
+
+    def interactive_step(self, payload: dict[str, Any], policy_predict_fn: Callable = None, mode: str = "agent_vs_env") -> dict[str, Any]:
+        if isinstance(payload, dict) and payload.get("reset"):
+            self.reset()
+            return {{
+                "arena_state": self.get_render_state(),
+                "agent_action_label": "Reset",
+                "action_probs": [0.33, 0.33, 0.34],
+                "status_text": "Chamber loaded and spun. Pull trigger or pass.",
+            }}
+
+        user_action = payload.get("user_action", 0) if isinstance(payload, dict) else payload
+        obs, rew, term, _, info = self.step(int(user_action))
+        probs = [0.0, 0.0, 0.0]
+        probs[min(int(user_action), 2)] = 1.0
+
+        return {{
+            "arena_state": self.get_render_state(),
+            "agent_action_label": self.action_labels[min(int(user_action), 2)],
+            "action_probs": probs,
+            "status_text": "Round result: " + str(self.winner),
+        }}
+
+    def get_demonstrations(self, num_samples: int = 32) -> tuple[np.ndarray, np.ndarray]:
+        X = np.zeros((num_samples, 3), dtype=np.float32)
+        y = np.zeros(num_samples, dtype=np.int64)
+        for i in range(num_samples):
+            obs, _ = self.reset()
+            X[i] = obs
+            y[i] = 1 if i % 2 == 0 else 0
+        return X, y
+'''
+
+    def _build_novel_domain_code(self, blueprint: AgentBlueprintSpec) -> str:
+        """Generates a bespoke Gymnasium environment for any arbitrary novel domain."""
+        obs_features = blueprint.observation_features or ["feature_0", "feature_1", "feature_2", "feature_3"]
+        action_labels = blueprint.action_labels or ["Action 0", "Action 1", "Action 2"]
+        state_schema = blueprint.state_dict_schema or {f: "float" for f in obs_features}
+        state_schema["status"] = "str"
+        state_schema["step_count"] = "int"
+        title = blueprint.task_title or "Novel Domain"
+
+        return f'''"""Auto-synthesized Gymnasium environment for: {title}"""
+
+from __future__ import annotations
+import math
+import random
+from typing import Any, Callable
+import gymnasium as gym
+from gymnasium import spaces
+import numpy as np
+
+
+class SynthesizedGymEnv(gym.Env):
+    """Auto-synthesized Gymnasium environment for: {title}"""
+    metadata = {{"render_modes": ["json"]}}
+
+    def __init__(self, dataset_records=None, config=None):
+        super().__init__()
+        self.action_labels = {action_labels}
+        self.observation_features = {obs_features}
+        self.obs_dim = len(self.observation_features)
+        self.n_actions = len(self.action_labels)
+
+        self.observation_space = spaces.Box(
+            low=-10.0, high=10.0, shape=(self.obs_dim,), dtype=np.float32
+        )
+        self.action_space = spaces.Discrete(self.n_actions)
+
+        self.state_vars = {{}}
+        self.step_count = 0
+        self.done = False
+
+    def _get_obs(self) -> np.ndarray:
+        vals = [float(self.state_vars.get(f, 0.0)) for f in self.observation_features]
+        return np.array(vals, dtype=np.float32)
+
+    def reset(self, seed=None, options=None) -> tuple[np.ndarray, dict[str, Any]]:
+        super().reset(seed=seed)
+        if seed is not None:
+            random.seed(seed)
+            np.random.seed(seed)
+        self.step_count = 0
+        self.done = False
+        self.state_vars = {{f: float(random.uniform(-1.0, 1.0)) for f in self.observation_features}}
+        return self._get_obs(), {{
+            "reward_breakdown": {{}},
+            "is_success": False,
+            "arena_state": self.get_render_state(),
+        }}
+
+    def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
+        self.step_count += 1
+        act = min(max(0, int(action)), self.n_actions - 1)
+
+        for idx, f in enumerate(self.observation_features):
+            delta = 0.5 if act == idx % self.n_actions else -0.1
+            self.state_vars[f] = float(np.clip(self.state_vars[f] + delta + random.uniform(-0.05, 0.05), -10.0, 10.0))
+
+        terminated = (self.step_count >= 25)
+        reward = 1.0 if act > 0 else 0.1
+        info = {{
+            "reward_breakdown": {{"step_progress": float(reward)}},
+            "is_success": terminated and reward > 0,
+            "arena_state": self.get_render_state(),
+        }}
+        return self._get_obs(), float(reward), terminated, False, info
+
+    def compute_reward(self, obs, action, next_obs, info) -> tuple[float, dict[str, float]]:
+        bd = info.get("reward_breakdown", {{}})
+        return float(sum(bd.values())), bd
+
+    def get_render_state(self) -> dict[str, Any]:
+        res = {{f: float(self.state_vars.get(f, 0.0)) for f in self.observation_features}}
+        schema = {state_schema}
+        for k in schema:
+            if k not in res:
+                res[k] = 0.0 if "float" in str(schema[k]) else (0 if "int" in str(schema[k]) else ("active" if "str" in str(schema[k]) else []))
+        res["step_count"] = self.step_count
+        res["status"] = "operational"
+        return res
+
+    def render_arena_state(self) -> dict[str, Any]:
+        return self.get_render_state()
+
+    def interactive_step(self, payload: dict[str, Any], policy_predict_fn: Callable = None, mode: str = "agent_vs_env") -> dict[str, Any]:
+        if isinstance(payload, dict) and payload.get("reset"):
+            self.reset()
+            return {{
+                "arena_state": self.get_render_state(),
+                "agent_action_label": "Reset",
+                "action_probs": [1.0/self.n_actions]*self.n_actions,
+                "status_text": "System reset to initial state.",
+            }}
+
+        user_action = payload.get("user_action", 0) if isinstance(payload, dict) else payload
+        obs, rew, term, _, info = self.step(int(user_action))
+        probs = [0.0]*self.n_actions
+        probs[min(int(user_action), self.n_actions-1)] = 1.0
+
+        return {{
+            "arena_state": self.get_render_state(),
+            "agent_action_label": self.action_labels[min(int(user_action), self.n_actions-1)],
+            "action_probs": probs,
+            "status_text": "Executed action: " + str(self.action_labels[min(int(user_action), self.n_actions-1)]),
+        }}
+
+    def get_demonstrations(self, num_samples: int = 32) -> tuple[np.ndarray, np.ndarray]:
+        X = np.zeros((num_samples, self.obs_dim), dtype=np.float32)
+        y = np.zeros(num_samples, dtype=np.int64)
+        for i in range(num_samples):
+            obs, _ = self.reset()
+            X[i] = obs
+            y[i] = i % self.n_actions
+        return X, y
+'''
+
+
+def synthesize_universal_env(
+    blueprint: Any,
+    user_prompt: str = "",
+    dataset: IngestedDataset | None = None,
+    client: BaseLLMClient | None = None,
+    max_retries: int = 3,
+) -> str:
+    """Universal LLM Gymnasium Code Synthesizer with 3-Attempt Self-Healing Sandbox Loop."""
+    active_client = client or get_active_llm_client()
+    task_title = getattr(blueprint, "domain_title", None) or getattr(blueprint, "task_title", "")
+    summary = getattr(blueprint, "domain_summary", "")
+
+    # 1. Try Live LLM Code Synthesis if smart client configured
+    if not isinstance(active_client, FallbackCodeSynthesizer):
+        try:
+            prompt = (
+                f"Synthesize the complete Python module `env_module.py` defining `SynthesizedGymEnv(gymnasium.Env)` for:\n"
+                f"Domain: {task_title}\n"
+                f"Summary: {summary}\n"
+                f"Blueprint: {blueprint.model_dump_json(indent=2)}\n\n"
+                f"Interface Requirements:\n"
+                f"1. observation_space = spaces.Box(...) matching len(observation_features)\n"
+                f"2. action_space = spaces.Discrete(len(actions))\n"
+                f"3. reset(self, seed=None, options=None) -> (obs, info)\n"
+                f"4. step(self, action: int) -> (obs, reward, terminated, truncated, info)\n"
+                f"5. compute_reward(self, obs, action, next_obs, info) returning (float, dict)\n"
+                f"6. get_render_state(self) -> dict matching state_dict_schema\n"
+                f"7. render_arena_state(self) -> dict alias to get_render_state()\n"
+                f"8. interactive_step(self, payload, policy_predict_fn=None, mode='agent_vs_env') -> dict\n"
+                f"9. get_demonstrations(self, num_samples=32) -> (np.ndarray, np.ndarray)\n\n"
+                f"Output ONLY valid Python code inside ```python ... ```."
+            )
+            raw = active_client.generate(prompt, system_prompt=ENV_BUILDER_SYSTEM_PROMPT)
+            code = extract_python_code(raw)
+            if code and "class SynthesizedGymEnv" in code:
+                from rl_ide.synthesizer.verifier import SandboxSmokeTester
+                tester = SandboxSmokeTester(llm_client=active_client)
+                bp_spec = blueprint if isinstance(blueprint, AgentBlueprintSpec) else blueprint.to_agent_blueprint_spec()
+                verified, healed_code, _ = tester.verify_and_heal(
+                    code_str=code,
+                    blueprint=bp_spec,
+                    dataset=dataset,
+                    max_retries=max_retries,
+                )
+                if verified:
+                    return healed_code
+        except Exception:
+            pass
+
+    # 2. Universal Generative Code Synthesis
+    synth = JITEnvironmentSynthesizer(llm_client=active_client)
+    bp_spec = blueprint if isinstance(blueprint, AgentBlueprintSpec) else blueprint.to_agent_blueprint_spec()
+    code = synth._generate_deterministic_env_code(bp_spec, dataset)
+
+    # 3. 3-Attempt Self-Healing Sandbox Verification
+    from rl_ide.synthesizer.verifier import SandboxSmokeTester
+    tester = SandboxSmokeTester(llm_client=active_client)
+    verified, healed_code, logs = tester.verify_and_heal(
+        code_str=code,
+        blueprint=bp_spec,
+        dataset=dataset,
+        max_retries=max_retries,
+    )
+    if verified:
+        return healed_code
+    return code

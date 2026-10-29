@@ -15,7 +15,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from rl_ide.architect.models import AgentBlueprintSpec
+from rl_ide.architect.models import AgentBlueprintSpec, DynamicTaskBlueprint
 from rl_ide.architect.intake import is_tictactoe_spec, is_blackjack_spec
 from rl_ide.llm.client import BaseLLMClient, create_llm_client, FallbackCodeSynthesizer, get_active_llm_client
 from rl_ide.llm.prompts import ARENA_SYNTHESIZER_SYSTEM_PROMPT, ARENA_BUILDER_SYSTEM_PROMPT
@@ -88,6 +88,63 @@ def validate_arena_html_scripts(html_text: str) -> bool:
             except Exception:
                 pass
     return True
+
+
+def synthesize_universal_arena_html(
+    blueprint: AgentBlueprintSpec | DynamicTaskBlueprint,
+    sample_render_state: dict[str, Any] | None = None,
+    visual_style: str | None = None,
+    client: BaseLLMClient | None = None,
+) -> str:
+    """Universal Generative Arena UI Synthesizer.
+
+    Generates a bespoke, interactive HTML5/SVG/Canvas/Tailwind Arena component
+    bound directly to the blueprint's visual metaphor, actions, and state_dict_schema.
+    Zero hardcoded fallback to 2D Rover.
+    """
+    bp_spec = blueprint.to_agent_blueprint_spec() if hasattr(blueprint, "to_agent_blueprint_spec") else blueprint
+    active_client = client or get_active_llm_client()
+
+    # 1. Try Live LLM UI generation if configured and not FallbackCodeSynthesizer
+    if not isinstance(active_client, FallbackCodeSynthesizer):
+        try:
+            visual_desc = getattr(blueprint, "visual_metaphor", None) or bp_spec.arena_visual_description or "Dynamic Simulation Arena"
+            actions_list = bp_spec.action_labels
+            schema = getattr(blueprint, "state_dict_schema", {})
+            prompt = (
+                f"You are the Universal Generative Arena UI Synthesizer.\n"
+                f"Generate a complete, self-contained interactive `arena.html` for:\n"
+                f"Domain Title: {bp_spec.task_title}\n"
+                f"Visual Metaphor: {visual_desc}\n"
+                f"Actions: {json.dumps(actions_list)}\n"
+                f"State Dictionary Schema: {json.dumps(schema)}\n"
+                f"Sample Render State from Environment: {json.dumps(sample_render_state or {}, default=str)}\n"
+                f"Visual Style Request: {visual_style or 'Default sleek dark-mode'}\n\n"
+                f"STRICT REQUIREMENTS:\n"
+                f"1. Render the domain's true visual metaphor directly from the keys in `sample_render_state`.\n"
+                f"2. Never use a 2D rover canvas unless the domain is explicitly a rover navigation task.\n"
+                f"3. Render interactive buttons/controls for each action that call `sendInteractiveAction(actionIdx)`.\n"
+                f"4. Include `renderDomainState(state)` to update DOM/Canvas/SVG from live state.\n"
+                f"5. Include `startMockAnimationLoop()` and `stepMockDomain()` for instant preview.\n"
+                f"6. Support `ARENA_UPDATE`, `SET_ARENA_MODE`, and postMessage bridges.\n"
+                f"7. Return ONLY valid HTML inside ```html ... ```."
+            )
+            raw = active_client.generate(prompt, system_prompt=ARENA_BUILDER_SYSTEM_PROMPT, timeout=35.0)
+            html = extract_html_code(raw)
+            if html and "ARENA_UPDATE" in html and "startMockAnimationLoop" in html and ("<html" in html.lower() or "<!doctype html" in html.lower()):
+                healed = heal_arena_html_scripts(html)
+                if validate_arena_html_scripts(healed):
+                    return healed
+        except Exception:
+            pass
+
+    # 2. Deterministic generator with bespoke templates for known domains and dynamic universal novel stage
+    synthesizer = JITArenaSynthesizer(active_client)
+    return synthesizer._generate_deterministic_arena_html(
+        blueprint=bp_spec,
+        sample_arena_state=sample_render_state,
+        visual_style=visual_style,
+    )
 
 
 class JITArenaSynthesizer:
@@ -165,25 +222,17 @@ class JITArenaSynthesizer:
 
     def generate_arena_html(
         self,
-        blueprint: AgentBlueprintSpec,
+        blueprint: AgentBlueprintSpec | DynamicTaskBlueprint,
         sample_arena_state: dict[str, Any] | None = None,
         visual_style: str | None = None,
     ) -> str:
-        """Synthesizes HTML code using LLM or deterministic template."""
-        if not visual_style:
-            return self._generate_deterministic_arena_html(blueprint, sample_arena_state, visual_style=visual_style)
-
-        if not isinstance(self.client, FallbackCodeSynthesizer):
-            try:
-                html = self._call_llm_arena_gen(blueprint, sample_arena_state)
-                if html and "ARENA_UPDATE" in html and "startMockAnimationLoop" in html and ("<html" in html.lower() or "<!doctype html" in html.lower()):
-                    healed = heal_arena_html_scripts(html)
-                    if validate_arena_html_scripts(healed):
-                        return healed
-            except Exception:
-                pass
-
-        return self._generate_deterministic_arena_html(blueprint, sample_arena_state, visual_style=visual_style)
+        """Synthesizes HTML code using Universal Generative UI pipeline."""
+        return synthesize_universal_arena_html(
+            blueprint=blueprint,
+            sample_render_state=sample_arena_state,
+            visual_style=visual_style,
+            client=self.client,
+        )
 
     def _call_llm_arena_gen(
         self,
@@ -226,13 +275,29 @@ class JITArenaSynthesizer:
             )
         ) and not is_tictactoe
 
+        is_connect4 = any(
+            kw in task_title.lower() or kw in style_query
+            for kw in ["connect 4", "connect-4", "connect four", "connect4", "7 columns", "7 column"]
+        ) and not is_tictactoe and not is_blackjack
+
+        is_roulette = any(
+            kw in task_title.lower() or kw in style_query
+            for kw in ["russian roulette", "roulette", "revolver", "cylinder", "chamber"]
+        ) and not is_tictactoe and not is_blackjack and not is_connect4
+
+        # Zero Fallback to Rover: ONLY match rover if explicitly requested
+        is_rover = any(
+            kw in task_title.lower() or kw in style_query
+            for kw in ["rover", "waypoint"]
+        ) and not is_tictactoe and not is_blackjack and not is_connect4 and not is_roulette
+
         has_scoreboard = "scoreboard" in style_query or "score" in style_query
         has_gold = "gold" in style_query or "golden" in style_query
         has_badge = "victory badge" in style_query or "badge" in style_query or "victory" in style_query
         has_larger = "larger" in style_query or "bigger" in style_query or "large" in style_query
         has_arcade = "arcade" in style_query or "retro" in style_query or "cyber" in style_query
         has_radar = "radar" in style_query or "hud" in style_query
-        is_energy = any(kw in task_title.lower() or kw in style_query for kw in ["solar", "tariff", "power-flow", "arbitrage"]) or ("battery" in (task_title.lower() + style_query) and not any(kw in task_title.lower() for kw in ["rover", "robot", "amr", "warehouse", "navigation"]))
+        is_energy = (any(kw in task_title.lower() or kw in style_query for kw in ["solar", "tariff", "power-flow", "arbitrage"]) or ("battery" in (task_title.lower() + style_query) and not any(kw in task_title.lower() for kw in ["rover", "robot", "amr", "warehouse", "navigation"]))) and not is_connect4 and not is_roulette
         has_hipaa = "hipaa" in style_query or "boundary" in style_query
         has_abnormal_red = "abnormal" in style_query or "red" in style_query or "vital" in style_query
         has_burn_rate = "burn-rate" in style_query or "$/hour" in style_query or "burn rate" in style_query or "cloud burn" in style_query
@@ -1026,90 +1091,380 @@ class JITArenaSynthesizer:
             }}
             """
         else:
-            domain_html = f"""
-            {victory_badge_html}
-            {scoreboard_html}
-            <!-- 2D Canvas Physics / Navigation -->
-            <div class="flex flex-col items-center justify-center py-4">
-              <canvas id="sim-canvas" width="440" height="320" class="bg-slate-900 border {border_accent} rounded-2xl shadow-2xl cursor-crosshair"></canvas>
-              <div class="text-xs text-slate-500 mt-2">Click anywhere on canvas to deploy interactive waypoint target</div>
-            </div>
-            """
-            domain_js = """
-            const canvas = document.getElementById('sim-canvas');
-            const ctx = canvas ? canvas.getContext('2d') : null;
-
-            if (canvas) {
-              canvas.addEventListener('click', (e) => {
-                const rect = canvas.getBoundingClientRect();
-                const x = ((e.clientX - rect.left) / canvas.width) * 16 - 8;
-                const y = ((e.clientY - rect.top) / canvas.height) * 16 - 8;
-                sendInteraction({ target_pos: [x, y] });
-              });
-            }
-
-            function toScreen(x, y) {
-              return [
-                ((x + 8) / 16) * canvas.width,
-                ((y + 8) / 16) * canvas.height
-              ];
-            }
-
-            function renderDomainState(state) {
-              if (!ctx || !state) return;
-              ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-              // Grid lines
-              ctx.strokeStyle = '#1e293b';
-              ctx.lineWidth = 1;
-              for (let i = 0; i < canvas.width; i += 40) {
-                ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i, canvas.height); ctx.stroke();
-              }
-              for (let j = 0; j < canvas.height; j += 40) {
-                ctx.beginPath(); ctx.moveTo(0, j); ctx.lineTo(canvas.width, j); ctx.stroke();
-              }
-
-              // Draw Target
-              if (state.target_pos) {
-                const [tx, ty] = toScreen(state.target_pos[0], state.target_pos[1]);
-                ctx.fillStyle = '#10b981';
-                ctx.beginPath();
-                ctx.arc(tx, ty, 8, 0, Math.PI * 2);
-                ctx.fill();
-              }
-
-              // Draw Agent
-              if (state.agent_pos) {
-                const [ax, ay] = toScreen(state.agent_pos[0], state.agent_pos[1]);
-                ctx.fillStyle = '#38bdf8';
-                ctx.beginPath();
-                ctx.arc(ax, ay, 10, 0, Math.PI * 2);
-                ctx.fill();
-              }
-            }
-
-            let mockT = 0;
-            function stepMockDomain() {
-              mockT += 0.15;
-              const ax = Math.sin(mockT) * 4.5;
-              const ay = Math.cos(mockT * 0.7) * 3.5;
-              const tx = 5.0;
-              const ty = 4.0;
-              const dist = Math.hypot(ax - tx, ay - ty);
-
-              applyArenaPayload({
-                episode_id: 'MOCK-SIM',
-                step: Math.floor(mockT * 5),
-                total_reward: (-dist).toFixed(2),
-                reward_breakdown: { distance_reward: (-dist * 0.2).toFixed(2), velocity_cost: -0.05 },
-                action_probs: [0.35, 0.25, 0.2, 0.2],
-                arena_state: {
-                  agent_pos: [ax, ay],
-                  target_pos: [tx, ty]
+            # Check for domain-specific visual templates before falling back to bespoke universal stage
+            if is_connect4:
+                domain_html = f"""
+                {victory_badge_html}
+                {scoreboard_html}
+                <!-- Connect-4 7x6 Drop Grid Stage -->
+                <div class="flex flex-col items-center justify-center py-4 w-full max-w-xl mx-auto">
+                  <div class="bg-blue-900 border-4 border-blue-700 rounded-3xl p-6 shadow-2xl flex flex-col items-center w-full">
+                    <div class="flex justify-between items-center w-full mb-4 px-2">
+                      <div class="text-xs uppercase tracking-wider text-blue-200 font-bold font-mono">Connect 4 Stage</div>
+                      <div id="c4-status-badge" class="px-3 py-1 bg-blue-950 text-blue-300 border border-blue-600/60 rounded-full text-xs font-mono">Your Turn (Yellow)</div>
+                    </div>
+                    <!-- Column Drop Buttons -->
+                    <div class="grid grid-cols-7 gap-2 w-full mb-3 px-2">
+                      <button onclick="dropDisc(0)" class="py-1.5 bg-blue-800 hover:bg-blue-600 text-blue-100 rounded-lg text-xs font-bold transition shadow">⬇ 0</button>
+                      <button onclick="dropDisc(1)" class="py-1.5 bg-blue-800 hover:bg-blue-600 text-blue-100 rounded-lg text-xs font-bold transition shadow">⬇ 1</button>
+                      <button onclick="dropDisc(2)" class="py-1.5 bg-blue-800 hover:bg-blue-600 text-blue-100 rounded-lg text-xs font-bold transition shadow">⬇ 2</button>
+                      <button onclick="dropDisc(3)" class="py-1.5 bg-blue-800 hover:bg-blue-600 text-blue-100 rounded-lg text-xs font-bold transition shadow">⬇ 3</button>
+                      <button onclick="dropDisc(4)" class="py-1.5 bg-blue-800 hover:bg-blue-600 text-blue-100 rounded-lg text-xs font-bold transition shadow">⬇ 4</button>
+                      <button onclick="dropDisc(5)" class="py-1.5 bg-blue-800 hover:bg-blue-600 text-blue-100 rounded-lg text-xs font-bold transition shadow">⬇ 5</button>
+                      <button onclick="dropDisc(6)" class="py-1.5 bg-blue-800 hover:bg-blue-600 text-blue-100 rounded-lg text-xs font-bold transition shadow">⬇ 6</button>
+                    </div>
+                    <!-- 7x6 Slots Grid (42 circular slots) -->
+                    <div id="c4-grid" class="grid grid-cols-7 gap-2.5 bg-blue-950/80 p-3.5 rounded-2xl border border-blue-800"></div>
+                  </div>
+                </div>
+                """
+                domain_js = """
+                const c4Grid = document.getElementById('c4-grid');
+                if (c4Grid) {
+                  let slotsHtml = '';
+                  for (let r = 0; r < 6; r++) {
+                    for (let c = 0; c < 7; c++) {
+                      slotsHtml += `<div id="slot-${r}-${c}" class="w-8 h-8 sm:w-10 sm:h-10 rounded-full bg-slate-900 border-2 border-blue-800 transition-all duration-200"></div>`;
+                    }
+                  }
+                  c4Grid.innerHTML = slotsHtml;
                 }
-              });
-            }
-            """
+
+                function dropDisc(col) {
+                  sendInteraction({ action: col, user_action: col });
+                }
+
+                function renderDomainState(state) {
+                  if (!state) return;
+                  const badge = document.getElementById('c4-status-badge');
+                  if (badge && state.winner !== undefined) {
+                    if (state.winner === 1) badge.innerText = 'Yellow Wins!';
+                    else if (state.winner === 2) badge.innerText = 'Red (Agent) Wins!';
+                    else if (state.winner === 3) badge.innerText = 'Draw Match!';
+                    else badge.innerText = state.current_player === 1 ? 'Your Turn (Yellow)' : 'Agent Thinking (Red)...';
+                  }
+                  if (state.board && Array.isArray(state.board)) {
+                    for (let r = 0; r < 6; r++) {
+                      for (let c = 0; c < 7; c++) {
+                        const slot = document.getElementById(`slot-${r}-${c}`);
+                        if (!slot) continue;
+                        const val = state.board[r] ? state.board[r][c] : 0;
+                        if (val === 1) {
+                          slot.className = 'w-8 h-8 sm:w-10 sm:h-10 rounded-full bg-yellow-400 border-2 border-yellow-200 shadow-md transition-all duration-200';
+                        } else if (val === 2 || val === -1) {
+                          slot.className = 'w-8 h-8 sm:w-10 sm:h-10 rounded-full bg-rose-500 border-2 border-rose-300 shadow-md transition-all duration-200';
+                        } else {
+                          slot.className = 'w-8 h-8 sm:w-10 sm:h-10 rounded-full bg-slate-900 border-2 border-blue-800 transition-all duration-200';
+                        }
+                      }
+                    }
+                  }
+                }
+
+                let mockC4Board = Array(6).fill(null).map(() => Array(7).fill(0));
+                let mockC4Step = 0;
+                function stepMockDomain() {
+                  mockC4Step++;
+                  const col = Math.floor(Math.random() * 7);
+                  for (let r = 5; r >= 0; r--) {
+                    if (mockC4Board[r][col] === 0) {
+                      mockC4Board[r][col] = (mockC4Step % 2 === 0) ? 1 : 2;
+                      break;
+                    }
+                  }
+                  if (mockC4Step % 18 === 0) {
+                    mockC4Board = Array(6).fill(null).map(() => Array(7).fill(0));
+                  }
+                  applyArenaPayload({
+                    episode_id: 'MOCK-C4',
+                    step: mockC4Step,
+                    total_reward: (mockC4Step * 0.5).toFixed(1),
+                    reward_breakdown: { alignment_potential: 0.8, center_control: 0.4 },
+                    action_probs: [0.1, 0.15, 0.2, 0.3, 0.15, 0.05, 0.05],
+                    arena_state: {
+                      board: mockC4Board,
+                      current_player: (mockC4Step % 2 === 0) ? 1 : 2,
+                      winner: 0
+                    }
+                  });
+                }
+                """
+            elif is_roulette:
+                domain_html = f"""
+                {victory_badge_html}
+                {scoreboard_html}
+                <!-- Russian Roulette Revolver Chamber Stage -->
+                <div class="flex flex-col items-center justify-center py-4 w-full max-w-lg mx-auto">
+                  <div class="bg-zinc-900 border border-zinc-700 rounded-3xl p-6 shadow-2xl flex flex-col items-center w-full">
+                    <div class="flex justify-between items-center w-full mb-4 px-2">
+                      <div class="text-xs uppercase tracking-wider text-zinc-400 font-bold font-mono">Revolver Cylinder Stage</div>
+                      <div id="roulette-badge" class="px-3 py-1 bg-amber-950/80 text-amber-300 border border-amber-700/60 rounded-full text-xs font-mono">Chamber 0 / 6 Ready</div>
+                    </div>
+                    <!-- Revolver Cylinder Visualizer -->
+                    <div class="relative w-48 h-48 rounded-full border-4 border-zinc-600 bg-zinc-800 flex items-center justify-center shadow-inner my-3">
+                      <div id="revolver-cylinder" class="relative w-40 h-40 rounded-full border-2 border-zinc-700 bg-zinc-900 transition-transform duration-500 flex items-center justify-center">
+                        <div id="chamber-0" class="absolute w-8 h-8 rounded-full bg-zinc-800 border-2 border-zinc-600 top-2 left-16 flex items-center justify-center text-[10px] font-mono text-zinc-400">0</div>
+                        <div id="chamber-1" class="absolute w-8 h-8 rounded-full bg-zinc-800 border-2 border-zinc-600 top-8 right-2 flex items-center justify-center text-[10px] font-mono text-zinc-400">1</div>
+                        <div id="chamber-2" class="absolute w-8 h-8 rounded-full bg-zinc-800 border-2 border-zinc-600 bottom-8 right-2 flex items-center justify-center text-[10px] font-mono text-zinc-400">2</div>
+                        <div id="chamber-3" class="absolute w-8 h-8 rounded-full bg-zinc-800 border-2 border-zinc-600 bottom-2 left-16 flex items-center justify-center text-[10px] font-mono text-zinc-400">3</div>
+                        <div id="chamber-4" class="absolute w-8 h-8 rounded-full bg-zinc-800 border-2 border-zinc-600 bottom-8 left-2 flex items-center justify-center text-[10px] font-mono text-zinc-400">4</div>
+                        <div id="chamber-5" class="absolute w-8 h-8 rounded-full bg-zinc-800 border-2 border-zinc-600 top-8 left-2 flex items-center justify-center text-[10px] font-mono text-zinc-400">5</div>
+                        <div class="w-8 h-8 rounded-full bg-zinc-700 border-2 border-zinc-500 shadow"></div>
+                      </div>
+                      <div class="absolute -top-3 w-4 h-6 bg-rose-600 rounded-t shadow-lg flex items-center justify-center text-[8px] text-white font-bold">▼</div>
+                    </div>
+                    <!-- Interactive Action Buttons -->
+                    <div class="flex flex-wrap gap-2 justify-center mt-4">
+                      <button onclick="sendInteractiveAction(0)" class="px-4 py-2 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-xs font-bold transition shadow">💥 Pull Trigger (0)</button>
+                      <button onclick="sendInteractiveAction(1)" class="px-4 py-2 bg-zinc-700 hover:bg-zinc-600 text-zinc-100 rounded-lg text-xs font-bold transition shadow">🔄 Spin Cylinder (1)</button>
+                      <button onclick="sendInteractiveAction(2)" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-bold transition shadow">⏭ Pass Turn (2)</button>
+                    </div>
+                  </div>
+                </div>
+                """
+                domain_js = """
+                function renderDomainState(state) {
+                  if (!state) return;
+                  const badge = document.getElementById('roulette-badge');
+                  const cyl = document.getElementById('revolver-cylinder');
+                  const chamber = state.current_chamber !== undefined ? state.current_chamber : (state.chamber_position || 0);
+                  if (badge) {
+                    if (state.is_alive === 0 || state.status === 'dead') {
+                      badge.innerText = '💀 BANG! Chamber fired!';
+                      badge.className = 'px-3 py-1 bg-rose-950 text-rose-300 border border-rose-700 rounded-full text-xs font-mono font-bold';
+                    } else {
+                      badge.innerText = `Chamber ${chamber} / 6 Ready — Alive`;
+                      badge.className = 'px-3 py-1 bg-emerald-950 text-emerald-300 border border-emerald-700 rounded-full text-xs font-mono';
+                    }
+                  }
+                  if (cyl) {
+                    const angle = chamber * 60;
+                    cyl.style.transform = `rotate(${angle}deg)`;
+                  }
+                }
+
+                let mockRouletteChamber = 0;
+                let mockRouletteStep = 0;
+                function stepMockDomain() {
+                  mockRouletteStep++;
+                  mockRouletteChamber = (mockRouletteChamber + 1) % 6;
+                  applyArenaPayload({
+                    episode_id: 'MOCK-ROULETTE',
+                    step: mockRouletteStep,
+                    total_reward: (mockRouletteStep * 1.5).toFixed(1),
+                    reward_breakdown: { survival_bonus: 1.0, risk_aversion: 0.5 },
+                    action_probs: [0.6, 0.2, 0.2],
+                    arena_state: {
+                      current_chamber: mockRouletteChamber,
+                      chamber_position: mockRouletteChamber,
+                      is_alive: 1,
+                      status: 'alive'
+                    }
+                  });
+                }
+                """
+            elif is_rover:
+                domain_html = f"""
+                {victory_badge_html}
+                {scoreboard_html}
+                <!-- 2D Canvas Physics / Navigation -->
+                <div class="flex flex-col items-center justify-center py-4">
+                  <canvas id="sim-canvas" width="440" height="320" class="bg-slate-900 border {border_accent} rounded-2xl shadow-2xl cursor-crosshair"></canvas>
+                  <div class="text-xs text-slate-500 mt-2">Click anywhere on canvas to deploy interactive waypoint target</div>
+                </div>
+                """
+                domain_js = """
+                const canvas = document.getElementById('sim-canvas');
+                const ctx = canvas ? canvas.getContext('2d') : null;
+
+                if (canvas) {
+                  canvas.addEventListener('click', (e) => {
+                    const rect = canvas.getBoundingClientRect();
+                    const x = ((e.clientX - rect.left) / canvas.width) * 16 - 8;
+                    const y = ((e.clientY - rect.top) / canvas.height) * 16 - 8;
+                    sendInteraction({ target_pos: [x, y] });
+                  });
+                }
+
+                function toScreen(x, y) {
+                  return [
+                    ((x + 8) / 16) * canvas.width,
+                    ((y + 8) / 16) * canvas.height
+                  ];
+                }
+
+                function renderDomainState(state) {
+                  if (!ctx || !state) return;
+                  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+                  // Grid lines
+                  ctx.strokeStyle = '#1e293b';
+                  ctx.lineWidth = 1;
+                  for (let i = 0; i < canvas.width; i += 40) {
+                    ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i, canvas.height); ctx.stroke();
+                  }
+                  for (let j = 0; j < canvas.height; j += 40) {
+                    ctx.beginPath(); ctx.moveTo(0, j); ctx.lineTo(canvas.width, j); ctx.stroke();
+                  }
+
+                  // Draw Target
+                  if (state.target_pos) {
+                    const [tx, ty] = toScreen(state.target_pos[0], state.target_pos[1]);
+                    ctx.fillStyle = '#10b981';
+                    ctx.beginPath();
+                    ctx.arc(tx, ty, 8, 0, Math.PI * 2);
+                    ctx.fill();
+                  }
+
+                  // Draw Agent
+                  if (state.agent_pos) {
+                    const [ax, ay] = toScreen(state.agent_pos[0], state.agent_pos[1]);
+                    ctx.fillStyle = '#38bdf8';
+                    ctx.beginPath();
+                    ctx.arc(ax, ay, 10, 0, Math.PI * 2);
+                    ctx.fill();
+                  }
+                }
+
+                let mockT = 0;
+                function stepMockDomain() {
+                  mockT += 0.15;
+                  const ax = Math.sin(mockT) * 4.5;
+                  const ay = Math.cos(mockT * 0.7) * 3.5;
+                  const tx = 5.0;
+                  const ty = 4.0;
+                  const dist = Math.hypot(ax - tx, ay - ty);
+
+                  applyArenaPayload({
+                    episode_id: 'MOCK-SIM',
+                    step: Math.floor(mockT * 5),
+                    total_reward: (-dist).toFixed(2),
+                    reward_breakdown: { distance_reward: (-dist * 0.2).toFixed(2), velocity_cost: -0.05 },
+                    action_probs: [0.35, 0.25, 0.2, 0.2],
+                    arena_state: {
+                      agent_pos: [ax, ay],
+                      target_pos: [tx, ty]
+                    }
+                  });
+                }
+                """
+            else:
+                # Universal Bespoke Novel Domain Stage (Zero Rover fallback!)
+                visual_metaphor_preview = getattr(blueprint, 'visual_metaphor', None) or getattr(blueprint, 'arena_visual_description', '') or 'Dynamic RL Simulation Stage'
+                
+                # Build initial telemetry cards dynamically from sample_arena_state or blueprint features
+                initial_cards = []
+                sample_keys = list(sample_arena_state.keys()) if sample_arena_state else ["system_status", "performance_idx", "cycle_step"]
+                for k in sample_keys[:6]:
+                    initial_val = sample_arena_state.get(k, 0.0) if sample_arena_state else 0.0
+                    disp_val = f"{float(initial_val):.2f}" if isinstance(initial_val, (int, float)) else str(initial_val)[:20]
+                    card = f"""
+                    <div class="bg-slate-950 border border-slate-800 p-2.5 rounded-xl flex flex-col justify-between">
+                      <span class="text-[10px] uppercase tracking-wider text-slate-500 font-mono truncate" title="{k}">{k}</span>
+                      <span id="val-{k}" class="text-sm font-bold text-cyan-400 font-mono mt-1">{disp_val}</span>
+                    </div>
+                    """
+                    initial_cards.append(card)
+                initial_cards_html = "".join(initial_cards)
+
+                # Build action buttons for blueprint actions
+                action_buttons = []
+                for idx, act in enumerate(blueprint.action_labels):
+                    btn = f"""
+                    <button onclick="sendInteractiveAction({idx})" class="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 hover:border-cyan-500/50 rounded-lg text-xs font-semibold transition shadow flex items-center gap-1.5">
+                      <span class="w-1.5 h-1.5 rounded-full bg-cyan-400"></span>
+                      <span>{act}</span>
+                      <span class="text-[10px] font-mono text-slate-500">({idx})</span>
+                    </button>
+                    """
+                    action_buttons.append(btn)
+                action_buttons_html = "".join(action_buttons)
+
+                domain_html = f"""
+                {victory_badge_html}
+                {scoreboard_html}
+                <!-- Universal Bespoke Domain Stage -->
+                <div class="flex flex-col items-center justify-center py-4 w-full max-w-2xl mx-auto space-y-4">
+                  <div class="w-full bg-slate-900 border {border_accent} rounded-2xl p-5 shadow-2xl">
+                    <div class="flex justify-between items-center pb-3 border-b border-slate-800">
+                      <div>
+                        <h2 class="text-sm font-bold text-slate-100">{task_title}</h2>
+                        <p class="text-xs text-slate-400 mt-0.5">{visual_metaphor_preview}</p>
+                      </div>
+                      <div id="universal-domain-badge" class="px-2.5 py-1 bg-cyan-950 text-cyan-300 border border-cyan-800/60 rounded-md text-xs font-mono">
+                        Active Telemetry
+                      </div>
+                    </div>
+
+                    <!-- Dynamic Telemetry Grid -->
+                    <div id="dynamic-telemetry-grid" class="grid grid-cols-2 sm:grid-cols-3 gap-3 py-4">
+                      {initial_cards_html}
+                    </div>
+
+                    <!-- Live State Inspection Feed -->
+                    <div class="pt-3 border-t border-slate-800/80">
+                      <div class="text-[10px] uppercase font-mono tracking-wider text-slate-500 mb-1.5">Live State Inspection Feed</div>
+                      <div id="domain-state-feed" class="bg-slate-950 border border-slate-800/60 rounded-xl p-3 text-xs font-mono text-slate-300 max-h-36 overflow-y-auto space-y-1">
+                        <span class="text-slate-500 italic">Connected to environment state stream...</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- Interactive Action Controls -->
+                  <div class="w-full">
+                    <div class="text-[10px] uppercase font-mono tracking-wider text-slate-500 mb-2 text-center">Interactive Domain Controls</div>
+                    <div class="flex flex-wrap gap-2 justify-center w-full">
+                      {action_buttons_html}
+                    </div>
+                  </div>
+                </div>
+                """
+
+                domain_js = """
+                function renderDomainState(state) {
+                  if (!state) return;
+                  const grid = document.getElementById('dynamic-telemetry-grid');
+                  const feed = document.getElementById('domain-state-feed');
+
+                  for (const [key, val] of Object.entries(state)) {
+                    let el = document.getElementById('val-' + key);
+                    const dispVal = (typeof val === 'number') ? Number(val).toFixed(2) : String(val);
+                    if (!el && grid) {
+                      const card = document.createElement('div');
+                      card.className = 'bg-slate-950 border border-slate-800 p-2.5 rounded-xl flex flex-col justify-between';
+                      card.innerHTML = `<span class="text-[10px] uppercase tracking-wider text-slate-500 font-mono truncate" title="${key}">${key}</span><span id="val-${key}" class="text-sm font-bold text-cyan-400 font-mono mt-1">${dispVal}</span>`;
+                      grid.appendChild(card);
+                    } else if (el) {
+                      el.innerText = dispVal;
+                    }
+                  }
+
+                  if (feed) {
+                    const timeStr = new Date().toLocaleTimeString();
+                    const summary = Object.entries(state).slice(0, 4).map(([k, v]) => `${k}=${typeof v === 'number' ? Number(v).toFixed(1) : v}`).join(' | ');
+                    feed.innerHTML = `<div class="truncate text-slate-300 font-mono text-[11px]"><span class="text-slate-500">[${timeStr}]</span> ${summary}</div>` + feed.innerHTML;
+                  }
+                }
+
+                let mockUniversalStep = 0;
+                function stepMockDomain() {
+                  mockUniversalStep++;
+                  const probs = ACTION_LABELS.map((_, i) => i === 0 ? 0.7 : 0.3 / Math.max(1, ACTION_LABELS.length - 1));
+                  const mockState = {
+                    step_count: mockUniversalStep,
+                    performance_index: (85.0 + Math.sin(mockUniversalStep * 0.3) * 10).toFixed(1),
+                    system_load_pct: (50.0 + Math.cos(mockUniversalStep * 0.4) * 25).toFixed(1)
+                  };
+                  applyArenaPayload({
+                    episode_id: 'MOCK-UNIV',
+                    step: mockUniversalStep,
+                    total_reward: (mockUniversalStep * 0.85).toFixed(2),
+                    reward_breakdown: { efficiency: (mockUniversalStep * 0.1).toFixed(2), objective_progress: 0.75 },
+                    action_probs: probs,
+                    arena_state: mockState
+                  });
+                }
+                """
 
         radar_hud_snippet = ""
         if has_radar:
@@ -1225,6 +1580,10 @@ class JITArenaSynthesizer:
           payload: payload
         }}, "*");
       }}
+    }}
+
+    function sendInteractiveAction(actionIdx) {{
+      sendInteraction({{ action: actionIdx, user_action: actionIdx }});
     }}
 
     function applyArenaPayload(data) {{

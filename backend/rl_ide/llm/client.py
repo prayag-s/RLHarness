@@ -307,23 +307,9 @@ class FallbackCodeSynthesizer(BaseLLMClient):
                         ]
                     }
                 else:
-                    spec = {
-                        "task_title": "Autonomous Decision Agent",
-                        "domain_summary": "Synthesized agent environment tailored to objective.",
-                        "data_source_type": "pure_simulation",
-                        "dataset_id": None,
-                        "observation_features": ["feature_0", "feature_1", "feature_2", "feature_3"],
-                        "action_labels": ["action_0", "action_1", "action_2"],
-                        "arena_visual_description": "Modern dark-mode 2D grid visualization with live value heatmaps.",
-                        "interactive_mode_description": "Interactive play session with user controls and live agent feedback.",
-                        "success_metric_name": "Success Rate (%)",
-                        "target_metric_threshold": 85.0,
-                        "max_auto_tune_rounds": 4,
-                        "initial_reward_components": [
-                            {"name": "goal_bonus", "weight": 10.0, "description": "Bonus for reaching goal state"},
-                            {"name": "step_cost", "weight": -0.1, "description": "Small penalty per step to encourage efficiency"}
-                        ]
-                    }
+                    from rl_ide.architect.intake import synthesize_blueprint_from_prompt
+                    dyn_bp = synthesize_blueprint_from_prompt(prompt_lower)
+                    spec = dyn_bp.to_agent_blueprint_spec().model_dump()
                 return json.dumps({
                     "status": "ready_to_build",
                     "assistant_message": "Blueprint locked! All 5 pillars established. Ready to synthesize environment and arena.",

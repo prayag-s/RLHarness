@@ -133,124 +133,45 @@ class StudioOmniAgent:
         conversation: dict[str, Any],
         force_action: StudioActionType | None = None,
     ) -> list[StudioActionType]:
-        """Classifies user turn into one or more composable Studio Intent Actions."""
+        """Classifies user turn into composable Studio Intent Actions via the Agentic Chat Planner without keyword routing lists."""
         if force_action:
             return [force_action]
 
-        text = user_message.lower().strip()
-        actions: list[StudioActionType] = []
-
         has_arena = bool(conversation.get("arena_html"))
         has_blueprint = bool(conversation.get("blueprint_spec"))
-        arena_locked = bool(conversation.get("arena_locked", False))
 
         # 1. First Turn check
         if not has_arena or not has_blueprint:
             return [StudioActionType.PREVIEW_OR_UPDATE_ARENA]
 
-        # 2. Arena Look / Restyling / UI / Interaction intent keywords
-        arena_kws = [
-            "arena", "area", "arnea", "stage", "look", "theme", "color", "cell", "cells", "canvas",
-            "scoreboard", "victory badge", "badge", "badges", "banner", "gold", "arcade", "hud", "radar",
-            "display", "visual", "larger", "restyle", "redesign", "bigger", "retro",
-            "meter", "arrow", "arrows", "highlight", "highlights", "hipaa", "power-flow", "flow",
-            "ui", "chart", "gauge", "burn-rate", "play", "player", "play as", "play both",
-            "x and o", "x or o", "switch", "toggle", "first turn", "who goes first", "side", "sides",
-            "human", "symbol", "grid", "board", "controls", "button", "buttons", "interactive",
-            "interface", "layout", "click", "clickable", "table", "tables", "card", "cards", "felt", "blackjack", "dealer", "chips", "chip"
-        ]
-        has_arena_intent = any(kw in text for kw in arena_kws) and not any(
-            kw in text for kw in ["lock arena", "lock & start", "lock and start", "confirm and start", "start training"]
-        )
+        current_env_code = conversation.get("env_code", "")
+        plan = self._plan_chat_action(user_message, conversation=conversation, current_env_code=current_env_code)
 
-        # 3. Training / Continuing Training / Lock Arena keywords
-        train_kws = [
-            "lock arena", "lock & start", "lock and start", "confirm and start",
-            "looks good, start training", "train more", "continue training", "train for",
-            "more rounds", "episodes per round", "train now", "start training", "start now",
-            "tune more", "run training"
-        ]
-        has_train_intent = any(kw in text for kw in train_kws) or (
-            ("round" in text or "episode" in text) and any(w in text for w in ["train", "run", "more"])
-        )
-
-        # 4. Agent behavior / rewards keywords
-        agent_kws = [
-            "passive", "aggressive", "behavior", "personality", "stalling", "strategy",
-            "prioritize", "attack", "bonus", "penalize", "reward", "mistakes", "defense",
-            "heuristic", "bonus for winning", "never", "always", "route", "forbid", "disallow",
-            "reduce", "false positive", "false positives", "prevent", "avoid", "strictly",
-            "prefer", "require", "cardiac", "payroll", "clearance"
-        ]
-        has_agent_intent = any(kw in text for kw in agent_kws)
-
-        # 5. Environment mechanics / rules keywords
-        env_kws = [
-            "mechanic", "mechanics", "rules", "rule", "4x4", "5x5", "board to", "grid size", "board size",
-            "add action", "hold action", "remove action", "lives", "rules of the game",
-            "action space", "observation space", "turbulence", "wind", "friction", "gravity",
-            "obstacle", "obstacles", "physics", "disturbance", "environment rules"
-        ]
-        has_env_intent = any(kw in text for kw in env_kws)
-
-        # 6. Diagnostic questions
-        diag_kws = ["why", "how", "what", "explain", "diagnose", "tell me", "loss in round", "suboptimal", "reason"]
-        has_diag_intent = any(kw in text for kw in diag_kws) or ("?" in text and not has_train_intent)
-        is_pure_question = has_diag_intent and (
-            text.startswith(("why", "what", "how", "explain", "tell me", "can you", "is there", "why did"))
-            or ("?" in text and not any(text.startswith(cmd) for cmd in ["change", "make", "update", "set", "train", "add", "penalize", "prioritize", "chnge"]))
-        )
-
-        # Assemble composable actions
-        if is_pure_question and not has_train_intent:
-            actions.append(StudioActionType.CLARIFY_OR_DISCUSS)
-            return actions
-
-        if has_agent_intent:
-            actions.append(StudioActionType.UPDATE_AGENT_CHARACTERISTICS)
-        if has_env_intent:
-            actions.append(StudioActionType.UPDATE_ENV_MECHANICS)
-        if has_arena_intent:
-            actions.append(StudioActionType.PREVIEW_OR_UPDATE_ARENA)
-        if has_train_intent:
-            actions.append(StudioActionType.RUN_OR_CONTINUE_TRAINING)
-
-        # LLM intent classification fallback if keywords were ambiguous
-        if not actions and not is_pure_question and not isinstance(self.client, (FallbackCodeSynthesizer, UnconfiguredLLMClient)):
-            try:
-                llm_actions = self._classify_with_llm(user_message)
-                if llm_actions:
-                    return llm_actions
-            except Exception:
-                pass
-
-        if not actions and has_diag_intent:
-            actions.append(StudioActionType.CLARIFY_OR_DISCUSS)
+        actions: list[StudioActionType] = []
+        for target in plan.targets:
+            if target == ExecutionTarget.ARENA_VISUAL_UI:
+                if StudioActionType.PREVIEW_OR_UPDATE_ARENA not in actions:
+                    actions.append(StudioActionType.PREVIEW_OR_UPDATE_ARENA)
+            elif target in (ExecutionTarget.INFERENCE_STRATEGY, ExecutionTarget.REWARD_SHAPING):
+                if StudioActionType.UPDATE_AGENT_CHARACTERISTICS not in actions:
+                    actions.append(StudioActionType.UPDATE_AGENT_CHARACTERISTICS)
+            elif target == ExecutionTarget.ENV_SIM_MECHANICS:
+                if StudioActionType.UPDATE_ENV_MECHANICS not in actions:
+                    actions.append(StudioActionType.UPDATE_ENV_MECHANICS)
+            elif target == ExecutionTarget.TRAINING_HYPERPARAMS:
+                if StudioActionType.RUN_OR_CONTINUE_TRAINING not in actions:
+                    actions.append(StudioActionType.RUN_OR_CONTINUE_TRAINING)
+            elif target == ExecutionTarget.REANCHOR_DOMAIN:
+                if StudioActionType.PREVIEW_OR_UPDATE_ARENA not in actions:
+                    actions.append(StudioActionType.PREVIEW_OR_UPDATE_ARENA)
+            elif target == ExecutionTarget.UNSUPPORTED_CAPABILITY:
+                if StudioActionType.CLARIFY_OR_DISCUSS not in actions:
+                    actions.append(StudioActionType.CLARIFY_OR_DISCUSS)
 
         if not actions:
             actions.append(StudioActionType.CLARIFY_OR_DISCUSS)
 
         return actions
-
-    def _classify_with_llm(self, user_message: str) -> list[StudioActionType]:
-        """Classifies intent using active LLM when static keywords do not trigger."""
-        prompt = (
-            f"Classify this user request for an autonomous RL studio into one of these actions:\n"
-            f"User message: \"{user_message}\"\n\n"
-            f"Valid actions:\n"
-            f"- PREVIEW_OR_UPDATE_ARENA: changing arena layout, UI, visual theme, canvas, board, player controls, or interactive play\n"
-            f"- UPDATE_AGENT_CHARACTERISTICS: changing reward terms, penalties, aggression, or strategy\n"
-            f"- UPDATE_ENV_MECHANICS: changing environment physics, rules, grid size, or action space\n"
-            f"- RUN_OR_CONTINUE_TRAINING: training for more rounds, episodes, or locking arena\n"
-            f"- CLARIFY_OR_DISCUSS: asking an informational question or discussing\n\n"
-            f"Respond with JSON format: {{\"action\": \"PREVIEW_OR_UPDATE_ARENA\"}}"
-        )
-        raw = self.client.generate_json(prompt, system_prompt="You are an intent classification agent.")
-        action_name = raw.get("action")
-        for act in StudioActionType:
-            if act.value == action_name or act.name == action_name:
-                return [act]
-        return []
 
     def _plan_chat_action(
         self,
@@ -267,7 +188,7 @@ class StudioOmniAgent:
             "discord", "voice", "audio", "microphone", "sound", "stream 3d", "3d webgl",
             "webgl animation", "webgl", "shader", "shaders", "multiplayer", "networking",
             "webhook", "external api", "satellite", "quantum", "vr headset", "augmented reality",
-            "slack bot", "twitch"
+            "slack bot", "twitch", "bloomberg", "fix protocol", "terminal via fix", "live terminal"
         ]
         if any(kw in text for kw in unsupported_keywords):
             matched = [kw for kw in unsupported_keywords if kw in text]
@@ -278,11 +199,35 @@ class StudioOmniAgent:
                 scope_classification="unsupported",
                 targets=[ExecutionTarget.UNSUPPORTED_CAPABILITY],
                 requires_retrain=False,
+                surgical_instructions="Zero code mutations applied.",
                 surgical_plan="Zero code mutations applied.",
                 user_facing_summary=f"I do not know how to do that yet: {reason}",
             )
 
-        # 2. Context summary of current environment methods
+        # 2. Informational / Diagnostic inquiry guardrail (pure discussion, zero mutations)
+        is_diagnostic_q = (
+            text.startswith(("why ", "what ", "how come ", "how did ", "how does ", "explain ", "describe ", "can you explain ")) or
+            (
+                text.endswith("?") and not any(kw in text for kw in [
+                    "can you change", "can you make", "can you update", "can you set",
+                    "could you change", "could you make", "please change", "please make",
+                    "change ", "update ", "modify ", "rewrite ", "randomize ", "start training", "lock arena"
+                ])
+            )
+        )
+        if is_diagnostic_q:
+            return ChatActionPlan(
+                supported=True,
+                unsupported_reason=None,
+                scope_classification="discussion",
+                targets=[],
+                requires_retrain=False,
+                surgical_instructions="Zero code mutations applied. Provide conversational diagnostic explanation.",
+                surgical_plan="Zero code mutations applied. Provide conversational diagnostic explanation.",
+                user_facing_summary="Explaining agent behavior and current environment dynamics.",
+            )
+
+        # 3. Context summary of current environment methods
         env_methods_summary = "Methods: reset(), step(), interactive_step(), compute_reward()"
         if current_env_code:
             try:
@@ -301,23 +246,27 @@ class StudioOmniAgent:
                     f"User message: \"{user_message}\"\n\n"
                     f"Environment Context:\n{env_methods_summary}\n\n"
                     f"Supported Execution Targets:\n"
+                    f"- \"reanchor_domain\": User pivoted to a completely new task/domain or current blueprint is wrong.\n"
                     f"- \"inference_strategy\": Modifies interactive_step() / policy wrapper (Arena/Eval action selection, e.g. opening randomization, top-k filtering, fallback heuristics).\n"
                     f"- \"reward_shaping\": Modifies compute_reward() / RewardDSL (Training incentives, bonuses, penalties).\n"
                     f"- \"env_sim_mechanics\": Modifies reset() / step() / opponent rules or physics.\n"
+                    f"- \"arena_visual_ui\": Re-synthesize or patch the HTML/JS/CSS visual arena.\n"
                     f"- \"training_hyperparams\": Modifies entropy coef, burst rounds, or exploration.\n"
                     f"- \"unsupported_capability\": If user asks for capabilities outside the runtime (e.g. Discord, WebGL shaders, multiplayer, voice).\n\n"
                     f"Strict System Rules:\n"
                     f"1. If user asks to change how the agent selects moves in the Arena (e.g. randomizing its first/opening move among good options), route to \"inference_strategy\" so interactive_step() is patched directly—do NOT route solely to \"reward_shaping\".\n"
                     f"2. If user requests both a training reward/mechanic and an arena inference change, include both targets and set scope_classification=\"both\", requires_retrain=true.\n"
-                    f"3. Arena visual styling & UI changes (e.g. arena look, tables, cards, felt, blackjack table, colors, themes, boards, HUD) are fully supported in the studio! Route them to supported=true, scope_classification=\"arena_only\", targets=[\"inference_strategy\"], requires_retrain=false.\n"
-                    f"4. If user requests an unsupported capability (e.g. Discord, WebGL shaders, multiplayer matchmaking, voice), set supported=false and targets=[\"unsupported_capability\"].\n\n"
+                    f"3. Arena visual styling & UI changes (e.g. changing arena look, tables, cards, felt, blackjack table, colors, themes, boards, HUD, controls) route to supported=true, scope_classification=\"arena_only\", targets=[\"arena_visual_ui\"], requires_retrain=false.\n"
+                    f"4. If user requests an unsupported capability (e.g. Discord, WebGL shaders, multiplayer matchmaking, voice, Bloomberg terminal), set supported=false and targets=[\"unsupported_capability\"].\n"
+                    f"5. If user asks an informational, diagnostic, or explanatory question (e.g. 'Why did...', 'What are the current rules/rewards?', 'Explain how the agent works') without requesting code or training modifications, set scope_classification=\"discussion\", targets=[], requires_retrain=false.\n\n"
                     f"Respond with JSON adhering to:\n"
                     f"{{\n"
                     f"  \"supported\": true,\n"
                     f"  \"unsupported_reason\": null,\n"
-                    f"  \"scope_classification\": \"arena_only\" | \"training_only\" | \"both\" | \"unsupported\",\n"
+                    f"  \"scope_classification\": \"arena_only\" | \"training_only\" | \"both\" | \"discussion\" | \"unsupported\",\n"
                     f"  \"targets\": [\"inference_strategy\"],\n"
                     f"  \"requires_retrain\": false,\n"
+                    f"  \"surgical_instructions\": \"...\",\n"
                     f"  \"surgical_plan\": \"...\",\n"
                     f"  \"user_facing_summary\": \"...\"\n"
                     f"}}"
@@ -329,14 +278,47 @@ class StudioOmniAgent:
                 logging.warning(f"LLM ChatActionPlan error: {ex}")
 
         # 4. High-precision deterministic fallback planner
+        # Check if user message is an informational/diagnostic question rather than a modification request
+        is_informational_question = (
+            text.endswith("?") or
+            any(text.startswith(q) for q in ["why", "what", "how", "explain", "describe", "tell me", "can you", "is there", "which"])
+        ) and not any(kw in text for kw in [
+            "change", "set ", "update", "make ", "modify", "patch", "rewrite", "tune", "increase",
+            "decrease", "adjust", "randomize", "start training", "train for", "lock arena", "lock &", "lock and"
+        ])
+
+        if is_informational_question:
+            return ChatActionPlan(
+                supported=True,
+                unsupported_reason=None,
+                scope_classification="discussion",
+                targets=[],
+                requires_retrain=False,
+                surgical_instructions="No code changes. Provide conversational diagnostic explanation.",
+                surgical_plan="No code changes. Provide conversational diagnostic explanation.",
+                user_facing_summary="Explaining agent behavior and current environment dynamics.",
+            )
+
         targets: list[ExecutionTarget] = []
         requires_retrain = False
+
+        # Check for domain re-anchoring
+        has_reanchor = any(kw in text for kw in ["reanchor", "switch domain", "change domain", "new domain", "pivot to", "switch to", "train a connect", "train a russian", "train a blackjack"])
+        if has_reanchor:
+            targets.append(ExecutionTarget.REANCHOR_DOMAIN)
 
         # Check for inference strategy (Arena move selection / opening randomization)
         has_inference = (
             any(kw in text for kw in ["randomize", "random", "stochastic", "sample"]) and
             any(kw in text for kw in ["first move", "first", "opening", "openings", "turn 1", "arena", "option", "options"])
         ) or "interactive_step" in text or "inference" in text
+
+        # Check for arena visual UI
+        has_arena_ui = any(kw in text for kw in [
+            "arena", "ui", "visual", "look", "theme", "color", "restyle", "larger", "bigger",
+            "canvas", "table", "card", "dealer", "chip", "chips", "felt", "board", "grid", "display",
+            "scoreboard", "badge", "hud", "controls", "slot", "slots", "cylinder"
+        ]) and not any(kw in text for kw in ["start training", "train now", "lock arena"])
 
         # Check for reward shaping (Reward terms / training incentives)
         has_reward = (
@@ -350,11 +332,17 @@ class StudioOmniAgent:
             ("self-play" in text and "training" in text) or "both self-play" in text or "rules" in text
         )
 
-        # Check for training hyperparams
-        has_training_params = any(kw in text for kw in ["hyperparameter", "entropy", "learning rate", "burst length", "batch size"])
+        # Check for training hyperparams / run training
+        has_training_params = any(kw in text for kw in [
+            "train", "training", "round", "rounds", "episode", "episodes",
+            "lock arena", "lock & start", "lock and start", "confirm and start",
+            "start now", "tune", "hyperparameter", "entropy", "learning rate", "burst"
+        ])
 
         if has_inference:
             targets.append(ExecutionTarget.INFERENCE_STRATEGY)
+        if has_arena_ui and ExecutionTarget.ARENA_VISUAL_UI not in targets:
+            targets.append(ExecutionTarget.ARENA_VISUAL_UI)
         if has_reward:
             targets.append(ExecutionTarget.REWARD_SHAPING)
             requires_retrain = True
@@ -365,22 +353,29 @@ class StudioOmniAgent:
             targets.append(ExecutionTarget.TRAINING_HYPERPARAMS)
             requires_retrain = True
 
+        has_train_impact = any(t in targets for t in (ExecutionTarget.REWARD_SHAPING, ExecutionTarget.ENV_SIM_MECHANICS, ExecutionTarget.TRAINING_HYPERPARAMS))
+        has_arena_impact = any(t in targets for t in (ExecutionTarget.INFERENCE_STRATEGY, ExecutionTarget.ARENA_VISUAL_UI))
+
         if not targets:
-            targets.append(ExecutionTarget.INFERENCE_STRATEGY)
-            scope = "arena_only"
-        elif ExecutionTarget.INFERENCE_STRATEGY in targets and (ExecutionTarget.REWARD_SHAPING in targets or ExecutionTarget.ENV_SIM_MECHANICS in targets):
+            scope = "discussion"
+            requires_retrain = False
+        elif has_train_impact and has_arena_impact:
             scope = "both"
             requires_retrain = True
-        elif ExecutionTarget.INFERENCE_STRATEGY in targets:
-            scope = "arena_only"
-            requires_retrain = False
-        else:
+        elif has_train_impact:
             scope = "training_only"
             requires_retrain = True
+        else:
+            scope = "arena_only"
+            requires_retrain = False
 
         surgical_steps = []
+        if ExecutionTarget.REANCHOR_DOMAIN in targets:
+            surgical_steps.append("Re-anchor DynamicTaskBlueprint, re-synthesize environment and arena.")
         if ExecutionTarget.INFERENCE_STRATEGY in targets:
             surgical_steps.append("Patch interactive_step() in env_module.py for turn-aware action selection.")
+        if ExecutionTarget.ARENA_VISUAL_UI in targets:
+            surgical_steps.append("Re-synthesize or restyle arena.html visual UI.")
         if ExecutionTarget.REWARD_SHAPING in targets:
             surgical_steps.append("Rewrite compute_reward() in env_module.py and recalibrate Critic head.")
         if ExecutionTarget.ENV_SIM_MECHANICS in targets:
@@ -388,13 +383,15 @@ class StudioOmniAgent:
         if ExecutionTarget.TRAINING_HYPERPARAMS in targets:
             surgical_steps.append("Adjust training hyperparameters in session configuration.")
 
+        plan_desc = " ".join(surgical_steps)
         return ChatActionPlan(
             supported=True,
             unsupported_reason=None,
             scope_classification=scope,
             targets=targets,
             requires_retrain=requires_retrain,
-            surgical_plan=" ".join(surgical_steps),
+            surgical_instructions=plan_desc,
+            surgical_plan=plan_desc,
             user_facing_summary=f"Formulated execution plan for scope '{scope}' targeting {', '.join([t.value for t in targets])}.",
         )
 
@@ -714,19 +711,22 @@ class StudioOmniAgent:
         # CASE 2: MID / POST-TRAINING CONVERSATIONAL ACTIONS (Multi-Target Chaining)
         # ---------------------------------------------------------------------
 
-        # Domain Re-Anchoring: Check if conversation was initialized with generic fallback
-        first_prompt = history[0].get("content", "") if history else user_message
-        is_card_session = is_blackjack_intent(user_message) or is_blackjack_intent(first_prompt)
-        if is_card_session and blueprint and not is_blackjack_spec(blueprint):
-            intake_agent = IntakeArchitectAgent(self._llm_client)
-            fallback_resp = intake_agent._deterministic_intake(
-                prompt=user_message if is_blackjack_intent(user_message) else first_prompt,
-                dataset=active_dataset,
-                answers=selected_opts,
-                wants_defaults=True,
-                training_params=t_params,
-            )
-            blueprint = fallback_resp.blueprint_spec
+        # Domain Re-Anchoring: Check if agentic planner selected REANCHOR_DOMAIN
+        if ExecutionTarget.REANCHOR_DOMAIN in action_plan.targets:
+            from rl_ide.architect.intake import synthesize_blueprint_from_prompt
+            dyn_bp = synthesize_blueprint_from_prompt(user_message, dataset=active_dataset, client=self.client)
+            blueprint = dyn_bp.to_agent_blueprint_spec()
+            code_str, _, _ = self.env_synthesizer.synthesize(blueprint=blueprint, workspace_dir=ws_dir)
+            verified, healed_code, _ = self.smoke_tester.verify_and_heal(code_str=code_str, blueprint=blueprint, workspace_dir=ws_dir)
+            if verified:
+                current_env_code = healed_code
+                (ws_dir / "env_module.py").write_text(healed_code, encoding="utf-8")
+                try:
+                    updated_env_cls = load_synthesized_env_class(ws_dir / "env_module.py")
+                    active_env = instantiate_env(updated_env_cls)
+                    self.session_store.set_env(conversation_id, active_env)
+                except Exception:
+                    pass
             arena_html_str, _ = self.arena_synthesizer.synthesize(
                 blueprint=blueprint,
                 sample_arena_state=None,
@@ -734,6 +734,7 @@ class StudioOmniAgent:
                 workspace_dir=ws_dir,
             )
             current_arena_html = arena_html_str
+            assistant_reply += f"🔄 Domain successfully re-anchored to **{blueprint.task_title}**! Environment and Arena re-synthesized.\n"
             if broadcast_callback:
                 broadcast_callback({"event": "arena_updated", "arena_html": current_arena_html})
 
@@ -830,13 +831,7 @@ class StudioOmniAgent:
                 assistant_reply += "🎯 Arena inference strategy updated! Patched interactive_step() for turn-aware action selection.\n"
 
         # Multi-Target Layer 4: Visual Arena & Controls
-        has_visual_intent = any(kw in user_message.lower() for kw in [
-            "look", "theme", "color", "canvas", "neon", "cyberpunk", "restyle", "dark", "gold",
-            "scoreboard", "badge", "display", "larger", "bigger", "retro", "hud", "layout",
-            "x and o", "x or o", "play as", "switch", "both", "who goes first", "player side", "symbol",
-            "table", "tables", "card", "cards", "felt", "blackjack", "dealer", "chips", "chip", "arena"
-        ])
-        if (StudioActionType.PREVIEW_OR_UPDATE_ARENA in intents and has_visual_intent) or (has_visual_intent and not assistant_reply):
+        if ExecutionTarget.ARENA_VISUAL_UI in action_plan.targets or StudioActionType.PREVIEW_OR_UPDATE_ARENA in intents:
             new_arena_html = self.arena_synthesizer.update_arena(
                 blueprint=blueprint,
                 current_arena_html=current_arena_html,
