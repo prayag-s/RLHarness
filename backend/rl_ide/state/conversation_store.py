@@ -424,22 +424,14 @@ class ConversationStore:
             conn.execute("DELETE FROM conversations;")
             conn.commit()
 
-        # Remove all workspace directories
-        if self.workspaces_dir.exists():
-            for item in self.workspaces_dir.iterdir():
-                if item.is_dir():
-                    try:
-                        shutil.rmtree(item, ignore_errors=True)
-                    except Exception:
-                        pass
-
-        # Remove conversation runs subdirectories (keep conversations.db and runs dir itself)
+        # Remove only directories owned by the conversations that were just deleted.
         runs_path = Path("runs")
-        if runs_path.exists():
-            for item in runs_path.iterdir():
-                if item.is_dir():
+        for cid in cids:
+            for base in (self.workspaces_dir, runs_path):
+                target = base / cid
+                if target.is_dir():
                     try:
-                        shutil.rmtree(item, ignore_errors=True)
+                        shutil.rmtree(target, ignore_errors=True)
                     except Exception:
                         pass
 

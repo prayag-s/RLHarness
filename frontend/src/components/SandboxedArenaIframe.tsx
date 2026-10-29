@@ -130,15 +130,34 @@ export const SandboxedArenaIframe: React.FC<SandboxedArenaIframeProps> = ({
     setSelectedEpisodeIdx(idx)
     setMode('watch')
     setArenaMode('live')
-    postArenaUpdate({
-      total_reward: ep.total_reward,
-      reward_breakdown: ep.reward_breakdown || {},
-      is_success: ep.is_success,
-      arena_state: {
+    // Replay the recorded frames so the stage shows real state instead of an empty payload.
+    const steps = Array.isArray(ep.steps) ? ep.steps : []
+    if (steps.length > 0) {
+      let stepIdx = 0
+      const renderFrame = () => {
+        const step = steps[stepIdx]
+        postArenaUpdate({
+          episode_id: ep.episode_id,
+          step: step?.step ?? stepIdx + 1,
+          total_reward: step?.reward ?? ep.total_reward,
+          reward_breakdown: step?.reward_breakdown || ep.reward_breakdown || {},
+          is_success: step?.is_success ?? ep.is_success,
+          arena_state: step?.arena_state || {},
+        })
+        stepIdx += 1
+        if (stepIdx < steps.length) {
+          window.setTimeout(renderFrame, 500)
+        }
+      }
+      renderFrame()
+    } else {
+      postArenaUpdate({
         episode_id: ep.episode_id,
-        replayed: true,
-      },
-    })
+        total_reward: ep.total_reward,
+        reward_breakdown: ep.reward_breakdown || {},
+        is_success: ep.is_success,
+      })
+    }
   }
 
   return (

@@ -113,8 +113,8 @@ def test_self_healing_catches_and_repairs_division_by_zero(tictactoe_blueprint: 
     clean_code = env_builder.generate_env_code(tictactoe_blueprint)
 
     # Deliberately inject ZeroDivisionError in compute_reward
-    buggy_code = clean_code.replace("total = 0.0", "total = 1.0 / 0")
-    assert "1.0 / 0" in buggy_code
+    buggy_code = clean_code.replace("return 0.0, bd", "return 1.0 / 0, bd")
+    assert "1.0 / 0" in buggy_code, "Injection point not found in compute_reward"
 
     verifier = SandboxSmokeTester()
     success, healed_code, logs = verifier.verify_and_heal(
@@ -133,26 +133,25 @@ def test_self_healing_catches_and_repairs_division_by_zero(tictactoe_blueprint: 
     assert "1.0 / 0" not in healed_code
 
 
-def test_self_healing_catches_and_repairs_shape_mismatch(tictactoe_blueprint: AgentBlueprintSpec, tmp_path: Path):
-    """Injects observation shape mismatch and verifies self-healing repair."""
+def test_unrepairable_shape_mismatch_fails_explicitly(tictactoe_blueprint: AgentBlueprintSpec, tmp_path: Path):
+    """An unrepairable defect must fail verification and must not be silently replaced."""
     env_builder = JITEnvironmentSynthesizer()
     clean_code = env_builder.generate_env_code(tictactoe_blueprint)
 
-    # Deliberately inject shape mismatch in _get_obs
     buggy_code = clean_code.replace("obs = np.zeros(10, dtype=np.float32)", "obs = np.zeros(17, dtype=np.float32)")
     assert "np.zeros(17" in buggy_code
 
     verifier = SandboxSmokeTester()
-    success, healed_code, logs = verifier.verify_and_heal(
+    success, returned_code, logs = verifier.verify_and_heal(
         buggy_code,
         tictactoe_blueprint,
         workspace_dir=tmp_path / "heal_shape",
     )
 
-    assert success is True
-    assert any("does not match observation_space.shape" in log_entry for log_entry in logs)
-    assert any("self-healing repair" in log_entry.lower() for log_entry in logs)
-    assert any("verification passed 100%" in log_entry.lower() for log_entry in logs)
+    assert success is False
+    assert any("does not match observation_space.shape" in entry for entry in logs)
+    # The verifier must not substitute a different (hidden) environment.
+    assert returned_code == buggy_code
 
 
 # -----------------------------------------------------------------------------

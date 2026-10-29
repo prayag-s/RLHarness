@@ -53,7 +53,7 @@ interface ArchitectPanelProps {
   onUpdateTrainingParams?: (params: TrainingParams) => void
   isArenaLocked?: boolean
   onLockArena?: () => void
-  onSendStudioMessage?: (message: string, trainingParams?: TrainingParams) => Promise<any>
+  onSendStudioMessage?: (message: string, trainingParams?: TrainingParams, answers?: Record<string, string>) => Promise<any>
   chatInputRef?: React.RefObject<HTMLInputElement>
 }
 
@@ -135,7 +135,7 @@ export const ArchitectPanel: React.FC<ArchitectPanelProps> = ({
 
     try {
       if (onSendStudioMessage) {
-        const resp = await onSendStudioMessage(textToSend, currentParams)
+        const resp = await onSendStudioMessage(textToSend, currentParams, selectedAnswers)
         setUserPrompt('')
         if (resp && resp.chat_response) {
           setArchitectMessage(resp.chat_response)

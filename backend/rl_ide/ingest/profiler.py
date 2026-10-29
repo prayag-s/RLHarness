@@ -24,6 +24,43 @@ def sanitize_column_name(col: str) -> str:
     return clean
 
 
+def infer_label_column(df: Any, n_actions: int) -> str | None:
+    """Infers a supervised target column generically (no domain-specific column names).
+
+    Preference order: conventional ML names (`label`, `target`, `is_*`, ...), then any
+    low-cardinality numeric/boolean column, scanning right to left.
+    """
+    if df is None or getattr(df, "shape", (0, 0))[1] == 0:
+        return None
+
+    preferred = []
+    for col in df.columns:
+        name = str(col).strip().lower()
+        if name in {"label", "target", "class", "outcome", "y", "truth", "result"} or name.startswith("is_"):
+            preferred.append(col)
+
+    def _candidate(col: str) -> bool:
+        series = df[col]
+        try:
+            nunique = int(series.nunique(dropna=True))
+        except Exception:
+            return False
+        if nunique < 2:
+            return False
+        dtype_name = str(series.dtype)
+        if dtype_name.startswith("float") and nunique > 10:
+            return False
+        return nunique <= max(2, int(n_actions))
+
+    for col in preferred:
+        if _candidate(col):
+            return str(col)
+    for col in reversed(list(df.columns)):
+        if _candidate(col):
+            return str(col)
+    return None
+
+
 class ColumnProfile(BaseModel):
     """Profile of a single ingested dataset column."""
     name: str

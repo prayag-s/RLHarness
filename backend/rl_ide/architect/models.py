@@ -92,6 +92,8 @@ class AgentBlueprintSpec(BaseModel):
     visual_metaphor: str = ""
     actions: list[ActionSpec] = Field(default_factory=list)
     observation_feature_specs: list[ObservationFeatureSpec] = Field(default_factory=list)
+    label_column: str | None = None  # Optional target column for dataset-backed tasks
+    pending_directive: str | None = None  # Latest mechanics/rule instruction for the synthesizer
 
     def to_dynamic_task_blueprint(self) -> DynamicTaskBlueprint:
         return DynamicTaskBlueprint.from_agent_blueprint_spec(self)
@@ -114,6 +116,11 @@ class DynamicTaskBlueprint(BaseModel):
     clarifying_questions: List[ClarifyingQuestion] = Field(default_factory=list)
     data_source_type: str = "pure_simulation"
     dataset_id: Optional[str] = None
+    label_column: Optional[str] = None
+    success_metric_name: str = "Task Success Rate (%)"
+    target_metric_threshold: float = 85.0
+    max_auto_tune_rounds: int = 4
+    episodes_per_round: int = 200
 
     def to_agent_blueprint_spec(self) -> AgentBlueprintSpec:
         reward_list = []
@@ -128,15 +135,16 @@ class DynamicTaskBlueprint(BaseModel):
             action_labels=[a.label for a in self.actions],
             arena_visual_description=self.visual_metaphor,
             interactive_mode_description=f"Interactive arena testing {self.domain_title}",
-            success_metric_name="Task Success Rate (%)",
-            target_metric_threshold=85.0,
-            max_auto_tune_rounds=4,
-            episodes_per_round=200,
+            success_metric_name=self.success_metric_name,
+            target_metric_threshold=self.target_metric_threshold,
+            max_auto_tune_rounds=self.max_auto_tune_rounds,
+            episodes_per_round=self.episodes_per_round,
             initial_reward_components=reward_list,
             state_dict_schema=self.state_dict_schema,
             visual_metaphor=self.visual_metaphor,
             actions=self.actions,
             observation_feature_specs=self.observation_features,
+            label_column=self.label_column,
         )
 
     @classmethod
@@ -161,6 +169,11 @@ class DynamicTaskBlueprint(BaseModel):
             state_dict_schema=spec.state_dict_schema or {},
             reward_components=reward_dict,
             clarifying_questions=[],
+            label_column=spec.label_column,
+            success_metric_name=spec.success_metric_name,
+            target_metric_threshold=spec.target_metric_threshold,
+            max_auto_tune_rounds=spec.max_auto_tune_rounds,
+            episodes_per_round=spec.episodes_per_round,
         )
 
 

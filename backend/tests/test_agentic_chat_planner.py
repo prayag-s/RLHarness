@@ -64,11 +64,12 @@ def test_first_move_randomization_inference_patch(client: TestClient):
     # Step 4: Verify interactive_step() in env_module.py was updated
     updated_code = ws_env.read_text(encoding="utf-8")
     assert updated_code != original_code, "env_module.py code must be modified"
-    assert (
-        "is_first_move" in updated_code
-        or "good_moves" in updated_code
-        or "strategic_openings" in updated_code
-    ), "interactive_step() must be patched with turn-aware candidate selection"
+    assert "_good" in updated_code and "np.random.choice" in updated_code, (
+        "interactive_step() must be patched with legal-action candidate sampling"
+    )
+    assert "range(9)" not in updated_code.split("def interactive_step")[1].split("def ")[0], (
+        "The inference patch must not assume a 9-action board"
+    )
 
     # Step 5: Test Live Behavior - Run 30 consecutive simulated opening turns
     env_cls = load_synthesized_env_class(ws_env)
@@ -80,30 +81,22 @@ def test_first_move_randomization_inference_patch(client: TestClient):
         probs[4] = 1.0
         return 4, probs
 
+    n_actions = env.action_space.n
     selected_opening_cells = set()
     for _ in range(30):
-        # Agent moves first (human_first=False)
-        step_res = env.interactive_step(
+        env.interactive_step(
             {"reset": True, "human_first": False, "human_symbol": "O"},
             peaked_mock_policy,
         )
-        agent_move = getattr(env, "last_move", None)
-        if agent_move is None:
-            # Extract from board
-            board = step_res["arena_state"]["board"]
-            for cell_idx, cell_val in enumerate(board):
-                if cell_val != 0:
-                    agent_move = cell_idx
-                    break
+        agent_move = int(getattr(env, "last_move"))
 
-        assert agent_move in [0, 2, 4, 6, 8], (
-            f"Agent opening move {agent_move} must be within good strategic options {{0, 2, 4, 6, 8}}"
+        assert 0 <= agent_move < n_actions, (
+            f"Agent opening move {agent_move} is not a legal action (n_actions={n_actions})"
         )
         selected_opening_cells.add(agent_move)
 
-    # Must select at least 2 distinct opening cells from {0, 2, 4, 6, 8} across 30 runs
     assert len(selected_opening_cells) >= 2, (
-        f"Expected at least 2 distinct opening cells from {{0, 2, 4, 6, 8}}, but observed {selected_opening_cells}. "
+        f"Expected at least 2 distinct legal opening moves, but observed {selected_opening_cells}. "
         "Argmax determinism was not replaced by stochastic selection!"
     )
 
@@ -154,14 +147,12 @@ def test_multi_layer_arena_and_training_patch(client: TestClient):
 
     # Step 4: Verify both layers are modified in env_module.py
     updated_code = ws_env.read_text(encoding="utf-8")
-    assert "corner" in updated_code.lower() or "corner_opening_bonus" in updated_code, (
-        "compute_reward() must be updated with corner opening reward logic"
+    assert "corner_bonus" in updated_code, (
+        "compute_reward() must be updated with the requested corner reward term"
     )
-    assert (
-        "is_first_move" in updated_code
-        or "good_moves" in updated_code
-        or "strategic_openings" in updated_code
-    ), "interactive_step() must be patched with inference randomization logic"
+    assert "_good" in updated_code and "np.random.choice" in updated_code, (
+        "interactive_step() must be patched with inference randomization logic"
+    )
 
 
 # -----------------------------------------------------------------------------

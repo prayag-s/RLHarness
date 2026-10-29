@@ -43,7 +43,7 @@ from rl_ide.llm import (
 def test_underspecified_prompt_returns_clarifying_questions():
     """An underspecified prompt must return status='needs_clarification' with pills."""
     architect = IntakeArchitectAgent()
-    prompt = "Train an agent to play tic-tac-toe"
+    prompt = "Train an agent to play tic-tac-toe on a 3x3 board"
     response = architect.interview(user_prompt=prompt)
 
     assert isinstance(response, IntakeResponse)
@@ -71,7 +71,7 @@ def test_underspecified_prompt_returns_clarifying_questions():
 def test_answering_questions_produces_valid_blueprint():
     """Submitting answers to the clarifying questions produces a valid AgentBlueprintSpec."""
     architect = IntakeArchitectAgent()
-    prompt = "Train an agent to play tic-tac-toe"
+    prompt = "Train an agent to play tic-tac-toe on a 3x3 board"
 
     answers = {
         "arena_ui": "Minimalist wood-grain board with move history ledger",
@@ -105,7 +105,7 @@ def test_answering_questions_produces_valid_blueprint():
 def test_smart_defaults_produces_valid_blueprint():
     """Clicking 'Use Smart Defaults & Start' locks the blueprint immediately."""
     architect = IntakeArchitectAgent()
-    prompt = "Train an agent to play tic-tac-toe"
+    prompt = "Train an agent to play tic-tac-toe on a 3x3 board"
 
     # Express button with force_smart_defaults=True
     response = architect.interview(user_prompt=prompt, force_smart_defaults=True)
@@ -117,7 +117,7 @@ def test_smart_defaults_produces_valid_blueprint():
     assert len(response.blueprint_spec.action_labels) == 9
 
     # Natural-language express trigger
-    nl_response = architect.interview(user_prompt="Train an agent to play tic-tac-toe. Use smart defaults and build now.")
+    nl_response = architect.interview(user_prompt="Train an agent to play tic-tac-toe on a 3x3 board. Use smart defaults and build now.")
     assert nl_response.status == "ready_to_build"
     assert nl_response.blueprint_spec is not None
 
@@ -324,34 +324,43 @@ def test_models_json_roundtrip():
     assert resp_restored.blueprint_spec.task_title == "Test Agent"
 
 
-def test_tictactoe_fuzzy_intent_and_typo_handling():
-    """Verify that colloquial typo variants and abbreviations correctly route to Tic-Tac-Toe."""
+def test_colloquial_prompts_produce_task_shaped_blueprints():
+    """Colloquial/typo prompts must still produce a task-shaped blueprint, never a rover fallback.
+
+    No domain word list is involved: the deterministic builder only parses explicit structure
+    (grid dimensions, quoted options, counts) and otherwise keeps the user's own wording.
+    """
     architect = IntakeArchitectAgent()
 
-    typo_prompts = [
-        "Train an unbeatable tic toe agent. I want to see in train in",
-        "Train an unbeatable tic tax tow agent. I want to watch it tr",
-        "train a ttt agent",
+    prompts = [
+        "Train an unbeatable tic toe agent. I want to see it train",
+        "train a ttt agent on a 3x3 grid",
         "create an unbeatable 3x3 board game agent",
-        "agent that plays noughts and crosses",
-        "build an agent for x and o",
-        "tick tack toe bot",
+        "build an agent for x and o on a 3x3 board",
+        "Train a warehouse elevator dispatcher for 5 floors",
     ]
 
-    for p in typo_prompts:
-        # First turn: should ask Tic-Tac-Toe specific clarifying questions
-        resp = architect.interview(user_prompt=p)
-        assert resp.status == "needs_clarification", f"Prompt failed clarification: {p}"
-        assert any("tic-tac-toe" in q.question.lower() or "3x3" in q.suggested_options[0].lower() for q in resp.questions), (
-            f"Expected Tic-Tac-Toe clarifying question for prompt: {p}"
-        )
+    for prompt in prompts:
+        resp = architect.interview(user_prompt=prompt)
+        assert resp.status == "needs_clarification", f"Prompt failed clarification: {prompt}"
+        assert len(resp.questions) == 4
+        for question in resp.questions:
+            assert question.default_option in question.suggested_options
+            assert "board" not in question.question.lower() or "3x3" in prompt.lower()
 
-        # Express build / smart defaults should lock the Tic-Tac-Toe blueprint
-        resp_defaults = architect.interview(user_prompt=p, force_smart_defaults=True)
-        assert resp_defaults.status == "ready_to_build"
-        assert resp_defaults.blueprint_spec is not None
-        bp = resp_defaults.blueprint_spec
-        assert "Tic-Tac-Toe" in bp.task_title
-        assert len(bp.observation_features) == 10
-        assert len(bp.action_labels) == 9
-        assert "3x3" in bp.interactive_mode_description or "3x3" in bp.arena_visual_description
+        locked = architect.interview(user_prompt=prompt, force_smart_defaults=True)
+        assert locked.status == "ready_to_build"
+        bp = locked.blueprint_spec
+        assert bp is not None
+
+        # Never the rover fallback.
+        assert "rover" not in bp.task_title.lower()
+        assert "waypoint" not in bp.task_title.lower()
+        assert not any("state_pos_x" == f for f in bp.observation_features)
+
+        # Explicit structure is honoured; otherwise the schema stays generic but valid.
+        if "3x3" in prompt:
+            assert len(bp.action_labels) == 9
+            assert len(bp.observation_features) == 10
+        if "5 floors" in prompt:
+            assert len(bp.action_labels) == 5

@@ -12,7 +12,7 @@ import pytest
 
 from rl_ide.architect.models import AgentBlueprintSpec
 from rl_ide.autopilot.loop_controller import AutonomousLoopController, SessionStateStore
-from rl_ide.synthesizer.env_builder import JITEnvironmentSynthesizer
+from tests.fixtures.tictactoe_fixture_env import TicTacToeFixtureEnv
 
 
 @pytest.fixture
@@ -60,15 +60,9 @@ def test_tictactoe_reaches_90_percent_non_loss_rate(tictactoe_blueprint: AgentBl
     store = SessionStateStore(base_dir=tmp_path / "workspaces")
     controller = AutonomousLoopController(store=store)
 
-    # 1. Synthesize environment from blueprint
-    env_builder = JITEnvironmentSynthesizer()
+    # 1. Deterministic, learnable contract-compliant environment (test fixture, not runtime code)
     session_id = "test_convergence_sess"
-    ws_dir = tmp_path / "workspaces" / session_id
-
-    code_str, env_path, env_cls = env_builder.synthesize(
-        blueprint=tictactoe_blueprint,
-        workspace_dir=ws_dir,
-    )
+    env_cls = TicTacToeFixtureEnv
 
     events: list[dict] = []
     def on_event(ev):
@@ -98,6 +92,13 @@ def test_tictactoe_reaches_90_percent_non_loss_rate(tictactoe_blueprint: AgentBl
     assert final_session.current_round <= 4, f"Failed: took {final_session.current_round} rounds (> 4)"
     assert final_session.current_metric >= 90.0, f"Failed: final metric {final_session.current_metric}% < 90.0%"
     assert elapsed_time < 30.0, f"Failed: took {elapsed_time:.2f}s (>= 30s limit)"
+
+    # The metric is computed from terminal outcomes only (never "any successful step").
+    eval_episodes = [ep for ep in final_session.episodes if ep.get("episode_id", "").startswith("r")]
+    assert eval_episodes
+    for episode in eval_episodes:
+        assert episode["is_success"] == bool(episode["steps"][-1]["is_success"])
+        assert episode["metric_value"] in (0.0, 100.0)
 
     # 5. Assert 0% illegal moves during deterministic evaluation
     round_eval_events = [e for e in events if e.get("event") == "round_evaluated"]

@@ -13,6 +13,7 @@ os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 from pathlib import Path
 import re
 import shutil
+import threading
 from typing import Any, Callable
 import gymnasium as gym
 import numpy as np
@@ -28,6 +29,7 @@ from rl_ide.ingest.loader import IngestedDataset
 from rl_ide.llm.client import BaseLLMClient, create_llm_client, get_active_llm_client
 from rl_ide.synthesizer.env_builder import JITEnvironmentSynthesizer, load_synthesized_env_class, instantiate_env
 from rl_ide.synthesizer.verifier import SandboxSmokeTester
+from rl_ide.state.records_store import load_records, save_records
 
 
 def parse_nudge_meta_command(text: str) -> dict[str, Any] | None:
@@ -40,20 +42,59 @@ def parse_nudge_meta_command(text: str) -> dict[str, Any] | None:
     """
     text_lower = text.lower()
     rounds_match = re.search(r'(?:tune|train|run|for)?\s*(\d+)\s*(?:more\s*)?rounds?', text_lower)
-    eval_match = re.search(r'eval(?:uate)?\s*(?:every)?\s*(\d+)\s*rounds?', text_lower)
     episodes_match = re.search(r'(\d+)\s*episodes?', text_lower)
-    target_match = re.search(r'(?:target|for|reach|achieve|to)?\s*(?:metric|threshold|rate|goal)?\s*[:=]?\s*(\d+(?:\.\d+)?)\s*%', text_lower)
-    if not target_match:
-        target_match = re.search(r'\b(?:target|goal|rate)\s*[:=]?\s*(\d+(?:\.\d+)?)\b', text_lower)
+    # Only explicit mastery/goal phrasing may set the target; bare percentages are ignored.
+    target_match = re.search(
+        r'\b(?:target|goal|mastery|threshold|reach|achieve)\b\s*(?:metric|threshold|rate|goal|mastery)?\s*[:=]?\s*(\d+(?:\.\d+)?)\s*%',
+        text_lower,
+    ) or re.search(
+        r'\b(?:target|goal|mastery|threshold)\b\s*[:=]?\s*(\d+(?:\.\d+)?)\b',
+        text_lower,
+    )
 
-    if rounds_match or eval_match or episodes_match or target_match:
+    if rounds_match or episodes_match or target_match:
         return {
             "rounds": int(rounds_match.group(1)) if rounds_match else None,
-            "eval_every": int(eval_match.group(1)) if eval_match else None,
             "episodes": int(episodes_match.group(1)) if episodes_match else None,
             "target": float(target_match.group(1)) if target_match else None,
         }
     return None
+
+
+MAX_PPO_TIMESTEPS = 100_000
+
+
+class TrainingInProgressError(RuntimeError):
+    """Raised when a session already has an active training/tuning operation."""
+
+
+def episode_step_limit(env: Any, default_ceiling: int = 200) -> int:
+    """Returns the environment's declared horizon instead of a fixed 50-step cap."""
+    horizon = getattr(env, "episode_horizon", None)
+    if horizon is None:
+        spec = getattr(env, "spec", None)
+        horizon = getattr(spec, "max_episode_steps", None) if spec is not None else None
+    try:
+        horizon = int(horizon) if horizon is not None else default_ceiling
+    except (TypeError, ValueError):
+        horizon = default_ceiling
+    return max(1, horizon)
+
+
+def episode_metric_value(env: Any, steps: list[dict[str, Any]]) -> float:
+    """Computes an honest per-episode metric.
+
+    Classification tasks report mean per-step accuracy; control tasks report the terminal
+    outcome. Step-level "at least one success" scoring is never used.
+    """
+    if not steps:
+        return 0.0
+    if getattr(env, "task_class", "control") == "classification":
+        graded = [s for s in steps if s.get("is_correct") is not None]
+        if not graded:
+            return 0.0
+        return 100.0 * sum(1 for s in graded if s["is_correct"]) / len(graded)
+    return 100.0 if bool(steps[-1].get("is_success")) else 0.0
 
 
 class RoundSnapshot(BaseModel):
@@ -128,6 +169,15 @@ class SessionStateStore:
     def set_env(self, session_id: str, env: gym.Env) -> None:
         self._envs[session_id] = env
 
+    def delete_model(self, session_id: str) -> None:
+        self._models.pop(session_id, None)
+
+    def delete_session(self, session_id: str) -> None:
+        """Drops every in-memory reference for a deleted conversation."""
+        self._sessions.pop(session_id, None)
+        self._models.pop(session_id, None)
+        self._envs.pop(session_id, None)
+
     def save_round_snapshot(
         self,
         session_id: str,
@@ -196,9 +246,9 @@ class SessionStateStore:
         if not target_snap:
             raise ValueError(f"Round {round_num} snapshot not found for session '{session_id}'.")
 
-        # Restore env code
+        # Restore env code (only when the snapshot actually contains a module)
         code_path = Path(target_snap.env_code_path)
-        if code_path.exists():
+        if code_path.exists() and code_path.read_text(encoding="utf-8").strip():
             code = code_path.read_text(encoding="utf-8")
             session.env_module_code = code
 
@@ -206,7 +256,7 @@ class SessionStateStore:
             ws_code_path = self.base_dir / session_id / "env_module.py"
             ws_code_path.write_text(code, encoding="utf-8")
             env_cls = load_synthesized_env_class(ws_code_path)
-            new_env = env_cls()
+            new_env = instantiate_env(env_cls, dataset_records=load_records(self.base_dir / session_id))
             self.set_env(session_id, new_env)
 
         # Restore model weights
@@ -233,6 +283,21 @@ class AutonomousLoopController:
         self.store = store or SessionStateStore()
         self._llm_client = llm_client
         self._auto_tuner = AutoTunerAgent(llm_client) if llm_client else None
+        self._locks: dict[str, threading.Lock] = {}
+        self._locks_guard = threading.Lock()
+
+    def session_lock(self, session_id: str) -> threading.Lock:
+        """Per-session lock guarding training, tuning and live inference against races."""
+        with self._locks_guard:
+            lock = self._locks.get(session_id)
+            if lock is None:
+                lock = threading.Lock()
+                self._locks[session_id] = lock
+            return lock
+
+    def is_busy(self, session_id: str) -> bool:
+        lock = self._locks.get(session_id)
+        return bool(lock and lock.locked())
 
     @property
     def client(self) -> BaseLLMClient:
@@ -255,10 +320,45 @@ class AutonomousLoopController:
         on_event_callback: Callable[[dict[str, Any]], None] | None = None,
         max_rounds: int | None = None,
         episodes_per_burst: int = 25,
-        continue_training: bool = False,
+        additional_rounds: int | None = None,
+    ) -> SessionState:
+        """Executes rounds under a per-session lock (see `_run_loop_locked`)."""
+        lock = self.session_lock(session_id)
+        if not lock.acquire(blocking=False):
+            raise TrainingInProgressError(
+                f"Session '{session_id}' already has an active training or tuning operation."
+            )
+        try:
+            return self._run_loop_locked(
+                session_id=session_id,
+                blueprint=blueprint,
+                env_cls=env_cls,
+                dataset=dataset,
+                on_event_callback=on_event_callback,
+                max_rounds=max_rounds,
+                episodes_per_burst=episodes_per_burst,
+                additional_rounds=additional_rounds,
+            )
+        finally:
+            lock.release()
+
+    def _run_loop_locked(
+        self,
+        session_id: str,
+        blueprint: AgentBlueprintSpec,
+        env_cls: type[gym.Env],
+        dataset: IngestedDataset | None = None,
+        on_event_callback: Callable[[dict[str, Any]], None] | None = None,
+        max_rounds: int | None = None,
+        episodes_per_burst: int = 25,
+        additional_rounds: int | None = None,
     ) -> SessionState:
         """Executes the full multi-round autonomous training loop, supporting continuous resumption."""
         records = dataset.df.to_dict(orient="records") if (dataset and hasattr(dataset, "df")) else None
+        if records is None:
+            records = load_records(self.store.base_dir / session_id)
+        if records is not None:
+            save_records(self.store.base_dir / session_id, records)
         env = instantiate_env(env_cls, dataset_records=records)
         self.store.set_env(session_id, env)
 
@@ -282,20 +382,21 @@ class AutonomousLoopController:
             )
             self.store.set_session(session)
 
-        # Compute effective rounds limit and starting round
-        start_round = len(session.rounds_history) + 1
-        has_prior_rounds = len(session.rounds_history) > 0
+        # Round semantics (unambiguous): run exactly N rounds in this call, accumulating on top
+        # of any previously completed rounds. `session.max_rounds` is the cumulative target.
+        completed_rounds = len(session.rounds_history)
+        has_prior_rounds = completed_rounds > 0
+        start_round = completed_rounds + 1
 
-        if has_prior_rounds:
-            if max_rounds is not None:
-                if max_rounds <= len(session.rounds_history):
-                    rounds_limit = len(session.rounds_history) + max_rounds
-                else:
-                    rounds_limit = max_rounds
-            else:
-                rounds_limit = len(session.rounds_history) + (blueprint.max_auto_tune_rounds or 4)
+        if additional_rounds is not None:
+            rounds_to_run = int(additional_rounds)
+        elif max_rounds is not None:
+            # `max_rounds` means "rounds to run in this call"; the session target accumulates.
+            rounds_to_run = int(max_rounds)
         else:
-            rounds_limit = max_rounds or blueprint.max_auto_tune_rounds or 4
+            rounds_to_run = int(blueprint.max_auto_tune_rounds or 4)
+        rounds_to_run = max(1, rounds_to_run)
+        rounds_limit = completed_rounds + rounds_to_run
 
         session.max_rounds = rounds_limit
         target_threshold = blueprint.target_metric_threshold if blueprint.target_metric_threshold is not None else (session.target_threshold or 85.0)
@@ -392,7 +493,7 @@ class AutonomousLoopController:
             })
 
             # Stage 3.1: Warm-Start Behavioral Cloning (Round 1 ONLY, never when resuming past rounds)
-            if r == 1 and not has_prior_rounds:
+            if r == 1 and not has_prior_rounds and not getattr(env, "is_placeholder", False):
                 emit({"event": "warmstart_started", "round": 1, "message": "Running Warm-Start Behavioral Cloning on domain heuristics..."})
                 loss, acc = self._warmstart_from_demonstrations(model, env, epochs=15, lr=3e-3, num_samples=150)
                 emit({
@@ -413,8 +514,10 @@ class AutonomousLoopController:
                 self._critic_warmup(model, replay_buffer, gamma=effective_gamma, epochs=8)
                 emit({"event": "critic_warmup_completed", "round": r, "message": "Value network calibrated."})
 
-            # Stage 3.3: PPO Training Burst (fast burst, up to 1024)
-            train_timesteps = 256 if episodes_per_burst <= 50 else min(1024, episodes_per_burst * 25)
+            # Stage 3.3: PPO Training Burst — the configured episode budget maps to timesteps with
+            # an explicit, observable ceiling instead of a silent 1024-step cap.
+            train_timesteps = max(256, int(episodes_per_burst) * 25)
+            train_timesteps = min(train_timesteps, MAX_PPO_TIMESTEPS)
             try:
                 model.learn(total_timesteps=train_timesteps, reset_num_timesteps=False)
             except Exception:
@@ -553,6 +656,27 @@ class AutonomousLoopController:
                 workspace_dir=self.store.base_dir / session_id,
             )
 
+            if not tuning_res.verified:
+                # Unverified generated code must never be persisted or loaded.
+                emit({
+                    "event": "auto_tune_failed",
+                    "round": r,
+                    "metric": current_metric,
+                    "message": "Auto-tuner output failed sandbox verification; reward function retained unchanged.",
+                })
+                self.store.save_round_snapshot(
+                    session_id=session_id,
+                    round_num=r,
+                    metric=current_metric,
+                    target_threshold=target_threshold,
+                    episodes_count=len(burst_episodes),
+                    env_code=current_code,
+                    model=model,
+                    diagnosis=tuning_res.diagnosis,
+                    changes_summary="Auto-tune rejected: unverified code. Reward function retained.",
+                )
+                continue
+
             current_code = tuning_res.updated_code
             session.env_module_code = current_code
 
@@ -575,7 +699,45 @@ class AutonomousLoopController:
             updated_env_cls = load_synthesized_env_class(env_file)
             env = instantiate_env(updated_env_cls, dataset_records=records)
             self.store.set_env(session_id, env)
-            model.set_env(env)
+
+            if (
+                getattr(model, "observation_space", None) == env.observation_space
+                and getattr(model, "action_space", None) == env.action_space
+            ):
+                model.set_env(env)
+            else:
+                # Spaces changed: deliberately start a fresh policy rather than reuse mismatched weights.
+                model = PPO(
+                    "MlpPolicy",
+                    env,
+                    learning_rate=1e-3,
+                    gamma=effective_gamma,
+                    n_steps=256,
+                    batch_size=64,
+                    n_epochs=10,
+                    ent_coef=0.02,
+                    device="cpu",
+                    verbose=0,
+                )
+                self.store.set_model(session_id, model)
+                emit({
+                    "event": "policy_reset",
+                    "round": r,
+                    "message": "Action/observation space changed; a fresh policy was initialized.",
+                })
+
+            # Apply the tuner's hyperparameter recommendations (previously computed but unused).
+            diffs = tuning_res.hyperparameter_diffs or {}
+            if "ent_coef" in diffs:
+                model.ent_coef = float(diffs["ent_coef"])
+            if "learning_rate" in diffs:
+                lr = float(diffs["learning_rate"])
+                model.learning_rate = lr
+                try:
+                    for group in model.policy.optimizer.param_groups:
+                        group["lr"] = lr
+                except Exception:
+                    pass
 
             emit({
                 "event": "auto_tuned",
@@ -599,6 +761,28 @@ class AutonomousLoopController:
         if not session:
             raise KeyError(f"Session '{session_id}' not found.")
 
+        lock = self.session_lock(session_id)
+        if not lock.acquire(blocking=False):
+            raise TrainingInProgressError(
+                f"Session '{session_id}' already has an active training or tuning operation."
+            )
+        try:
+            return self._nudge_session_locked(
+                session_id=session_id,
+                user_feedback_text=user_feedback_text,
+                on_event_callback=on_event_callback,
+                session=session,
+            )
+        finally:
+            lock.release()
+
+    def _nudge_session_locked(
+        self,
+        session_id: str,
+        user_feedback_text: str,
+        on_event_callback: Callable[[dict[str, Any]], None] | None,
+        session: SessionState,
+    ) -> TuningResult:
         # Check for training control meta-commands (e.g. 'tune 100 rounds, evaluate every 10 rounds')
         meta = parse_nudge_meta_command(user_feedback_text)
         if meta and (meta["rounds"] is not None or meta["episodes"] is not None or meta["target"] is not None):
@@ -613,17 +797,18 @@ class AutonomousLoopController:
             if env is None:
                 ws_code_path = self.store.base_dir / session_id / "env_module.py"
                 env_cls = load_synthesized_env_class(ws_code_path)
-                env = env_cls()
+                env = instantiate_env(env_cls, dataset_records=load_records(self.store.base_dir / session_id))
                 self.store.set_env(session_id, env)
             else:
                 env_cls = type(env)
 
-            updated_session = self.run_loop(
+            updated_session = self._run_loop_locked(
                 session_id=session_id,
                 blueprint=session.blueprint,
                 env_cls=env_cls,
                 on_event_callback=on_event_callback,
-                max_rounds=new_max_rounds,
+                max_rounds=None,
+                additional_rounds=extra_rounds,
                 episodes_per_burst=eps_burst,
             )
 
@@ -652,14 +837,17 @@ class AutonomousLoopController:
             workspace_dir=self.store.base_dir / session_id,
         )
 
-        session.env_module_code = tuning_res.updated_code
-        env_file = self.store.base_dir / session_id / "env_module.py"
-        env_file.write_text(tuning_res.updated_code, encoding="utf-8")
-        updated_env_cls = load_synthesized_env_class(env_file)
-        new_env = updated_env_cls()
-        self.store.set_env(session_id, new_env)
-        if model:
-            model.set_env(new_env)
+        if tuning_res.verified and tuning_res.applied and tuning_res.updated_code.strip():
+            session.env_module_code = tuning_res.updated_code
+            env_file = self.store.base_dir / session_id / "env_module.py"
+            env_file.write_text(tuning_res.updated_code, encoding="utf-8")
+            updated_env_cls = load_synthesized_env_class(env_file)
+            new_env = instantiate_env(updated_env_cls, dataset_records=load_records(self.store.base_dir / session_id))
+            self.store.set_env(session_id, new_env)
+            if model and getattr(model, "observation_space", None) == new_env.observation_space and getattr(model, "action_space", None) == new_env.action_space:
+                model.set_env(new_env)
+        else:
+            tuning_res.diagnosis += " (rejected: unverified code)"
 
         session.current_round += 1
         self.store.save_round_snapshot(
@@ -689,6 +877,8 @@ class AutonomousLoopController:
             return 0.0, 1.0
 
         X_demo, y_demo = env.get_demonstrations(num_samples=num_samples)
+        if len(X_demo) == 0 or len(y_demo) == 0:
+            return 0.0, 0.0
         X_t = torch.tensor(X_demo, dtype=torch.float32)
         y_t = torch.tensor(y_demo, dtype=torch.long)
 
@@ -819,8 +1009,9 @@ class AutonomousLoopController:
             step_idx = 0
             done = False
             ep_had_illegal = False
+            step_limit = episode_step_limit(env)
 
-            while not done and step_idx < 50:
+            while not done and step_idx < step_limit:
                 step_idx += 1
                 obs_t = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
                 with torch.no_grad():
@@ -874,6 +1065,7 @@ class AutonomousLoopController:
                     "reward": float(reward),
                     "reward_breakdown": step_info.get("reward_breakdown", {}),
                     "is_success": bool(step_info.get("is_success", False)),
+                    "is_correct": step_info.get("is_correct"),
                 })
 
                 ep_id = f"r{round_num}_eval_{ep_idx}"
@@ -895,8 +1087,8 @@ class AutonomousLoopController:
             if ep_had_illegal:
                 illegal_count += 1
 
-            is_success = any(s.get("is_success", False) for s in ep_steps)
-            if is_success:
+            episode_metric = episode_metric_value(env, ep_steps)
+            if episode_metric >= 100.0:
                 success_count += 1
 
             eval_episodes.append({
@@ -904,11 +1096,18 @@ class AutonomousLoopController:
                 "round": round_num,
                 "total_reward": ep_reward,
                 "steps": ep_steps,
-                "is_success": is_success,
+                "is_success": bool(ep_steps and ep_steps[-1].get("is_success")),
+                "metric_value": round(episode_metric, 2),
+                "task_class": getattr(env, "task_class", "control"),
                 "reward_breakdown": ep_steps[-1].get("reward_breakdown", {}) if ep_steps else {},
             })
 
-        metric = round((success_count / max(1, n_eval_episodes)) * 100.0, 2)
+        if getattr(env, "task_class", "control") == "classification" and eval_episodes:
+            metric = round(
+                sum(ep["metric_value"] for ep in eval_episodes) / len(eval_episodes), 2
+            )
+        else:
+            metric = round((success_count / max(1, n_eval_episodes)) * 100.0, 2)
         illegal_rate = round((illegal_count / max(1, n_eval_episodes)) * 100.0, 2)
         return metric, eval_episodes, illegal_rate
 
@@ -999,9 +1198,11 @@ class AutonomousLoopController:
             ep_reward = 0.0
             step_idx = 0
             done = False
+            ep_id = f"r{round_num}_train_{ep_idx}"
+            step_limit = episode_step_limit(env)
             should_stream = emit_fn is not None and (ep_idx % stream_stride == 0 or ep_idx <= 2 or ep_idx == n_episodes)
 
-            while not done and step_idx < 50:
+            while not done and step_idx < step_limit:
                 step_idx += 1
                 obs_t = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
                 with torch.no_grad():
@@ -1034,9 +1235,9 @@ class AutonomousLoopController:
                     "reward": float(reward),
                     "reward_breakdown": step_info.get("reward_breakdown", {}),
                     "is_success": bool(step_info.get("is_success", False)),
+                    "is_correct": step_info.get("is_correct"),
                 })
 
-                ep_id = f"r{round_num}_train_{ep_idx}"
                 # Stream throttled live frame over WebSocket / callback
                 if should_stream and (step_idx % 2 == 1 or done):
                     emit_fn({
@@ -1054,14 +1255,13 @@ class AutonomousLoopController:
 
                 obs = next_obs
 
-            # Final success check for episode
-            is_success = any(s.get("is_success", False) for s in ep_steps)
             collected_episodes.append({
                 "episode_id": ep_id,
                 "round": round_num,
                 "total_reward": ep_reward,
                 "steps": ep_steps,
-                "is_success": is_success,
+                "is_success": bool(ep_steps and ep_steps[-1].get("is_success")),
+                "metric_value": round(episode_metric_value(env, ep_steps), 2),
                 "reward_breakdown": ep_steps[-1].get("reward_breakdown", {}) if ep_steps else {},
             })
 

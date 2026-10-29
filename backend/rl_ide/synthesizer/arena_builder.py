@@ -6,6 +6,7 @@ Eliminates all domain-specific branches, rover fallbacks, and hardcoded template
 """
 
 from __future__ import annotations
+import html as html_lib
 import json
 import os
 import re
@@ -83,8 +84,13 @@ def validate_arena_html_scripts(html_text: str) -> bool:
                 res = subprocess.run(["node", "--check", "-"], input=s, text=True, capture_output=True, timeout=5)
                 if res.returncode != 0:
                     return False
+            except FileNotFoundError:
+                # Without a JS engine we cannot prove the scripts parse: do not claim success.
+                return False
+            except subprocess.TimeoutExpired:
+                return False
             except Exception:
-                pass
+                return False
     return True
 
 
@@ -190,7 +196,7 @@ class JITArenaSynthesizer:
                 prompt = (
                     f"You are updating and restyling this self-contained `arena.html` according to the user's request:\n"
                     f"User Request: \"{user_visual_request}\"\n\n"
-                    f"Current Arena HTML:\n{current_arena_html[:6000] if current_arena_html else ''}\n\n"
+                    f"Current Arena HTML:\n{current_arena_html if current_arena_html else ''}\n\n"
                     f"Blueprint: {bp_spec.model_dump_json(indent=2)}\n\n"
                     f"REQUIREMENTS:\n"
                     f"1. Apply the user's visual styling (e.g. colors, scoreboard, badges, layouts, sizing, themes) and interactive features.\n"
@@ -199,7 +205,13 @@ class JITArenaSynthesizer:
                 )
                 raw = self.client.generate(prompt, system_prompt=ARENA_SYNTHESIZER_SYSTEM_PROMPT, timeout=30.0)
                 extracted = extract_html_code(raw)
-                if extracted and "ARENA_UPDATE" in extracted and "startMockAnimationLoop" in extracted:
+                if (
+                    extracted
+                    and "ARENA_UPDATE" in extracted
+                    and "startMockAnimationLoop" in extracted
+                    and "sendInteractiveAction" in extracted
+                    and "renderDomainState" in extracted
+                ):
                     healed = heal_arena_html_scripts(extracted)
                     if validate_arena_html_scripts(healed):
                         if workspace_dir:
@@ -212,7 +224,6 @@ class JITArenaSynthesizer:
             blueprint=bp_spec,
             sample_arena_state=sample_arena_state,
             visual_style=user_visual_request,
-            base_html=current_arena_html,
         )
         if workspace_dir:
             (Path(workspace_dir) / "arena.html").write_text(updated, encoding="utf-8")
@@ -237,110 +248,103 @@ class JITArenaSynthesizer:
         blueprint: AgentBlueprintSpec,
         sample_arena_state: dict[str, Any] | None,
         visual_style: str | None = None,
-        base_html: str | None = None,
     ) -> str:
-        """Constructs a responsive, feature-complete arena.html with full postMessage support, mock animation loop, and visual theming."""
+        """Builds a self-contained arena driven only by the blueprint contract and real state.
+
+        No domain branches: visuals come from the declared action labels, the actual
+        ``get_render_state()`` sample, and elements the user explicitly requested.
+        """
         task_title = blueprint.task_title or "RL Arena"
         action_labels = blueprint.action_labels or ["Action 0", "Action 1"]
         target_threshold = blueprint.target_metric_threshold
 
-        style_query = ((visual_style or "") + " " + (blueprint.arena_visual_description or "")).lower()
-        if base_html:
-            style_query += " " + base_html.lower()
+        # Restyle state is explicit: only the current request and the blueprint metaphor.
+        style_query = f"{visual_style or ''} {blueprint.arena_visual_description or ''}".lower()
 
         has_scoreboard = "scoreboard" in style_query or "score" in style_query
         has_gold = "gold" in style_query or "golden" in style_query or "amber" in style_query
         has_arcade = "arcade" in style_query or "retro" in style_query
         has_larger = "larger" in style_query or "bigger" in style_query
-
         accent_color = "amber" if has_gold else "cyan"
         theme_class = "font-mono" if has_arcade else "font-sans"
 
-        sample_state = sample_arena_state or {}
-        sample_json = json.dumps(sample_state)
-        action_labels_json = json.dumps(action_labels)
+        # User-requested UI elements are rendered generically (text is escaped).
+        requested: list[str] = []
+        for match in re.finditer(
+            r"(?:add|show|display|render|include|put)\s+(?:a|an)?\s*(.{3,60}?)\s+"
+            r"(badge|label|meter|gauge|banner|panel|card|indicator)\b",
+            visual_style or "",
+            re.IGNORECASE,
+        ):
+            text = match.group(1).strip(" .")
+            requested.append(f"{text} ({match.group(2)})")
+        for quoted in re.findall(r"['\"]([^'\"]{3,60})['\"]", visual_style or ""):
+            if quoted.strip() and quoted.strip() not in requested:
+                requested.append(quoted.strip())
+        requested = requested[:4]
 
-        is_spatial_canvas = any(kw in style_query or kw in (blueprint.task_title or "").lower() or kw in (blueprint.domain_summary or "").lower() for kw in [
-            "rover", "robot", "amr", "warehouse robot", "loading dock", "obstacle", "spatial"
-        ])
-        canvas_html = '<canvas id="sim-canvas" width="480" height="280" class="rounded-xl border border-slate-800 bg-slate-950/80 shadow-inner max-w-full block"></canvas>' if is_spatial_canvas else ""
+        requested_html = ""
+        if requested:
+            chips = "".join(
+                f'<span class="px-3 py-1 rounded-full bg-slate-900 border border-{accent_color}-500/50 '
+                f'text-{accent_color}-300 text-xs font-mono shadow">{html_lib.escape(item)}</span>'
+                for item in requested
+            )
+            requested_html = (
+                f'<div id="requested-ui-elements" class="flex flex-wrap items-center gap-2 my-1">{chips}</div>'
+            )
 
-        # Dynamic scoreboard widget if requested
         scoreboard_html = ""
         if has_scoreboard:
             scoreboard_html = f"""
             <aside id="arena-scoreboard" class="bg-slate-900/90 border border-{accent_color}-500/40 rounded-xl p-3 flex flex-col gap-2 min-w-[140px] text-xs font-mono shadow-lg">
               <div class="text-[10px] uppercase font-bold tracking-wider text-{accent_color}-400 border-b border-slate-800 pb-1">Scoreboard</div>
               <div class="flex justify-between items-center"><span class="text-slate-400">Agent:</span><span id="score-agent" class="font-bold text-{accent_color}-300">0</span></div>
-              <div class="flex justify-between items-center"><span class="text-slate-400">Human / Opp:</span><span id="score-opp" class="font-bold text-slate-300">0</span></div>
+              <div class="flex justify-between items-center"><span class="text-slate-400">Opponent:</span><span id="score-opp" class="font-bold text-slate-300">0</span></div>
               <div class="flex justify-between items-center"><span class="text-slate-400">Streak:</span><span id="score-streak" class="font-bold text-emerald-400">0</span></div>
             </aside>
             """
 
-        # Dynamic custom UI overlays / badges / meters requested by user
-        overlays = []
-        if "hipaa" in style_query or "boundary" in style_query or "vital" in style_query:
-            overlays.append(
-                '<div id="badge-hipaa" class="flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-950/80 border border-emerald-500/60 text-emerald-300 text-xs font-mono shadow-md">'
-                '<span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>'
-                '<span class="font-bold">HIPAA Boundary Verified</span>'
-                '</div>'
-            )
-        if "burn-rate" in style_query or "burn rate" in style_query or "$/hour" in style_query or "cloud burn" in style_query:
-            overlays.append(
-                '<div id="meter-burn-rate" class="flex items-center gap-2 px-3 py-1 rounded-lg bg-slate-900 border border-amber-500/50 text-xs font-mono shadow-md">'
-                '<span class="text-slate-400">Burn-Rate:</span>'
-                '<span id="val-burn-rate" class="font-bold text-amber-400">$12.50/hr</span>'
-                '</div>'
-            )
-        if has_arcade or "arcade" in style_query:
-            overlays.append(
-                '<div id="badge-arcade" class="px-2.5 py-1 rounded bg-fuchsia-950/80 border border-fuchsia-500/60 text-fuchsia-300 text-xs font-mono uppercase tracking-wider font-bold shadow-md">'
-                '🕹️ NEON ARCADE THEME'
-                '</div>'
-            )
-        custom_overlays_html = f'<div id="custom-restyle-overlays" class="flex flex-wrap items-center gap-2 my-1">{"".join(overlays)}</div>' if overlays else ""
-
-        # Action control buttons
         buttons_html = "".join([
-            f'<button onclick="sendInteractiveAction({idx})" class="px-3 py-2 bg-slate-900 hover:bg-{accent_color}-600/30 active:scale-95 text-slate-200 hover:text-white border border-slate-700 hover:border-{accent_color}-500 rounded-lg text-xs font-mono font-medium transition-all shadow truncate" title="{lbl}">{lbl}</button>'
+            f'<button onclick="sendInteractiveAction({idx})" class="px-3 py-2 bg-slate-900 hover:bg-{accent_color}-600/30 active:scale-95 text-slate-200 hover:text-white border border-slate-700 hover:border-{accent_color}-500 rounded-lg text-xs font-mono font-medium transition-all shadow truncate" title="{html_lib.escape(str(lbl))}">{html_lib.escape(str(lbl))}</button>'
             for idx, lbl in enumerate(action_labels)
         ])
 
-        # Stage size class
         stage_size = "max-w-4xl min-h-[360px]" if has_larger else "max-w-2xl min-h-[280px]"
+        sample_state = sample_arena_state or {}
+        sample_json = json.dumps(sample_state, default=str).replace("</", "<\\/")
+        action_labels_json = json.dumps([str(x) for x in action_labels]).replace("</", "<\\/")
+        safe_title = html_lib.escape(str(task_title))
+        safe_metaphor = html_lib.escape(str(blueprint.arena_visual_description or task_title))
 
         return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{task_title} — RL Studio Arena</title>
+  <title>{safe_title} — RL Studio Arena</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
     body {{ background-color: #020617; color: #f8fafc; font-family: ui-sans-serif, system-ui, sans-serif; }}
-    .glow-accent {{ box-shadow: 0 0 15px rgba(245, 158, 11, 0.25); }}
     .arena-cell {{ transition: all 0.15s ease-out; }}
     .arena-cell:hover {{ transform: scale(1.04); }}
   </style>
 </head>
 <body class="p-3 bg-slate-950 text-slate-100 min-h-screen flex flex-col justify-between select-none {theme_class} {'arcade-theme' if has_arcade else ''}">
 
-  <!-- Live Mock Preview Banner -->
   <div id="mock-preview-banner" class="flex items-center justify-between px-3 py-1.5 rounded-lg bg-amber-950/70 border border-amber-600/60 text-amber-200 text-xs shadow-md mb-2">
     <span class="flex items-center gap-2">
       <span class="w-2 h-2 rounded-full bg-amber-400 animate-ping"></span>
       <span class="font-semibold">✨ LIVE ARENA PREVIEW (MOCK ANIMATION)</span>
-      <span class="text-amber-300/80 hidden sm:inline">— Ask in chat to customize look & feel, or click "Lock Arena & Start Training"</span>
+      <span class="text-amber-300/80 hidden sm:inline">— ask in chat to customize, or lock the arena to train</span>
     </span>
     <span class="text-[10px] uppercase font-mono px-2 py-0.5 rounded bg-amber-950/80 border border-amber-700/60 text-amber-300 font-bold">Mock Mode</span>
   </div>
 
-  <!-- Header Telemetry Bar -->
   <header class="flex flex-wrap items-center justify-between pb-2 border-b border-slate-800 gap-2">
     <div class="flex items-center gap-2">
       <span class="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></span>
-      <h1 class="text-sm font-bold text-slate-100">{task_title}</h1>
+      <h1 class="text-sm font-bold text-slate-100">{safe_title}</h1>
       <span class="text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-700 font-mono">Universal Arena</span>
     </div>
     <div class="flex items-center gap-2 font-mono text-xs">
@@ -359,9 +363,8 @@ class JITArenaSynthesizer:
     </div>
   </header>
 
-  {custom_overlays_html}
+  {requested_html}
 
-  <!-- Live Reward Breakdown Bar Strip -->
   <section class="py-1.5">
     <div class="text-[10px] font-semibold uppercase tracking-wider text-slate-500 mb-1">Live Reward Breakdown</div>
     <div id="reward-breakdown-bar" class="flex flex-wrap gap-1.5 text-xs font-mono">
@@ -369,22 +372,16 @@ class JITArenaSynthesizer:
     </div>
   </section>
 
-  <!-- Main Center Visual Stage with Optional Scoreboard -->
   <main id="domain-arena-stage" class="flex-1 flex items-center justify-center gap-4 py-2">
     {scoreboard_html}
 
     <div class="flex-1 flex flex-col items-center justify-center bg-slate-900/60 border border-slate-800 rounded-2xl p-4 {stage_size} w-full shadow-2xl relative overflow-hidden">
-      <!-- Reactive State Display Canvas/Grid -->
       <div id="visual-stage-container" class="w-full flex-1 flex flex-col items-center justify-center gap-3">
-        <div id="visual-metaphor-header" class="text-xs font-mono text-slate-400 uppercase tracking-widest">{task_title}</div>
-        {canvas_html}
+        <div id="visual-metaphor-header" class="text-xs font-mono text-slate-400 uppercase tracking-widest text-center">{safe_metaphor}</div>
         <div id="dynamic-state-grid" class="flex flex-wrap items-center justify-center gap-2 max-w-lg w-full"></div>
         <div id="status-badge" class="px-3 py-1 bg-slate-800 border border-slate-700 rounded-full text-xs font-mono text-slate-300">Ready</div>
       </div>
-        <div id="status-badge" class="px-3 py-1 bg-slate-800 border border-slate-700 rounded-full text-xs font-mono text-slate-300">Ready</div>
-      </div>
 
-      <!-- Interactive Action Controls -->
       <div class="w-full mt-3 pt-3 border-t border-slate-800/80">
         <div class="text-[10px] uppercase font-mono text-slate-500 mb-1.5">Interactive Controls</div>
         <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
@@ -394,7 +391,6 @@ class JITArenaSynthesizer:
     </div>
   </main>
 
-  <!-- Action Probability Distribution Footer -->
   <footer class="pt-2 border-t border-slate-800">
     <div class="flex justify-between items-center text-[10px] uppercase tracking-wider text-slate-500 mb-1">
       <span>Action Probabilities (π)</span>
@@ -403,14 +399,12 @@ class JITArenaSynthesizer:
     <div id="action-probs-bar" class="grid grid-cols-3 sm:grid-cols-5 md:grid-cols-9 gap-1.5 text-[10px] font-mono"></div>
   </footer>
 
-  <!-- postMessage Communication Protocol & Dynamic Animation Engine -->
   <script>
     const ACTION_LABELS = {action_labels_json};
     let currentRenderState = {sample_json};
     let mockAnimationTimer = null;
     let mockStepCount = 0;
 
-    // Initialize Action Probabilities Bar
     const probsBar = document.getElementById('action-probs-bar');
     if (probsBar && ACTION_LABELS.length > 0) {{
       probsBar.innerHTML = ACTION_LABELS.map((lbl, idx) => `
@@ -424,13 +418,9 @@ class JITArenaSynthesizer:
       `).join('');
     }}
 
-    // Dispatch interaction to parent IDE
     function sendInteraction(payload) {{
       if (window.parent) {{
-        window.parent.postMessage({{
-          type: "ARENA_INTERACT",
-          payload: payload
-        }}, "*");
+        window.parent.postMessage({{ type: "ARENA_INTERACT", payload: payload }}, "*");
       }}
     }}
 
@@ -441,52 +431,65 @@ class JITArenaSynthesizer:
       }}
     }}
 
-    // Dynamic State Renderer for Arbitrary Domain State
+    function flattenStateArray(value) {{
+      if (!Array.isArray(value)) return null;
+      if (value.length > 0 && Array.isArray(value[0])) {{
+        const cols = value[0].length;
+        return {{ flat: value.flat(), cols: cols }};
+      }}
+      const n = value.length;
+      const cols = n === 9 ? 3 : n === 42 ? 7 : Math.ceil(Math.sqrt(n));
+      return {{ flat: value.slice(), cols: cols }};
+    }}
+
     function renderDomainState(state) {{
       if (!state) return;
       currentRenderState = state;
       const grid = document.getElementById('dynamic-state-grid');
       if (!grid) return;
 
-      // Check if state contains a grid or board representation
-      const board = state.board || state.grid;
-      if (board && (Array.isArray(board) || Array.isArray(board[0]))) {{
-        let flat = [];
-        if (Array.isArray(board[0])) {{
-          flat = board.flat();
-        }} else {{
-          flat = board;
+      let arrayKey = null;
+      let arrayValue = null;
+      for (const [k, v] of Object.entries(state)) {{
+        if (Array.isArray(v) && v.length > 0) {{
+          arrayKey = k;
+          arrayValue = flattenStateArray(v);
+          break;
         }}
-        const numCols = Array.isArray(board[0]) ? board[0].length : (flat.length === 9 ? 3 : (flat.length === 42 ? 7 : Math.ceil(Math.sqrt(flat.length))));
+      }}
+
+      if (arrayValue) {{
+        const interactive = arrayValue.flat.length === ACTION_LABELS.length;
         grid.style.display = 'grid';
-        grid.style.gridTemplateColumns = `repeat(${{numCols}}, minmax(0, 1fr))`;
-        grid.innerHTML = flat.map((cell, idx) => {{
-          const isMarked = cell !== 0 && cell !== null && cell !== undefined;
-          const markText = cell === 1 ? 'X' : (cell === 2 ? 'O' : (isMarked ? String(cell) : ''));
-          const markColor = cell === 1 ? 'text-cyan-400 border-cyan-500/50 bg-cyan-950/30' : (cell === 2 ? 'text-amber-400 border-amber-500/50 bg-amber-950/30' : 'border-slate-800 bg-slate-950 hover:border-slate-700');
-          return `<div onclick="sendInteractiveAction(${{idx}})" class="w-10 h-10 sm:w-12 sm:h-12 border rounded-lg flex items-center justify-center font-bold text-sm cursor-pointer arena-cell ${{markColor}}">${{markText}}</div>`;
+        grid.style.gridTemplateColumns = `repeat(${{arrayValue.cols}}, minmax(0, 1fr))`;
+        grid.innerHTML = arrayValue.flat.map((cell, idx) => {{
+          const isMarked = cell !== 0 && cell !== null && cell !== undefined && cell !== '';
+          const label = isMarked ? String(cell).slice(0, 4) : '';
+          const style = isMarked
+            ? 'text-cyan-400 border-cyan-500/50 bg-cyan-950/30'
+            : 'border-slate-800 bg-slate-950 hover:border-slate-700';
+          const click = interactive ? ` onclick="sendInteractiveAction(${{idx}})"` : '';
+          const cursor = interactive ? ' cursor-pointer' : '';
+          return `<div${{click}} class="w-10 h-10 sm:w-12 sm:h-12 border rounded-lg flex items-center justify-center font-bold text-sm arena-cell${{cursor}} ${{style}}">${{label}}</div>`;
         }}).join('');
       }} else {{
-        // Key-value reactive telemetry display for generic state dicts
         grid.style.display = 'flex';
         grid.innerHTML = Object.entries(state)
           .filter(([k]) => !['status', 'step_count'].includes(k))
           .map(([k, v]) => `
             <div class="px-3 py-1.5 bg-slate-900 border border-slate-800 rounded-lg text-xs font-mono flex flex-col items-center">
-              <span class="text-slate-500 text-[10px] uppercase truncate max-w-[100px]">${{k}}</span>
-              <span class="text-{accent_color}-400 font-bold">${{typeof v === 'number' ? Number(v).toFixed(2) : String(v).slice(0, 15)}}</span>
+              <span class="text-slate-500 text-[10px] uppercase truncate max-w-[110px]">${{k}}</span>
+              <span class="text-{accent_color}-400 font-bold">${{typeof v === 'number' ? Number(v).toFixed(2) : String(v).slice(0, 18)}}</span>
             </div>
           `).join('');
       }}
 
-      // Update status badge
       const badge = document.getElementById('status-badge');
       if (badge && state.status) {{
         badge.innerText = String(state.status).toUpperCase();
       }}
     }}
 
-    // Apply Live Telemetry Payload
     function applyArenaPayload(data) {{
       if (!data) return;
       if (data.episode_id !== undefined) {{
@@ -501,8 +504,6 @@ class JITArenaSynthesizer:
         const rw = document.getElementById('telemetry-reward');
         if (rw) rw.innerText = Number(data.total_reward).toFixed(2);
       }}
-
-      // Update Reward Breakdown Strip
       if (data.reward_breakdown) {{
         const rb = document.getElementById('reward-breakdown-bar');
         if (rb) {{
@@ -515,8 +516,6 @@ class JITArenaSynthesizer:
           }}
         }}
       }}
-
-      // Update Action Probabilities
       if (data.action_probs && Array.isArray(data.action_probs)) {{
         data.action_probs.forEach((p, idx) => {{
           const bar = document.getElementById('prob-bar-' + idx);
@@ -526,38 +525,60 @@ class JITArenaSynthesizer:
           if (val) val.innerText = pct + '%';
         }});
       }}
-
-      // Update Domain State
       if (data.arena_state) {{
         renderDomainState(data.arena_state);
       }}
     }}
 
-    // Mock Preview Animation Step
+    // Generic preview animation: mutates the first array-valued state field, or numeric fields.
     function stepMockDomain(customAction) {{
       mockStepCount++;
       const stepElem = document.getElementById('telemetry-step');
       if (stepElem) stepElem.innerText = mockStepCount;
 
-      const actIdx = customAction !== undefined ? customAction : Math.floor(Math.random() * ACTION_LABELS.length);
+      const actIdx = customAction !== undefined ? customAction : Math.floor(Math.random() * Math.max(1, ACTION_LABELS.length));
       const tag = document.getElementById('selected-action-tag');
       if (tag && ACTION_LABELS[actIdx]) tag.innerText = ACTION_LABELS[actIdx];
 
-      // Mutate sample state for live animation
-      if (currentRenderState) {{
-        const next = {{ ...currentRenderState }};
-        if (next.board && Array.isArray(next.board)) {{
-          const emptyIdx = next.board.map((v, i) => v === 0 ? i : -1).filter(i => i !== -1);
-          if (emptyIdx.length > 0) {{
-            const chosen = emptyIdx[Math.floor(Math.random() * emptyIdx.length)];
-            next.board = [...next.board];
-            next.board[chosen] = (mockStepCount % 2 === 0) ? 1 : 2;
+      if (!currentRenderState) return;
+      const next = {{ ...currentRenderState }};
+      let mutated = false;
+      for (const [k, v] of Object.entries(next)) {{
+        if (Array.isArray(v) && v.length > 0) {{
+          const flatInfo = flattenStateArray(v);
+          if (Array.isArray(v[0])) {{
+            next[k] = v.map(row => row.slice());
+            const rows = next[k];
+            const empty = [];
+            rows.forEach((row, r) => row.forEach((cell, c) => {{ if (cell === 0) empty.push([r, c]); }}));
+            if (empty.length > 0) {{
+              const [r, c] = empty[Math.floor(Math.random() * empty.length)];
+              rows[r][c] = (mockStepCount % 2 === 0) ? 1 : 2;
+            }} else {{
+              rows.forEach(row => row.fill(0));
+            }}
           }} else {{
-            next.board = next.board.map(() => 0);
+            const arr = v.slice();
+            const emptyIdx = arr.map((cell, i) => cell === 0 ? i : -1).filter(i => i !== -1);
+            if (emptyIdx.length > 0) {{
+              arr[emptyIdx[Math.floor(Math.random() * emptyIdx.length)]] = (mockStepCount % 2 === 0) ? 1 : 2;
+            }} else {{
+              arr.fill(0);
+            }}
+            next[k] = arr;
+          }}
+          mutated = true;
+          break;
+        }}
+      }}
+      if (!mutated) {{
+        for (const [k, v] of Object.entries(next)) {{
+          if (typeof v === 'number' && k !== 'step_count') {{
+            next[k] = Number((v + (Math.random() - 0.5) * 0.2).toFixed(2));
           }}
         }}
-        renderDomainState(next);
       }}
+      renderDomainState(next);
     }}
 
     function startMockAnimationLoop() {{
@@ -576,7 +597,6 @@ class JITArenaSynthesizer:
       if (banner) banner.style.display = 'none';
     }}
 
-    // Listen for parent messages
     window.addEventListener("message", function(event) {{
       if (!event.data) return;
       if (event.data.type === "SET_ARENA_MODE") {{
@@ -594,7 +614,6 @@ class JITArenaSynthesizer:
       }}
     }});
 
-    // Initialize with sample render state
     renderDomainState(currentRenderState);
     startMockAnimationLoop();
   </script>

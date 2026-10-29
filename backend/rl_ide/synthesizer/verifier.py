@@ -86,6 +86,9 @@ class SandboxSmokeTester:
         self,
         env_cls: type[gym.Env],
         dataset_records: list[dict[str, Any]] | None = None,
+        expected_state_keys: list[str] | None = None,
+        expected_obs_dim: int | None = None,
+        expected_n_actions: int | None = None,
     ) -> dict[str, Any]:
         """Runs thorough runtime smoke test on a Gymnasium environment class."""
         # 1. Instantiate
@@ -100,6 +103,21 @@ class SandboxSmokeTester:
         obs_shape = env.observation_space.shape
         n_actions = env.action_space.n
 
+        # 2b. Declared contract: labels must align with the actual spaces
+        if expected_obs_dim is not None and int(obs_shape[0]) != int(expected_obs_dim):
+            raise ValueError(
+                f"observation_space shape {obs_shape} does not match {expected_obs_dim} declared observation features"
+            )
+        if expected_n_actions is not None and int(n_actions) != int(expected_n_actions):
+            raise ValueError(
+                f"action_space.n {n_actions} does not match {expected_n_actions} declared actions"
+            )
+        labels = getattr(env, "action_labels", None)
+        if labels is not None and len(labels) != n_actions:
+            raise ValueError(f"env.action_labels has {len(labels)} entries but action_space.n is {n_actions}")
+
+        declared_keys = [k for k in (expected_state_keys or []) if k not in ("status", "step_count")]
+
         # 3. Test Reset
         obs, info = env.reset()
         if not isinstance(obs, np.ndarray):
@@ -112,6 +130,8 @@ class SandboxSmokeTester:
             raise TypeError(f"reset() info must be a dict, got {type(info)}")
 
         # 4. Step through 25 actions
+        snapshot: list[dict[str, Any]] = []
+        step_infos: list[dict[str, Any]] = []
         for step_idx in range(25):
             action = env.action_space.sample()
             step_res = env.step(action)
@@ -149,12 +169,25 @@ class SandboxSmokeTester:
 
             if "arena_state" not in step_info:
                 raise KeyError("step() info must contain 'arena_state' dictionary")
+            if not isinstance(step_info["arena_state"], dict):
+                raise TypeError("info['arena_state'] must be a dictionary")
             # Verify JSON serializable
             try:
                 json.dumps(step_info["arena_state"])
             except Exception as e:
                 raise ValueError(f"info['arena_state'] is not JSON serializable: {e}")
 
+            # Declared render-state contract (state_dict_schema is the shared source of truth)
+            for key in declared_keys:
+                if key not in step_info["arena_state"]:
+                    raise KeyError(
+                        f"arena_state is missing declared key '{key}' from state_dict_schema"
+                    )
+            render_state = dict(step_info["arena_state"])
+            render_state.pop("step_count", None)
+            snapshot.append(render_state)
+
+            step_infos.append(step_info)
             if term or trunc:
                 env.reset()
 
@@ -164,10 +197,12 @@ class SandboxSmokeTester:
         X, y = env.get_demonstrations(num_samples=32)
         if not isinstance(X, np.ndarray) or not isinstance(y, np.ndarray):
             raise TypeError("get_demonstrations must return tuple of (np.ndarray, np.ndarray)")
-        if X.shape != (32, obs_shape[0]):
-            raise ValueError(f"Demonstration X shape {X.shape} does not match (32, {obs_shape[0]})")
-        if y.shape != (32,):
-            raise ValueError(f"Demonstration y shape {y.shape} does not match (32,)")
+        if X.ndim != 2 or X.shape[1] != obs_shape[0]:
+            raise ValueError(f"Demonstration X shape {X.shape} must be (N, {obs_shape[0]})")
+        if y.shape != (X.shape[0],):
+            raise ValueError(f"Demonstration y shape {y.shape} must be ({X.shape[0]},)")
+        if X.shape[0] < 1:
+            raise ValueError("get_demonstrations returned no samples; a warm-start teacher is required")
         if not np.all(np.isfinite(X)):
             raise ValueError("Demonstrations X contains NaNs or infinite values")
         if not (np.all(y >= 0) and np.all(y < n_actions)):
@@ -195,10 +230,27 @@ class SandboxSmokeTester:
         except Exception as e:
             raise ValueError(f"interactive_step result is not JSON serializable: {e}")
 
+        # Declared state must actually change over an episode (a frozen render state is a bug).
+        if len(snapshot) > 1:
+            first, last = snapshot[0], snapshot[-1]
+            if first == last:
+                raise ValueError("arena_state never changes during an episode; declared state contract is static")
+
+        # Success reachability is reported as uncertainty, never silently assumed.
+        success_observed = any(bool(s.get("is_success")) for s in step_infos)
+        warnings: list[str] = []
+        if not success_observed and not getattr(env, "is_placeholder", False):
+            warnings.append(
+                "Success signal not observed during the 25-step random probe; reachability could not be verified."
+            )
+
         return {
             "verified": True,
             "obs_dim": obs_shape[0],
             "n_actions": n_actions,
+            "is_placeholder": bool(getattr(env, "is_placeholder", False)),
+            "success_observed": success_observed,
+            "warnings": warnings,
             "sample_arena_state": interactive_res["arena_state"],
         }
 
@@ -234,18 +286,33 @@ class SandboxSmokeTester:
 
                 # 4. Runtime Smoke Test
                 records = dataset.df.to_dict(orient="records") if (dataset and hasattr(dataset, "df")) else None
-                res = self.run_smoke_test(env_cls, dataset_records=records)
+                res = self.run_smoke_test(
+                    env_cls,
+                    dataset_records=records,
+                    expected_state_keys=list(getattr(blueprint, "state_dict_schema", {}) or {}),
+                    expected_obs_dim=len(getattr(blueprint, "observation_features", []) or []) or None,
+                    expected_n_actions=len(getattr(blueprint, "action_labels", []) or []) or None,
+                )
 
                 # Canonicalize output file
                 canonical_file.write_text(current_code, encoding="utf-8")
 
                 repair_logs.append(f"Attempt {attempt}: Verification PASSED 100% (25 steps, demos, interactive).")
+                try:
+                    attempt_file.unlink()
+                except Exception:
+                    pass
                 return True, current_code, repair_logs
 
             except Exception as exc:
                 tb = traceback.format_exc()
                 log_msg = f"Attempt {attempt} FAILED: {exc}\n{tb}"
                 repair_logs.append(log_msg)
+                try:
+                    if "attempt_file" in locals() and attempt_file.exists():
+                        attempt_file.unlink()
+                except Exception:
+                    pass
 
                 if attempt >= max_retries:
                     break
@@ -299,7 +366,5 @@ class SandboxSmokeTester:
             except Exception:
                 pass
 
-        # 3. Deterministic fallback repair: re-synthesize clean baseline code for this blueprint
-        from rl_ide.synthesizer.env_builder import JITEnvironmentSynthesizer
-        synth = JITEnvironmentSynthesizer()
-        return synth.generate_env_code(blueprint, dataset)
+        # 3. No silent substitution: returning a *different* environment would hide the failure.
+        return broken_code

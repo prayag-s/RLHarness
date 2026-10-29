@@ -28,10 +28,13 @@ from rl_ide.architect.models import (
 )
 from rl_ide.architect.intake import (
     IntakeArchitectAgent,
+    apply_answers_to_blueprint,
+    synthesize_blueprint_from_prompt,
 )
 from rl_ide.synthesizer.arena_builder import JITArenaSynthesizer
 from rl_ide.synthesizer.env_builder import JITEnvironmentSynthesizer, load_synthesized_env_class, instantiate_env
 from rl_ide.synthesizer.verifier import SandboxSmokeTester
+from rl_ide.state.records_store import save_records
 from rl_ide.state.conversation_store import (
     ConversationStore,
     get_conversation_store,
@@ -42,6 +45,7 @@ from rl_ide.autopilot.loop_controller import (
     AutonomousLoopController,
     SessionStateStore,
     SessionState,
+    TrainingInProgressError,
     parse_nudge_meta_command,
 )
 from rl_ide.autopilot.auto_tuner import AutoTunerAgent
@@ -53,6 +57,7 @@ class StudioActionType(str, Enum):
     PREVIEW_OR_UPDATE_ARENA = "update_arena"        # Generate or restyle arena.html with live mock animation
     UPDATE_AGENT_CHARACTERISTICS = "update_agent"   # Modify compute_reward() / demonstrations / personality
     UPDATE_ENV_MECHANICS = "update_env_mechanics"   # Modify state/action space or rules in env_module.py
+    UPDATE_INFERENCE = "update_inference"           # Patch action selection inside interactive_step()
     RUN_OR_CONTINUE_TRAINING = "run_training"       # Start or continue training for N rounds / M episodes
 
 
@@ -128,8 +133,9 @@ class StudioOmniAgent:
         user_message: str,
         conversation: dict[str, Any],
         force_action: StudioActionType | None = None,
+        plan: ChatActionPlan | None = None,
     ) -> list[StudioActionType]:
-        """Classifies user turn into composable Studio Intent Actions via the Agentic Chat Planner without keyword routing lists."""
+        """Maps an agentic ChatActionPlan to composable Studio intent actions."""
         if force_action:
             return [force_action]
 
@@ -140,15 +146,19 @@ class StudioOmniAgent:
         if not has_arena or not has_blueprint:
             return [StudioActionType.PREVIEW_OR_UPDATE_ARENA]
 
-        current_env_code = conversation.get("env_code", "")
-        plan = self._plan_chat_action(user_message, conversation=conversation, current_env_code=current_env_code)
+        if plan is None:
+            current_env_code = conversation.get("env_code", "")
+            plan = self._plan_chat_action(user_message, conversation=conversation, current_env_code=current_env_code)
 
         actions: list[StudioActionType] = []
         for target in plan.targets:
             if target == ExecutionTarget.ARENA_VISUAL_UI:
                 if StudioActionType.PREVIEW_OR_UPDATE_ARENA not in actions:
                     actions.append(StudioActionType.PREVIEW_OR_UPDATE_ARENA)
-            elif target in (ExecutionTarget.INFERENCE_STRATEGY, ExecutionTarget.REWARD_SHAPING):
+            elif target == ExecutionTarget.INFERENCE_STRATEGY:
+                if StudioActionType.UPDATE_INFERENCE not in actions:
+                    actions.append(StudioActionType.UPDATE_INFERENCE)
+            elif target == ExecutionTarget.REWARD_SHAPING:
                 if StudioActionType.UPDATE_AGENT_CHARACTERISTICS not in actions:
                     actions.append(StudioActionType.UPDATE_AGENT_CHARACTERISTICS)
             elif target == ExecutionTarget.ENV_SIM_MECHANICS:
@@ -169,103 +179,141 @@ class StudioOmniAgent:
 
         return actions
 
+    # Domain-free capability patterns (word boundaries prevent substrings like "invoice" -> "voice").
+    _UNSUPPORTED_PATTERNS: list[tuple[str, str]] = [
+        (r"\bdiscord\b", "Discord integration"),
+        (r"\bvoice channels?\b", "live voice channels"),
+        (r"\bwebhooks?\b", "outbound webhooks"),
+        (r"\bmultiplayer\s+(matchmaking|networking)\b", "multiplayer matchmaking/networking"),
+        (r"\bwebgl\b|\bshaders?\b", "WebGL/shader rendering"),
+        (r"\bfix protocol\b|\bbloomberg\b", "external FIX/Bloomberg terminals"),
+        (r"\bexternal api\b", "external API integrations"),
+        (r"\b(3d|virtual reality|vr)\s+(rendering|audio|headset)\b", "3D/VR rendering"),
+        (r"\baudio\s+(streaming|synthesis)\b", "audio streaming/synthesis"),
+    ]
+
+    # Statements that ask for a change (as opposed to a question about the current state).
+    _DIRECTIVE_RE = re.compile(
+        r"\b(change|set|update|make|modify|patch|rewrite|tune|increase|decrease|adjust|add|remove|"
+        r"randomi[sz]e|stochastic|sample|train|start|run|lock|switch|pivot|use|replace|toggle|"
+        r"penalize|penalty|reward|prioritize|show|display|render|restyle|continue|resume)\b"
+    )
+    _VISUAL_RE = re.compile(
+        r"\b(visual|theme|style|colou?r|layout|size|larger|bigger|scoreboard|hud|display|render|"
+        r"badge|meter|dashboard|chart|animate|animated|animation|arrows?|look and feel|panel)\b"
+    )
+    _EXPLICIT_TRAINING_RE = re.compile(
+        r"(\bstart\s+training\b|\bcontinue\s+training\b|\bresume\s+training\b|"
+        r"\block\b[^.]*\barena\b|\btrain\s+(for|now|again)\b|\btrain\s+\d+\s+(more\s+)?rounds?\b|"
+        r"\b(run|do)\s+\d+\s+(more\s+)?rounds?\b|\bmore\s+rounds?\b|\bstart\s+training\b)"
+    )
+
     def _plan_chat_action(
         self,
         user_message: str,
         conversation: dict[str, Any] | None = None,
         current_env_code: str = "",
     ) -> ChatActionPlan:
-        """Inspects live code and user prompt to formulate a code-aware multi-layer ChatActionPlan."""
+        """Formulates a multi-layer ChatActionPlan from the prompt and the live environment.
+
+        The deterministic router is a *domain-free intent grammar*: it reasons about verbs and
+        visual/style nouns, never about particular games or industries. A configured LLM performs
+        the same classification with richer context and falls back to this grammar.
+        """
         conv = conversation or {}
         text = user_message.lower().strip()
 
-        # 1. Honesty Guardrail: Check for unsupported external capabilities
-        unsupported_keywords = [
-            "discord", "voice", "audio", "microphone", "sound", "stream 3d", "3d webgl",
-            "webgl animation", "webgl", "shader", "shaders", "multiplayer", "networking",
-            "webhook", "external api", "satellite", "quantum", "vr headset", "augmented reality",
-            "slack bot", "twitch", "bloomberg", "fix protocol", "terminal via fix", "live terminal"
-        ]
-        if any(kw in text for kw in unsupported_keywords):
-            matched = [kw for kw in unsupported_keywords if kw in text]
-            reason = f"Integration with {', '.join(matched)} is outside the supported RL arena runtime capabilities."
-            return ChatActionPlan(
-                supported=False,
-                unsupported_reason=reason,
-                scope_classification="unsupported",
-                targets=[ExecutionTarget.UNSUPPORTED_CAPABILITY],
-                requires_retrain=False,
-                surgical_instructions="Zero code mutations applied.",
-                surgical_plan="Zero code mutations applied.",
-                user_facing_summary=f"I do not know how to do that yet: {reason}",
-            )
+        # 1. Honesty guardrail: capabilities outside the runtime.
+        for pattern, label in self._UNSUPPORTED_PATTERNS:
+            if re.search(pattern, text):
+                reason = f"Integration with {label} is outside the supported RL arena runtime capabilities."
+                return ChatActionPlan(
+                    supported=False,
+                    unsupported_reason=reason,
+                    scope_classification="unsupported",
+                    targets=[ExecutionTarget.UNSUPPORTED_CAPABILITY],
+                    requires_retrain=False,
+                    surgical_instructions="Zero code mutations applied.",
+                    surgical_plan="Zero code mutations applied.",
+                    user_facing_summary=f"I do not know how to do that yet: {reason}",
+                )
 
-        # 2. Informational / Diagnostic inquiry guardrail (pure discussion, zero mutations)
-        is_diagnostic_q = (
-            text.startswith(("why ", "what ", "how come ", "how did ", "how does ", "explain ", "describe ", "can you explain ")) or
-            (
-                text.endswith("?") and not any(kw in text for kw in [
-                    "can you change", "can you make", "can you update", "can you set",
-                    "could you change", "could you make", "please change", "please make",
-                    "change ", "update ", "modify ", "rewrite ", "randomize ", "start training", "lock arena"
-                ])
-            )
+        # 2. Pure discussion: an explanation request that contains no change directive.
+        first_word = text.split(" ", 1)[0] if text else ""
+        looks_like_question = (
+            text.endswith("?")
+            or first_word in {"why", "what", "how", "when", "where", "which", "who", "explain", "describe", "tell"}
+            or re.search(r"\b(explain|describe|tell me|walk me through|why is|why did|what are|what is|how does|how do)\b", text)
         )
-        if is_diagnostic_q:
+        if looks_like_question:
+            tail = text.split("?", 1)[1] if "?" in text else ""
+            actionable_tail = re.search(
+                r"\b(change|set|update|make|modify|add|remove|randomi[sz]e|train|start|lock|switch|replace|toggle|rewrite|tune|penalize)\b",
+                tail,
+            )
+            conjunction = re.search(
+                r"\b(and|then|also|but|instead)\b[^.]{0,60}\b(change|set|update|make|modify|add|remove|"
+                r"randomi[sz]e|train|start|lock|switch|replace|toggle|rewrite|tune|penalize)\b",
+                text,
+            )
+            actionable = bool(actionable_tail or conjunction)
+        else:
+            actionable = True
+
+        if looks_like_question and not actionable:
             return ChatActionPlan(
                 supported=True,
                 unsupported_reason=None,
                 scope_classification="discussion",
                 targets=[],
                 requires_retrain=False,
-                surgical_instructions="Zero code mutations applied. Provide conversational diagnostic explanation.",
-                surgical_plan="Zero code mutations applied. Provide conversational diagnostic explanation.",
+                surgical_instructions="Zero code mutations applied. Provide conversational explanation.",
+                surgical_plan="Zero code mutations applied. Provide conversational explanation.",
                 user_facing_summary="Explaining agent behavior and current environment dynamics.",
             )
 
-        # 3. Context summary of current environment methods
+        # 3. Optional LLM planning with a compact structural summary of the live code.
         env_methods_summary = "Methods: reset(), step(), interactive_step(), compute_reward()"
         if current_env_code:
             try:
                 tree = ast.parse(current_env_code)
                 funcs = [node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)]
-                if funcs:
-                    env_methods_summary = f"Detected methods in env_module.py: {', '.join(funcs)}"
+                detail = []
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.FunctionDef) and node.name in ("interactive_step", "compute_reward"):
+                        segment = ast.get_source_segment(current_env_code, node) or ""
+                        if segment:
+                            detail.append(segment[:2000])
+                env_methods_summary = f"Detected methods in env_module.py: {', '.join(funcs)}"
+                if detail:
+                    env_methods_summary += "\n\nRelevant method bodies:\n" + "\n\n".join(detail)
             except Exception:
                 pass
 
-        # 3. LLM-based planning if smart client is configured
         if not isinstance(self.client, (FallbackCodeSynthesizer, UnconfiguredLLMClient)):
             try:
                 prompt = (
                     f"You are the Code-Aware Agentic Chat Planner for an Autonomous RL Studio.\n"
                     f"User message: \"{user_message}\"\n\n"
                     f"Environment Context:\n{env_methods_summary}\n\n"
+                    f"Blueprint: {json.dumps(conv.get('blueprint_spec') or {}, default=str)[:2000]}\n\n"
                     f"Supported Execution Targets:\n"
-                    f"- \"reanchor_domain\": User pivoted to a completely new task/domain or current blueprint is wrong.\n"
-                    f"- \"inference_strategy\": Modifies interactive_step() / policy wrapper (Arena/Eval action selection, e.g. opening randomization, top-k filtering, fallback heuristics).\n"
-                    f"- \"reward_shaping\": Modifies compute_reward() / RewardDSL (Training incentives, bonuses, penalties).\n"
-                    f"- \"env_sim_mechanics\": Modifies reset() / step() / opponent rules or physics.\n"
-                    f"- \"arena_visual_ui\": Re-synthesize or patch the HTML/JS/CSS visual arena.\n"
-                    f"- \"training_hyperparams\": Modifies entropy coef, burst rounds, or exploration.\n"
-                    f"- \"unsupported_capability\": If user asks for capabilities outside the runtime (e.g. Discord, WebGL shaders, multiplayer, voice).\n\n"
-                    f"Strict System Rules:\n"
-                    f"1. If user asks to change how the agent selects moves in the Arena (e.g. randomizing its first/opening move among good options), route to \"inference_strategy\" so interactive_step() is patched directly—do NOT route solely to \"reward_shaping\".\n"
-                    f"2. If user requests both a training reward/mechanic and an arena inference change, include both targets and set scope_classification=\"both\", requires_retrain=true.\n"
-                    f"3. Arena visual styling & UI changes (e.g. changing arena look, tables, cards, felt, green cloth, colors, themes, boards, HUD, controls) route to supported=true, scope_classification=\"arena_only\", targets=[\"arena_visual_ui\"], requires_retrain=false.\n"
-                    f"4. If user requests an unsupported capability (e.g. Discord, WebGL shaders, multiplayer matchmaking, voice, Bloomberg terminal), set supported=false and targets=[\"unsupported_capability\"].\n"
-                    f"5. If user asks an informational, diagnostic, or explanatory question (e.g. 'Why did...', 'What are the current rules/rewards?', 'Explain how the agent works') without requesting code or training modifications, set scope_classification=\"discussion\", targets=[], requires_retrain=false.\n\n"
-                    f"Respond with JSON adhering to:\n"
-                    f"{{\n"
-                    f"  \"supported\": true,\n"
-                    f"  \"unsupported_reason\": null,\n"
-                    f"  \"scope_classification\": \"arena_only\" | \"training_only\" | \"both\" | \"discussion\" | \"unsupported\",\n"
-                    f"  \"targets\": [\"inference_strategy\"],\n"
-                    f"  \"requires_retrain\": false,\n"
-                    f"  \"surgical_instructions\": \"...\",\n"
-                    f"  \"surgical_plan\": \"...\",\n"
-                    f"  \"user_facing_summary\": \"...\"\n"
-                    f"}}"
+                    f"- \"reanchor_domain\": the user pivoted to a different task/domain.\n"
+                    f"- \"inference_strategy\": change how actions are selected during interactive play (randomization, top-k, masking).\n"
+                    f"- \"reward_shaping\": change compute_reward() / training incentives.\n"
+                    f"- \"env_sim_mechanics\": change reset()/step() rules, physics or opponents.\n"
+                    f"- \"arena_visual_ui\": restyle or rebuild the visual arena.\n"
+                    f"- \"training_hyperparams\": run/continue training or change its budget.\n"
+                    f"- \"unsupported_capability\": outside the runtime.\n\n"
+                    f"Rules:\n"
+                    f"1. Arena behaviour changes route to inference_strategy, never reward_shaping alone.\n"
+                    f"2. Compound requests may include multiple targets; set requires_retrain when reward/env/training change.\n"
+                    f"3. Pure questions route to scope_classification=\"discussion\" with targets=[].\n"
+                    f"4. Unbuilt capabilities route to supported=false with targets=[\"unsupported_capability\"].\n\n"
+                    f"Respond with JSON: {{\"supported\": true, \"unsupported_reason\": null, "
+                    f"\"scope_classification\": \"arena_only\", \"targets\": [\"inference_strategy\"], "
+                    f"\"requires_retrain\": false, \"surgical_instructions\": \"...\", "
+                    f"\"user_facing_summary\": \"...\"}}"
                 )
                 res = self.client.generate_json(prompt, system_prompt="You are a code-aware agentic planner.")
                 if res and isinstance(res, dict) and "supported" in res and "targets" in res:
@@ -273,113 +321,70 @@ class StudioOmniAgent:
             except Exception as ex:
                 logging.warning(f"LLM ChatActionPlan error: {ex}")
 
-        # 4. High-precision deterministic fallback planner
-        # Check if user message is an informational/diagnostic question rather than a modification request
-        is_informational_question = (
-            text.endswith("?") or
-            any(text.startswith(q) for q in ["why", "what", "how", "explain", "describe", "tell me", "can you", "is there", "which"])
-        ) and not any(kw in text for kw in [
-            "change", "set ", "update", "make ", "modify", "patch", "rewrite", "tune", "increase",
-            "decrease", "adjust", "randomize", "start training", "train for", "lock arena", "lock &", "lock and"
-        ])
-
-        if is_informational_question:
-            return ChatActionPlan(
-                supported=True,
-                unsupported_reason=None,
-                scope_classification="discussion",
-                targets=[],
-                requires_retrain=False,
-                surgical_instructions="No code changes. Provide conversational diagnostic explanation.",
-                surgical_plan="No code changes. Provide conversational diagnostic explanation.",
-                user_facing_summary="Explaining agent behavior and current environment dynamics.",
-            )
-
         targets: list[ExecutionTarget] = []
-        requires_retrain = False
 
-        # Check for domain re-anchoring
-        has_reanchor = any(kw in text for kw in ["reanchor", "switch domain", "change domain", "new domain", "pivot to", "switch to", "different game", "new task"])
-        if has_reanchor:
+        if (
+            re.search(r"\b(switch|pivot|move)\s+(to|into)\b", text)
+            or re.search(r"\b(change|switch)\s+(the\s+)?(domain|task|game|problem)\b", text)
+            or re.search(r"\b(train|build|create|make)\b[^.]{0,60}\binstead\b", text)
+            or (re.search(r"\btrain\s+(a|an)\b[^.]*\bagent\b", text) and bool(conv.get("env_code")))
+        ):
             targets.append(ExecutionTarget.REANCHOR_DOMAIN)
-
-        # Check for inference strategy (Arena move selection / opening randomization)
-        has_inference = (
-            any(kw in text for kw in ["randomize", "random", "stochastic", "sample"]) and
-            any(kw in text for kw in ["first move", "first", "opening", "openings", "turn 1", "arena", "option", "options"])
-        ) or "interactive_step" in text or "inference" in text
-
-        # Check for arena visual UI
-        has_arena_ui = any(kw in text for kw in [
-            "arena", "ui", "visual", "look", "theme", "color", "restyle", "larger", "bigger",
-            "canvas", "table", "card", "dealer", "chip", "chips", "felt", "board", "grid", "display",
-            "scoreboard", "badge", "hud", "controls", "slot", "slots", "cylinder"
-        ]) and not any(kw in text for kw in ["start training", "train now", "lock arena"])
-
-        # Check for reward shaping (Reward terms / training incentives)
-        has_reward = (
-            any(kw in text for kw in ["reward", "penalize", "bonus", "penalty", "incentive", "compute_reward"]) or
-            ("corner" in text and any(w in text for w in ["training", "train", "reward", "openings"]))
-        )
-
-        # Check for environment mechanics
-        has_env_sim = (
-            "mechanic" in text or "physics" in text or "grid size" in text or "board size" in text or
-            ("self-play" in text and "training" in text) or "both self-play" in text or "rules" in text
-        )
-
-        # Check for training hyperparams / run training
-        has_training_params = any(kw in text for kw in [
-            "train", "training", "round", "rounds", "episode", "episodes",
-            "lock arena", "lock & start", "lock and start", "confirm and start",
-            "start now", "tune", "hyperparameter", "entropy", "learning rate", "burst"
-        ])
-
-        if has_inference:
+        if re.search(
+            r"\b(randomi[sz]e|stochastic|top-?k|temperature|sampling|opening|first move|turn 1|action selection|inference)\b",
+            text,
+        ):
             targets.append(ExecutionTarget.INFERENCE_STRATEGY)
-        if has_arena_ui and ExecutionTarget.ARENA_VISUAL_UI not in targets:
-            targets.append(ExecutionTarget.ARENA_VISUAL_UI)
-        if has_reward:
+        if re.search(r"\b(reward|penal(ize|ise|ty|izing|ising)|bonus|incentive)\b", text):
             targets.append(ExecutionTarget.REWARD_SHAPING)
-            requires_retrain = True
-        if has_env_sim:
+        if re.search(r"\b(mechanics?|physics|dynamics|opponents?|transition|simulation)\b", text):
             targets.append(ExecutionTarget.ENV_SIM_MECHANICS)
-            requires_retrain = True
-        if has_training_params:
+        if self._VISUAL_RE.search(text):
+            targets.append(ExecutionTarget.ARENA_VISUAL_UI)
+        if self._EXPLICIT_TRAINING_RE.search(text):
             targets.append(ExecutionTarget.TRAINING_HYPERPARAMS)
-            requires_retrain = True
 
-        has_train_impact = any(t in targets for t in (ExecutionTarget.REWARD_SHAPING, ExecutionTarget.ENV_SIM_MECHANICS, ExecutionTarget.TRAINING_HYPERPARAMS))
-        has_arena_impact = any(t in targets for t in (ExecutionTarget.INFERENCE_STRATEGY, ExecutionTarget.ARENA_VISUAL_UI))
+        # Ordered, de-duplicated target list (execution order: reanchor, env, reward, inference, ui, training).
+        order = [
+            ExecutionTarget.REANCHOR_DOMAIN,
+            ExecutionTarget.ENV_SIM_MECHANICS,
+            ExecutionTarget.REWARD_SHAPING,
+            ExecutionTarget.INFERENCE_STRATEGY,
+            ExecutionTarget.ARENA_VISUAL_UI,
+            ExecutionTarget.TRAINING_HYPERPARAMS,
+        ]
+        targets = [t for t in order if t in targets]
+
+        has_train_impact = any(
+            t in targets for t in (ExecutionTarget.REWARD_SHAPING, ExecutionTarget.ENV_SIM_MECHANICS, ExecutionTarget.TRAINING_HYPERPARAMS)
+        )
+        has_arena_impact = any(
+            t in targets for t in (ExecutionTarget.INFERENCE_STRATEGY, ExecutionTarget.ARENA_VISUAL_UI)
+        )
 
         if not targets:
             scope = "discussion"
-            requires_retrain = False
         elif has_train_impact and has_arena_impact:
             scope = "both"
-            requires_retrain = True
         elif has_train_impact:
             scope = "training_only"
-            requires_retrain = True
         else:
             scope = "arena_only"
-            requires_retrain = False
 
-        surgical_steps = []
-        if ExecutionTarget.REANCHOR_DOMAIN in targets:
-            surgical_steps.append("Re-anchor DynamicTaskBlueprint, re-synthesize environment and arena.")
-        if ExecutionTarget.INFERENCE_STRATEGY in targets:
-            surgical_steps.append("Patch interactive_step() in env_module.py for turn-aware action selection.")
-        if ExecutionTarget.ARENA_VISUAL_UI in targets:
-            surgical_steps.append("Re-synthesize or restyle arena.html visual UI.")
-        if ExecutionTarget.REWARD_SHAPING in targets:
-            surgical_steps.append("Rewrite compute_reward() in env_module.py and recalibrate Critic head.")
-        if ExecutionTarget.ENV_SIM_MECHANICS in targets:
-            surgical_steps.append("Update reset() and step() simulation rules in env_module.py.")
-        if ExecutionTarget.TRAINING_HYPERPARAMS in targets:
-            surgical_steps.append("Adjust training hyperparameters in session configuration.")
+        requires_retrain = any(
+            t in targets for t in (ExecutionTarget.REWARD_SHAPING, ExecutionTarget.ENV_SIM_MECHANICS, ExecutionTarget.TRAINING_HYPERPARAMS)
+        )
 
-        plan_desc = " ".join(surgical_steps)
+        steps = {
+            ExecutionTarget.REANCHOR_DOMAIN: "Re-anchor the task blueprint and re-synthesize environment + arena.",
+            ExecutionTarget.INFERENCE_STRATEGY: "Patch interactive_step() to adjust action selection.",
+            ExecutionTarget.ARENA_VISUAL_UI: "Restyle the arena UI.",
+            ExecutionTarget.REWARD_SHAPING: "Update compute_reward() using a safe function-level transformation.",
+            ExecutionTarget.ENV_SIM_MECHANICS: "Update reset()/step() rules.",
+            ExecutionTarget.TRAINING_HYPERPARAMS: "Adjust the training budget and continue training.",
+        }
+        plan_desc = " ".join(steps[t] for t in targets) or "No execution needed."
+
         return ChatActionPlan(
             supported=True,
             unsupported_reason=None,
@@ -388,7 +393,7 @@ class StudioOmniAgent:
             requires_retrain=requires_retrain,
             surgical_instructions=plan_desc,
             surgical_plan=plan_desc,
-            user_facing_summary=f"Formulated execution plan for scope '{scope}' targeting {', '.join([t.value for t in targets])}.",
+            user_facing_summary=f"Formulated execution plan for scope '{scope}' targeting {', '.join(t.value for t in targets) or 'discussion'}.",
         )
 
     def plan_chat_action(
@@ -405,61 +410,90 @@ class StudioOmniAgent:
         current_code: str,
         user_request: str,
         plan: ChatActionPlan | None = None,
-    ) -> str:
-        """Surgically patches interactive_step() in env_module.py to modify action selection / inference strategy."""
-        code = current_code
-        req_lower = user_request.lower()
+    ) -> tuple[str, bool]:
+        """Patches interactive_step() action selection in an action-space-aware way.
 
-        # Check if opening move randomization is requested
-        is_opening_randomization = any(kw in req_lower for kw in ["randomize", "random", "stochastic"]) and any(
-            kw in req_lower for kw in ["first", "opening", "openings", "start", "turn 1", "option", "options"]
+        Returns ``(code, applied)``. ``applied`` is False when the expected inference call
+        pattern is absent, so callers never report success for a no-op.
+        """
+        code = current_code
+        if not code or "def interactive_step" not in code:
+            return code, False
+
+        replacement = (
+            "{indent}action_idx, probs = policy_predict_fn({args})\n"
+            "{indent}_n_actions = int(getattr(self, 'n_actions', len(probs) if probs is not None else 1))\n"
+            "{indent}_board = getattr(self, 'board', None)\n"
+            "{indent}try:\n"
+            "{indent}    _legal = [int(a) for a in (self.get_valid_actions() or [])] if hasattr(self, 'get_valid_actions') else []\n"
+            "{indent}except Exception:\n"
+            "{indent}    _legal = []\n"
+            "{indent}if not _legal and _board is not None:\n"
+            "{indent}    _legal = [i for i, v in enumerate(_board) if v == 0]\n"
+            "{indent}_legal = [a for a in _legal if 0 <= a < _n_actions] or list(range(_n_actions))\n"
+            "{indent}_is_first = (int(getattr(self, 'step_count', 0)) == 0) or (_board is not None and np.count_nonzero(_board) == 0)\n"
+            "{indent}if _is_first and len(_legal) > 1:\n"
+            "{indent}    if probs is not None and len(probs) == _n_actions:\n"
+            "{indent}        _p = np.asarray(probs, dtype=np.float64)\n"
+            "{indent}        _ranked = sorted(_legal, key=lambda a: float(_p[a]), reverse=True)\n"
+            "{indent}        _best = float(_p[_ranked[0]]) if _ranked else 0.0\n"
+            "{indent}        _good = [a for a in _ranked if float(_p[a]) >= 0.7 * _best]\n"
+            "{indent}        if len(_good) < 2:\n"
+            "{indent}            _good = _ranked[:min(3, len(_ranked))]\n"
+            "{indent}    else:\n"
+            "{indent}        _good = _legal[:min(3, len(_legal))]\n"
+            "{indent}    action_idx = int(np.random.choice(_good))\n"
+            "{indent}else:\n"
+            "{indent}    action_idx = int(action_idx)\n"
+            "{indent}self.last_move = int(action_idx)"
         )
 
-        if is_opening_randomization or (plan and ExecutionTarget.INFERENCE_STRATEGY in plan.targets):
-            code = code.replace("if probs else", "if probs is not None else")
-            turn_aware_replacement = (
-                "{indent}action_idx, probs = policy_predict_fn({args})\n"
-                "{indent}is_first_move = (np.count_nonzero(getattr(self, 'board', [])) == 0) or (getattr(self, 'step_count', 0) == 0)\n"
-                "{indent}if is_first_move:\n"
-                "{indent}    board_arr = getattr(self, 'board', None)\n"
-                "{indent}    legal_indices = [i for i, v in enumerate(board_arr) if v == 0] if (board_arr is not None and len(board_arr) > 0) else list(range(9))\n"
-                "{indent}    if probs is not None and len(probs) > 0:\n"
-                "{indent}        candidate_probs = np.array([probs[i] for i in legal_indices if i < len(probs)], dtype=np.float64)\n"
-                "{indent}        max_p = np.max(candidate_probs) if len(candidate_probs) > 0 else 0.0\n"
-                "{indent}        good_moves = [legal_indices[i] for i, p in enumerate(candidate_probs) if p >= 0.7 * max_p]\n"
-                "{indent}    else:\n"
-                "{indent}        good_moves = []\n"
-                "{indent}    if len(good_moves) <= 1:\n"
-                "{indent}        strategic_openings = [i for i in [0, 2, 4, 6, 8] if i in legal_indices]\n"
-                "{indent}        if len(strategic_openings) > 1:\n"
-                "{indent}            good_moves = strategic_openings\n"
-                "{indent}    if good_moves:\n"
-                "{indent}        action_idx = int(np.random.choice(good_moves))\n"
-                "{indent}    else:\n"
-                "{indent}        action_idx = int(action_idx)\n"
-                "{indent}else:\n"
-                "{indent}    action_idx = int(action_idx)\n"
-                "{indent}self.last_move = int(action_idx)"
-            )
+        pattern = re.compile(
+            r"([ \t]*)(action_idx,\s*probs\s*=\s*policy_predict_fn\((.*?)\)\s*\n[ \t]*action_idx\s*=\s*int\(action_idx\))"
+        )
 
-            pattern = re.compile(
-                r"([ \t]*)(action_idx,\s*probs\s*=\s*policy_predict_fn\((.*?)\)\s*\n[ \t]*action_idx\s*=\s*int\(action_idx\))"
-            )
+        def _replace_match(m):
+            indent = m.group(1)
+            args = m.group(3)
+            return replacement.format(indent=indent, args=args)
 
-            def _replace_match(m):
-                indent = m.group(1)
-                args = m.group(3)
-                return turn_aware_replacement.format(indent=indent, args=args)
+        if not pattern.search(code):
+            return code, False
 
-            if pattern.search(code):
-                patched = pattern.sub(_replace_match, code)
-                try:
-                    ast.parse(patched)
-                    code = patched
-                except Exception as ex:
-                    logging.warning(f"AST parse validation failed after patching interactive_step: {ex}")
+        patched = pattern.sub(_replace_match, code)
+        if "import numpy as np" not in patched:
+            patched = "import numpy as np\n" + patched
+        try:
+            ast.parse(patched)
+        except SyntaxError as ex:
+            logging.warning(f"AST parse validation failed after patching interactive_step: {ex}")
+            return code, False
 
-        return code
+        return patched, True
+
+    def _neutral_sample_state(self, blueprint: AgentBlueprintSpec) -> dict[str, Any]:
+        """Declared-contract sample state used only when no environment could be instantiated."""
+        sample: dict[str, Any] = {}
+        for key, type_desc in (blueprint.state_dict_schema or {}).items():
+            text = str(type_desc).lower()
+            if "list" in text:
+                sample[key] = []
+            elif "int" in text:
+                sample[key] = 0
+            elif "float" in text:
+                sample[key] = 0.0
+            else:
+                sample[key] = ""
+        return sample
+
+    def _render_sample_state(self, env_cls: type | None, dataset: Any) -> dict[str, Any]:
+        """Captures the environment's real render state for arena synthesis."""
+        if env_cls is None:
+            return {}
+        records = dataset.df.to_dict(orient="records") if (dataset is not None and hasattr(dataset, "df")) else None
+        env = instantiate_env(env_cls, dataset_records=records)
+        _, info = env.reset()
+        return dict(info.get("arena_state") or {})
 
     def process_message(
         self,
@@ -486,7 +520,7 @@ class StudioOmniAgent:
         ws_dir = self.conv_store.workspaces_dir / conversation_id
         ws_dir.mkdir(parents=True, exist_ok=True)
 
-        effective_dataset_id = dataset_id or conv.get("dataset_id")
+        effective_dataset_id = dataset_id or conv.get("dataset_id") or getattr(dataset, "dataset_id", None)
         active_dataset = dataset
         if active_dataset is None and effective_dataset_id:
             try:
@@ -500,7 +534,7 @@ class StudioOmniAgent:
         if training_params:
             t_params.update(training_params)
 
-        # Detect control directives (e.g. "for 100%", "train for 5 rounds", "200 episodes") directly from user message
+        # Control directives (rounds / episodes / explicit mastery targets) in the message itself.
         meta_cmd = parse_nudge_meta_command(user_message)
         if meta_cmd:
             if meta_cmd.get("rounds") is not None:
@@ -510,31 +544,13 @@ class StudioOmniAgent:
             if meta_cmd.get("target") is not None:
                 t_params["target_metric_threshold"] = meta_cmd["target"]
 
-        intents = self.classify_intents(user_message, conv, force_action=force_action)
-
-        # Log user message
-        history = list(conv.get("chat_history", []))
-        history.append({
-            "role": "user",
-            "content": user_message,
-            "timestamp": utc_now_iso(),
-            "selected_options": selected_opts if selected_opts else None,
-        })
-
         blueprint_dict = conv.get("blueprint_spec")
         blueprint: AgentBlueprintSpec | None = None
         if blueprint_dict:
             try:
                 blueprint = AgentBlueprintSpec.model_validate(blueprint_dict)
-                if t_params:
-                    if "target_metric_threshold" in t_params:
-                        blueprint.target_metric_threshold = float(t_params["target_metric_threshold"])
-                    if "max_auto_tune_rounds" in t_params:
-                        blueprint.max_auto_tune_rounds = int(t_params["max_auto_tune_rounds"])
-                    if "episodes_per_round" in t_params:
-                        blueprint.episodes_per_round = int(t_params["episodes_per_round"])
             except Exception:
-                pass
+                blueprint = None
 
         current_arena_html = conv.get("arena_html") or ""
         current_env_code = conv.get("env_code") or ""
@@ -544,18 +560,44 @@ class StudioOmniAgent:
 
         arena_locked = bool(conv.get("arena_locked", False))
         status = conv.get("status", "clarifying")
+
+        # Plan once, then derive intents from it (no duplicate LLM planning call).
+        action_plan = self._plan_chat_action(
+            user_message=user_message,
+            conversation={**conv, "env_code": current_env_code},
+            current_env_code=current_env_code,
+        )
+        intents = self.classify_intents(user_message, {**conv, "env_code": current_env_code}, force_action=force_action, plan=action_plan)
+
+        history = list(conv.get("chat_history", []))
+        history.append({
+            "role": "user",
+            "content": user_message,
+            "timestamp": utc_now_iso(),
+            "selected_options": selected_opts if selected_opts else None,
+        })
+
+        if blueprint and t_params:
+            if "target_metric_threshold" in t_params:
+                blueprint.target_metric_threshold = float(t_params["target_metric_threshold"])
+            if "max_auto_tune_rounds" in t_params:
+                blueprint.max_auto_tune_rounds = int(t_params["max_auto_tune_rounds"])
+            if "episodes_per_round" in t_params:
+                blueprint.episodes_per_round = int(t_params["episodes_per_round"])
+
+        # Intake answers are applied mid-conversation too (not just on the first turn).
+        if blueprint and selected_opts:
+            blueprint = apply_answers_to_blueprint(blueprint, selected_opts)
+            if any(k in selected_opts for k in ("arena_ui", "q_arena_ui")) and ExecutionTarget.ARENA_VISUAL_UI not in action_plan.targets:
+                action_plan.targets = list(action_plan.targets) + [ExecutionTarget.ARENA_VISUAL_UI]
+                action_plan.scope_classification = "both" if action_plan.requires_retrain else "arena_only"
+
         assistant_reply = ""
         questions: list[ClarifyingQuestion] = []
         quick_chips: list[str] = []
+        notes: list[str] = []
 
-        # 0. Agentic Chat Planning
-        action_plan = self._plan_chat_action(
-            user_message=user_message,
-            conversation=conv,
-            current_env_code=current_env_code,
-        )
-
-        # Honesty Guardrail: Zero mutations, instant honest refusal for unsupported requests
+        # Honesty guardrail: zero mutations, instant refusal.
         if not action_plan.supported or ExecutionTarget.UNSUPPORTED_CAPABILITY in action_plan.targets:
             status = "unsupported"
             assistant_reply = f"I do not know how to do that yet: {action_plan.unsupported_reason}"
@@ -587,25 +629,24 @@ class StudioOmniAgent:
                 action_plan=action_plan,
             )
 
-        # ---------------------------------------------------------------------
-        # CASE 1: FIRST TURN — Immediate Mock-Animated Arena Preview
-        # ---------------------------------------------------------------------
+        # ------------------------------------------------------------------
+        # CASE 1: FIRST TURN — synthesize the environment, then its arena
+        # ------------------------------------------------------------------
         if not current_arena_html or not blueprint:
             intake_agent = IntakeArchitectAgent(self._llm_client)
 
             intake_resp = intake_agent.interview(
                 user_prompt=user_message,
                 dataset=active_dataset,
+                conversation_history=history[-6:],
                 user_answers=selected_opts,
                 force_smart_defaults=False,
                 training_params=t_params,
             )
 
-            # Build draft blueprint if not fully locked yet
             if intake_resp.blueprint_spec:
                 blueprint = intake_resp.blueprint_spec
             else:
-                # Fast deterministic blueprint so arena preview can generate instantly without duplicate LLM latency!
                 fallback_resp = intake_agent._deterministic_intake(
                     prompt=user_message,
                     dataset=active_dataset,
@@ -623,26 +664,58 @@ class StudioOmniAgent:
                 if "episodes_per_round" in t_params:
                     blueprint.episodes_per_round = int(t_params["episodes_per_round"])
 
-            if intake_resp.questions:
-                questions = intake_resp.questions
-            elif intake_resp.clarifying_questions:
-                questions = intake_resp.clarifying_questions
+            questions = intake_resp.questions or intake_resp.clarifying_questions or []
 
-            # Generate initial Mock-Animated arena.html
-            dummy_sample_state = {"board": [0] * 9, "game_status": "Mock Arena Preview"}
-            if active_dataset is not None:
-                rec_preview = {}
-                if hasattr(active_dataset, "df") and active_dataset.df is not None and len(active_dataset.df) > 0:
-                    rec_preview = {k: str(v) for k, v in active_dataset.df.iloc[0].to_dict().items()}
-                dummy_sample_state = {
-                    "record_index": 0,
-                    "total_records": len(active_dataset.df) if hasattr(active_dataset, "df") and active_dataset.df is not None else 100,
-                    "accuracy_pct": 100.0,
-                    "current_record_preview": rec_preview,
-                }
+            # Synthesize + verify the environment first so the arena is bound to real state.
+            sample_state: dict[str, Any] | None = None
+            synthesis_error: str | None = None
+            if active_dataset is not None and hasattr(active_dataset, "df"):
+                save_records(ws_dir, active_dataset.df.to_dict(orient="records"))
+
+            if blueprint:
+                try:
+                    code_str, _, env_cls = self.env_synthesizer.synthesize(
+                        blueprint=blueprint,
+                        dataset=active_dataset,
+                        workspace_dir=ws_dir,
+                    )
+                    current_env_code = code_str
+                    sample_state = self._render_sample_state(env_cls, active_dataset)
+                except Exception as ex:
+                    synthesis_error = str(ex)
+                    sample_state = self._neutral_sample_state(blueprint)
+
+            if synthesis_error:
+                status = "synthesis_failed"
+                assistant_reply = (
+                    f"I could not build a verified environment for **{blueprint.task_title if blueprint else 'this task'}**: "
+                    f"{synthesis_error}"
+                )
+                history.append({"role": "assistant", "content": assistant_reply, "timestamp": utc_now_iso()})
+                self.conv_store.save_or_update(
+                    conversation_id=conversation_id,
+                    status=status,
+                    chat_history=history,
+                    blueprint_spec=blueprint.model_dump() if blueprint else None,
+                    training_params=t_params,
+                    dataset_id=effective_dataset_id,
+                )
+                return StudioChatResponse(
+                    conversation_id=conversation_id,
+                    status=status,
+                    assistant_message=assistant_reply,
+                    action_types=[StudioActionType.CLARIFY_OR_DISCUSS],
+                    blueprint_spec=blueprint,
+                    env_code=current_env_code,
+                    arena_locked=False,
+                    questions=questions,
+                    training_params=t_params,
+                    action_plan=action_plan,
+                )
+
             arena_html_str, _ = self.arena_synthesizer.synthesize(
                 blueprint=blueprint,
-                sample_arena_state=dummy_sample_state,
+                sample_arena_state=sample_state,
                 session_id=conversation_id,
                 workspace_dir=ws_dir,
             )
@@ -650,13 +723,10 @@ class StudioOmniAgent:
 
             status = "arena_preview"
             arena_locked = False
-
             assistant_reply = (
-                f"✨ Generated live mock-animated Arena preview for **{blueprint.task_title}**! "
-                "You can see it animating with realistic mock moves and telemetry in the center stage. "
+                f"✨ Generated a live Arena preview for **{blueprint.task_title}** bound to the environment's real state. "
                 "Ask me in chat to adjust the look & feel, or click **[ 🔒 Lock Arena & Start Training ]** when ready."
             )
-
             quick_chips = [
                 "🎨 Neon Cyberpunk Theme",
                 "📊 Add Detailed Telemetry HUD",
@@ -679,6 +749,7 @@ class StudioOmniAgent:
                 chat_history=history,
                 blueprint_spec=blueprint.model_dump(),
                 arena_html=current_arena_html,
+                env_code=current_env_code,
                 arena_locked=False,
                 training_params=t_params,
                 dataset_id=effective_dataset_id,
@@ -704,265 +775,259 @@ class StudioOmniAgent:
                 action_plan=action_plan,
             )
 
-        # ---------------------------------------------------------------------
-        # CASE 2: MID / POST-TRAINING CONVERSATIONAL ACTIONS (Multi-Target Chaining)
-        # ---------------------------------------------------------------------
+        # ------------------------------------------------------------------
+        # CASE 2: MID / POST-TRAINING MULTI-TARGET EXECUTION
+        # ------------------------------------------------------------------
 
-        # Domain Re-Anchoring: Check if agentic planner selected REANCHOR_DOMAIN
+        # Layer 0: domain re-anchoring
         if ExecutionTarget.REANCHOR_DOMAIN in action_plan.targets:
-            from rl_ide.architect.intake import synthesize_blueprint_from_prompt
-            dyn_bp = synthesize_blueprint_from_prompt(user_message, dataset=active_dataset, client=self.client)
-            blueprint = dyn_bp.to_agent_blueprint_spec()
-            code_str, _, _ = self.env_synthesizer.synthesize(blueprint=blueprint, workspace_dir=ws_dir)
-            verified, healed_code, _ = self.smoke_tester.verify_and_heal(code_str=code_str, blueprint=blueprint, workspace_dir=ws_dir)
-            if verified:
-                current_env_code = healed_code
-                (ws_dir / "env_module.py").write_text(healed_code, encoding="utf-8")
-                try:
-                    updated_env_cls = load_synthesized_env_class(ws_dir / "env_module.py")
-                    active_env = instantiate_env(updated_env_cls)
-                    self.session_store.set_env(conversation_id, active_env)
-                except Exception:
-                    pass
-            arena_html_str, _ = self.arena_synthesizer.synthesize(
-                blueprint=blueprint,
-                sample_arena_state=None,
-                session_id=conversation_id,
-                workspace_dir=ws_dir,
-            )
-            current_arena_html = arena_html_str
-            assistant_reply += f"🔄 Domain successfully re-anchored to **{blueprint.task_title}**! Environment and Arena re-synthesized.\n"
-            if broadcast_callback:
-                broadcast_callback({"event": "arena_updated", "arena_html": current_arena_html})
-
-        # Multi-Target Layer 1: ENV_SIM_MECHANICS (Gym mechanics / rules)
-        if ExecutionTarget.ENV_SIM_MECHANICS in action_plan.targets or StudioActionType.UPDATE_ENV_MECHANICS in intents:
-            env_file = ws_dir / "env_module.py"
-            if blueprint:
-                blueprint.domain_summary = f"{blueprint.domain_summary}. Rules: {user_message}"
-            code_str, _, env_cls = self.env_synthesizer.synthesize(
-                blueprint=blueprint,
-                workspace_dir=ws_dir,
-            )
-            verified, healed_code, _ = self.smoke_tester.verify_and_heal(
-                code_str=code_str,
-                blueprint=blueprint,
-                workspace_dir=ws_dir,
-            )
-            if verified:
-                current_env_code = healed_code
-                env_file.write_text(healed_code, encoding="utf-8")
-                session = self.session_store.get_session(conversation_id)
-                if session:
-                    session.env_module_code = healed_code
-                try:
-                    updated_env_cls = load_synthesized_env_class(env_file)
-                    active_env = instantiate_env(updated_env_cls)
-                    self.session_store.set_env(conversation_id, active_env)
-                except Exception:
-                    pass
-                assistant_reply += "🛠️ Environment mechanics updated and verified via sandbox smoke tester.\n"
-
-        # Multi-Target Layer 2: REWARD_SHAPING (compute_reward / RewardDSL)
-        if ExecutionTarget.REWARD_SHAPING in action_plan.targets or StudioActionType.UPDATE_AGENT_CHARACTERISTICS in intents:
-            env_file = ws_dir / "env_module.py"
-            if not current_env_code and env_file.exists():
-                current_env_code = env_file.read_text(encoding="utf-8")
-
-            # Update compute_reward in env code
-            updated_code = self._rewrite_reward_function(
-                current_code=current_env_code,
-                user_feedback=user_message,
-                blueprint=blueprint,
-            )
-
-            verified, healed_code, _ = self.smoke_tester.verify_and_heal(
-                code_str=updated_code,
-                blueprint=blueprint,
-                workspace_dir=ws_dir,
-            )
-            if verified:
-                current_env_code = healed_code
-                env_file.write_text(healed_code, encoding="utf-8")
-                session = self.session_store.get_session(conversation_id)
-                if session:
-                    session.env_module_code = healed_code
-
-                # Hot-swap env class in session store
-                try:
-                    updated_env_cls = load_synthesized_env_class(env_file)
-                    active_env = instantiate_env(updated_env_cls)
-                    self.session_store.set_env(conversation_id, active_env)
-                    # Calibrate Critic on existing policy weights
-                    self.loop_controller.calibrate_critic(conversation_id, env=active_env, epochs=10)
-                except Exception as ex:
-                    print(f"Warning: Critic calibration or env reload: {ex}")
-
-                assistant_reply += (
-                    "🧠 Agent characteristics & reward formulation updated! "
-                    "Calibrated Critic value head on existing policy weights. Progress is preserved.\n"
+            try:
+                dyn_bp = synthesize_blueprint_from_prompt(
+                    user_message, dataset=active_dataset, client=self.client
                 )
+                blueprint = dyn_bp.to_agent_blueprint_spec()
+                if t_params:
+                    if "target_metric_threshold" in t_params:
+                        blueprint.target_metric_threshold = float(t_params["target_metric_threshold"])
+                    if "max_auto_tune_rounds" in t_params:
+                        blueprint.max_auto_tune_rounds = int(t_params["max_auto_tune_rounds"])
+                    if "episodes_per_round" in t_params:
+                        blueprint.episodes_per_round = int(t_params["episodes_per_round"])
 
-        # Multi-Target Layer 3: INFERENCE_STRATEGY (interactive_step / live action selection)
-        if ExecutionTarget.INFERENCE_STRATEGY in action_plan.targets:
-            env_file = ws_dir / "env_module.py"
-            if not current_env_code and env_file.exists():
-                current_env_code = env_file.read_text(encoding="utf-8")
-
-            patched_code = self._patch_interactive_inference(
-                current_code=current_env_code,
-                user_request=user_message,
-                plan=action_plan,
-            )
-
-            verified, healed_code, _ = self.smoke_tester.verify_and_heal(
-                code_str=patched_code,
-                blueprint=blueprint,
-                workspace_dir=ws_dir,
-            )
-            if verified:
-                current_env_code = healed_code
-                env_file.write_text(healed_code, encoding="utf-8")
-                session = self.session_store.get_session(conversation_id)
-                if session:
-                    session.env_module_code = healed_code
-
-                try:
-                    updated_env_cls = load_synthesized_env_class(env_file)
-                    active_env = instantiate_env(updated_env_cls)
-                    self.session_store.set_env(conversation_id, active_env)
-                except Exception as ex:
-                    print(f"Warning: Env reload after inference patch: {ex}")
-
-                assistant_reply += "🎯 Arena inference strategy updated! Patched interactive_step() for turn-aware action selection.\n"
-
-        # Multi-Target Layer 4: Visual Arena & Controls
-        if ExecutionTarget.ARENA_VISUAL_UI in action_plan.targets or StudioActionType.PREVIEW_OR_UPDATE_ARENA in intents:
-            new_arena_html = self.arena_synthesizer.update_arena(
-                blueprint=blueprint,
-                current_arena_html=current_arena_html,
-                user_visual_request=user_message,
-                sample_arena_state=None,
-                workspace_dir=ws_dir,
-            )
-            current_arena_html = new_arena_html
-
-            is_play_feature = any(kw in user_message.lower() for kw in ["x and o", "x or o", "play as", "switch", "both", "who goes first", "player side", "symbol"])
-            if is_play_feature and blueprint:
-                env_file = ws_dir / "env_module.py"
-                if env_file.exists():
-                    env_code_txt = env_file.read_text(encoding="utf-8")
-                    if "human_symbol" not in env_code_txt:
-                        code_str, _, env_cls = self.env_synthesizer.synthesize(blueprint=blueprint, workspace_dir=ws_dir)
-                        verified, healed_code, _ = self.smoke_tester.verify_and_heal(
-                            code_str=code_str,
-                            blueprint=blueprint,
-                            workspace_dir=ws_dir,
-                        )
-                        if verified:
-                            current_env_code = healed_code
-                            env_file.write_text(healed_code, encoding="utf-8")
-                            try:
-                                updated_env_cls = load_synthesized_env_class(env_file)
-                                active_env = instantiate_env(updated_env_cls)
-                                self.session_store.set_env(conversation_id, active_env)
-                            except Exception:
-                                pass
-
-            if is_play_feature:
-                assistant_reply += "🎮 Arena updated! Added interactive controls to play as either **X** (First Move) or **O** (Agent First), with live side switching. Neural network weights remain 100% intact!\n"
-            else:
-                assistant_reply += "🎨 Visual Arena updated and hot-reloaded live. Neural network weights remain 100% intact!\n"
-
-            if broadcast_callback:
-                broadcast_callback({"event": "arena_updated", "arena_html": current_arena_html})
-
-        # Multi-Target Layer 5: TRAINING_HYPERPARAMS / RUN_OR_CONTINUE_TRAINING
-        wants_training = (
-            StudioActionType.RUN_OR_CONTINUE_TRAINING in intents or
-            ExecutionTarget.TRAINING_HYPERPARAMS in action_plan.targets or
-            (action_plan.requires_retrain and any(kw in user_message.lower() for kw in ["train", "start", "run", "more", "burst"]))
-        )
-        if wants_training:
-            arena_locked = True
-            meta_cmd = parse_nudge_meta_command(user_message)
-            if meta_cmd:
-                if meta_cmd.get("rounds") is not None:
-                    t_params["max_auto_tune_rounds"] = meta_cmd["rounds"]
-                if meta_cmd.get("episodes") is not None:
-                    t_params["episodes_per_round"] = meta_cmd["episodes"]
-                if meta_cmd.get("target") is not None:
-                    t_params["target_metric_threshold"] = meta_cmd["target"]
-
-            if blueprint:
-                if "target_metric_threshold" in t_params:
-                    blueprint.target_metric_threshold = float(t_params["target_metric_threshold"])
-                if "max_auto_tune_rounds" in t_params:
-                    blueprint.max_auto_tune_rounds = int(t_params["max_auto_tune_rounds"])
-                if "episodes_per_round" in t_params:
-                    blueprint.episodes_per_round = int(t_params["episodes_per_round"])
-
-            # Ensure environment module exists
-            env_file = ws_dir / "env_module.py"
-            if not env_file.exists() or not current_env_code:
-                code_str, _, _ = self.env_synthesizer.synthesize(blueprint=blueprint, dataset=active_dataset, workspace_dir=ws_dir)
-                verified, healed_code, _ = self.smoke_tester.verify_and_heal(
-                    code_str=code_str,
+                code_str, _, env_cls = self.env_synthesizer.synthesize(
                     blueprint=blueprint,
                     dataset=active_dataset,
                     workspace_dir=ws_dir,
                 )
-                current_env_code = healed_code
-                env_file.write_text(healed_code, encoding="utf-8")
-
-            env_cls = load_synthesized_env_class(env_file)
-            eps_per_burst = int(t_params.get("episodes_per_round", 50))
-            add_rounds = int(t_params.get("max_auto_tune_rounds", 2))
-
-            if run_sync:
-                trained_session = self.loop_controller.run_loop(
-                    session_id=conversation_id,
+                current_env_code = code_str
+                # A new task invalidates the previous policy.
+                self.session_store.delete_model(conversation_id)
+                sample_state = self._render_sample_state(env_cls, active_dataset)
+                current_arena_html, _ = self.arena_synthesizer.synthesize(
                     blueprint=blueprint,
-                    env_cls=env_cls,
-                    dataset=active_dataset,
-                    on_event_callback=broadcast_callback,
-                    max_rounds=add_rounds,
-                    episodes_per_burst=eps_per_burst,
-                    continue_training=True,
+                    sample_arena_state=sample_state,
+                    session_id=conversation_id,
+                    workspace_dir=ws_dir,
                 )
-                status = trained_session.status
-                assistant_reply += (
-                    f"🔄 Training completed through Round {trained_session.current_round}! "
-                    f"Metric achieved: {trained_session.current_metric}%. Ready for interactive play.\n"
+                notes.append(f"🔄 Domain re-anchored to **{blueprint.task_title}**; environment and arena re-synthesized.")
+                if broadcast_callback:
+                    broadcast_callback({"event": "arena_updated", "arena_html": current_arena_html})
+            except Exception as ex:
+                notes.append(f"⚠️ Re-anchoring failed: {ex}")
+
+        # Layer 1: environment mechanics
+        if ExecutionTarget.ENV_SIM_MECHANICS in action_plan.targets and blueprint is not None:
+            try:
+                blueprint.pending_directive = user_message
+                code_str, _, env_cls = self.env_synthesizer.synthesize(
+                    blueprint=blueprint,
+                    dataset=active_dataset,
+                    workspace_dir=ws_dir,
+                )
+                if current_env_code and code_str.strip() == current_env_code.strip():
+                    notes.append(
+                        "ℹ️ No mechanical change was applied: the environment code is unchanged "
+                        "(a verified LLM is required for novel rule generation)."
+                    )
+                    raise RuntimeError("no-op environment update")
+                current_env_code = code_str
+
+                previous_model = self.session_store.get_model(conversation_id)
+                new_env = instantiate_env(
+                    env_cls,
+                    dataset_records=active_dataset.df.to_dict(orient="records")
+                    if (active_dataset is not None and hasattr(active_dataset, "df")) else None,
+                )
+                self.session_store.set_env(conversation_id, new_env)
+                if previous_model is not None:
+                    if (
+                        getattr(previous_model, "observation_space", None) == new_env.observation_space
+                        and getattr(previous_model, "action_space", None) == new_env.action_space
+                    ):
+                        previous_model.set_env(new_env)
+                    else:
+                        self.session_store.delete_model(conversation_id)
+                        notes.append("⚠️ Action/observation space changed, so the previous policy was reset.")
+                notes.append("🛠️ Environment mechanics updated and verified via the sandbox smoke tester.")
+            except RuntimeError as ex:
+                if "no-op environment update" not in str(ex):
+                    notes.append(f"⚠️ Environment update rejected (verification failed): {ex}")
+            except Exception as ex:
+                notes.append(f"⚠️ Environment update rejected (verification failed): {ex}")
+
+        # Layer 2: reward shaping (only when the plan asks for it)
+        if ExecutionTarget.REWARD_SHAPING in action_plan.targets and blueprint is not None:
+            updated_code, applied, note = self._safe_reward_rewrite(current_env_code, user_message)
+            if not applied:
+                notes.append(f"ℹ️ Reward change not applied: {note}")
+            else:
+                try:
+                    verified, healed_code, _ = self.smoke_tester.verify_and_heal(
+                        code_str=updated_code,
+                        blueprint=blueprint,
+                        dataset=active_dataset,
+                        workspace_dir=ws_dir,
+                    )
+                    if verified:
+                        current_env_code = healed_code
+                        env_file.write_text(healed_code, encoding="utf-8")
+                        session = self.session_store.get_session(conversation_id)
+                        if session:
+                            session.env_module_code = healed_code
+                        try:
+                            updated_env_cls = load_synthesized_env_class(env_file)
+                            active_env = instantiate_env(updated_env_cls)
+                            self.session_store.set_env(conversation_id, active_env)
+                        except Exception as ex:
+                            print(f"Warning: env reload after reward update: {ex}")
+                        notes.append(
+                            "🧠 Reward formulation updated with a validated function-level transformation. "
+                            "Existing policy weights were preserved."
+                        )
+                        if "is_placeholder = True" in healed_code:
+                            notes.append(
+                                "⚠️ This environment is a generic placeholder (no LLM-generated mechanics), "
+                                "so the shaped reward has no domain meaning."
+                            )
+                    else:
+                        notes.append("⚠️ Reward change rejected: updated code failed sandbox verification.")
+                except Exception as ex:
+                    notes.append(f"⚠️ Reward change rejected: {ex}")
+
+        # Layer 3: inference strategy (interactive action selection)
+        if ExecutionTarget.INFERENCE_STRATEGY in action_plan.targets:
+            if not current_env_code and env_file.exists():
+                current_env_code = env_file.read_text(encoding="utf-8")
+            patched_code, applied = self._patch_interactive_inference(
+                current_code=current_env_code,
+                user_request=user_message,
+                plan=action_plan,
+            )
+            if not applied:
+                notes.append(
+                    "ℹ️ Inference patch not applied: this environment's interactive_step() does not expose a "
+                    "patchable policy call, so no code was changed."
                 )
             else:
-                status = "training"
-                assistant_reply += (
-                    f"🚀 Arena locked. Continuous training initiated for {add_rounds} rounds "
-                    f"({eps_per_burst} episodes/round).\n"
-                )
+                try:
+                    verified, healed_code, _ = self.smoke_tester.verify_and_heal(
+                        code_str=patched_code,
+                        blueprint=blueprint,
+                        dataset=active_dataset,
+                        workspace_dir=ws_dir,
+                    )
+                    if verified:
+                        current_env_code = healed_code
+                        env_file.write_text(healed_code, encoding="utf-8")
+                        session = self.session_store.get_session(conversation_id)
+                        if session:
+                            session.env_module_code = healed_code
+                        try:
+                            updated_env_cls = load_synthesized_env_class(env_file)
+                            active_env = instantiate_env(updated_env_cls)
+                            self.session_store.set_env(conversation_id, active_env)
+                        except Exception as ex:
+                            print(f"Warning: Env reload after inference patch: {ex}")
+                        notes.append(
+                            "🎯 Arena inference strategy updated: interactive_step() now samples among the best legal "
+                            "actions for this action space."
+                        )
+                    else:
+                        notes.append("⚠️ Inference patch rejected: updated code failed sandbox verification.")
+                except Exception as ex:
+                    notes.append(f"⚠️ Inference patch rejected: {ex}")
 
-        # Intent E: CLARIFY_OR_DISCUSS (if no code updates were run)
-        if not assistant_reply:
+        # Layer 4: arena visuals
+        if ExecutionTarget.ARENA_VISUAL_UI in action_plan.targets and blueprint is not None:
+            sample_state = None
+            try:
+                if current_env_code and env_file.exists():
+                    sample_state = self._render_sample_state(
+                        load_synthesized_env_class(env_file),
+                        active_dataset,
+                    )
+            except Exception:
+                sample_state = None
+            current_arena_html = self.arena_synthesizer.update_arena(
+                blueprint=blueprint,
+                current_arena_html=current_arena_html,
+                user_visual_request=user_message,
+                sample_arena_state=sample_state,
+                workspace_dir=ws_dir,
+            )
+            notes.append("🎨 Visual Arena updated and hot-reloaded live. Neural network weights remain intact.")
+            if broadcast_callback:
+                broadcast_callback({"event": "arena_updated", "arena_html": current_arena_html})
+
+        # Layer 5: training budget / run
+        wants_training = ExecutionTarget.TRAINING_HYPERPARAMS in action_plan.targets
+        if wants_training and blueprint is not None:
+            arena_locked = True
+            if "target_metric_threshold" in t_params:
+                blueprint.target_metric_threshold = float(t_params["target_metric_threshold"])
+            if "max_auto_tune_rounds" in t_params:
+                blueprint.max_auto_tune_rounds = int(t_params["max_auto_tune_rounds"])
+            if "episodes_per_round" in t_params:
+                blueprint.episodes_per_round = int(t_params["episodes_per_round"])
+
+            try:
+                if not env_file.exists() or not current_env_code:
+                    code_str, _, _ = self.env_synthesizer.synthesize(
+                        blueprint=blueprint, dataset=active_dataset, workspace_dir=ws_dir
+                    )
+                    current_env_code = code_str
+
+                env_cls = load_synthesized_env_class(env_file)
+                eps_per_burst = int(t_params.get("episodes_per_round", 50))
+                run_rounds = int(t_params.get("max_auto_tune_rounds", 2))
+
+                if run_sync:
+                    trained_session = self.loop_controller.run_loop(
+                        session_id=conversation_id,
+                        blueprint=blueprint,
+                        env_cls=env_cls,
+                        dataset=active_dataset,
+                        on_event_callback=broadcast_callback,
+                        additional_rounds=run_rounds,
+                        episodes_per_burst=eps_per_burst,
+                    )
+                    status = trained_session.status
+                    notes.append(
+                        f"🔄 Training completed through Round {trained_session.current_round} "
+                        f"(metric {trained_session.current_metric}%). Ready for interactive play."
+                    )
+                else:
+                    status = "training"
+                    notes.append(
+                        f"🚀 Arena locked. Training queued for {run_rounds} more round(s) "
+                        f"({eps_per_burst} episodes/round)."
+                    )
+            except TrainingInProgressError:
+                notes.append("⚠️ Training is already running for this session; the request was not duplicated.")
+            except Exception as ex:
+                notes.append(f"⚠️ Training could not start: {ex}")
+
+        if not notes:
             assistant_reply = self._generate_diagnostic_explanation(conv, user_message)
-
-        # Compute dynamic quick chips based on current state
-        if not arena_locked:
-            quick_chips = [
-                "🎨 Neon Cyberpunk Theme",
-                "📊 Add Detailed Telemetry HUD",
-                "🔍 Make Board / Canvas Larger",
-                "🔒 Lock Arena & Start Training",
-            ]
         else:
-            quick_chips = [
+            assistant_reply = "\n".join(notes)
+
+        quick_chips = (
+            [
                 "🔄 Train 5 More Rounds (500 eps/round)",
                 "🧠 Make Agent More Aggressive",
                 "🛡️ Penalize Mistakes More Heavily",
                 "🎨 Redesign Arena Look",
             ]
+            if arena_locked
+            else [
+                "🎨 Neon Cyberpunk Theme",
+                "📊 Add Detailed Telemetry HUD",
+                "🔍 Make Board / Canvas Larger",
+                "🔒 Lock Arena & Start Training",
+            ]
+        )
 
-        # Persist conversation state
         history.append({
             "role": "assistant",
             "content": assistant_reply.strip(),
@@ -997,7 +1062,7 @@ class StudioOmniAgent:
         effective_actions = list(intents)
         target_map = {
             ExecutionTarget.ARENA_VISUAL_UI: StudioActionType.PREVIEW_OR_UPDATE_ARENA,
-            ExecutionTarget.INFERENCE_STRATEGY: StudioActionType.PREVIEW_OR_UPDATE_ARENA,
+            ExecutionTarget.INFERENCE_STRATEGY: StudioActionType.UPDATE_INFERENCE,
             ExecutionTarget.REWARD_SHAPING: StudioActionType.UPDATE_AGENT_CHARACTERISTICS,
             ExecutionTarget.ENV_SIM_MECHANICS: StudioActionType.UPDATE_ENV_MECHANICS,
             ExecutionTarget.TRAINING_HYPERPARAMS: StudioActionType.RUN_OR_CONTINUE_TRAINING,
@@ -1024,81 +1089,115 @@ class StudioOmniAgent:
             action_plan=action_plan,
         )
 
-    def _rewrite_reward_function(
+    # Generic reward concepts -> breakdown terms. These are English concepts, not domain templates.
+    _REWARD_CONCEPTS: list[tuple[str, str, float]] = [
+        (r"\b(quick|faster|fast|stalling|stall)\b", "speed_bonus", 2.0),
+        (r"\b(aggress|aggressive|attack|offensive)\b", "aggression_bonus", 1.5),
+        (r"\bcenter|centre\b", "center_control_bonus", 2.0),
+        (r"\bcorner\b", "corner_bonus", 2.0),
+        (r"\b(mistake|error|penal(ize|ise|ty|izing|ising)?)\b", "mistake_penalty", -2.5),
+        (r"\b(safety|unsafe|collision|obstacles?)\b", "safety_penalty", -2.0),
+        (r"\b(false positive|over-?block|too strict)\b", "false_positive_penalty", -3.0),
+    ]
+
+    def _safe_reward_rewrite(
         self,
         current_code: str,
         user_feedback: str,
-        blueprint: AgentBlueprintSpec,
-    ) -> str:
-        """Modifies compute_reward() according to natural language behavior directives."""
-        if not isinstance(self.client, FallbackCodeSynthesizer):
+    ) -> tuple[str, bool, str]:
+        """Rewrites compute_reward() only when the transformation is provably safe.
+
+        Returns ``(code, applied, note)``. The deterministic path refuses functions with early
+        returns instead of producing broken or silently-zeroed reward code.
+        """
+        directives = self._reward_terms_from_text(user_feedback)
+        one_line = " ".join(str(user_feedback).split())[:200]
+
+        # 1. Validated full-module synthesis via the LLM, when available.
+        if not isinstance(self.client, (FallbackCodeSynthesizer, UnconfiguredLLMClient)) and current_code:
             try:
-                auto_tuner = AutoTunerAgent(self.client)
                 prompt = (
-                    f"The user wants to update the agent's behavior and reward formulation:\n"
-                    f"Directives: \"{user_feedback}\"\n\n"
-                    f"Current Environment Code:\n{current_code}\n\n"
-                    f"Rewrite `compute_reward(self, state, action, next_state, info)` to reflect these directives. "
-                    f"Preserve all method signatures and clamp reward terms to [-10.0, 10.0]. Return full updated Python module inside ```python ... ```."
+                    f"Update only `compute_reward(self, state, action, next_state, info)` to reflect this request:\n"
+                    f"\"{user_feedback}\"\n\n"
+                    f"Preserve every method signature and unrelated reward term. Clamp each term to [-10.0, 10.0].\n"
+                    f"Return the complete updated Python module inside ```python ... ```.\n\n"
+                    f"Current code:\n{current_code}"
                 )
                 res = self.client.generate(prompt)
                 match = re.search(r"```python\s*([\s\S]*?)```", res)
                 if match and "def compute_reward" in match.group(1):
-                    return match.group(1).strip()
-            except Exception:
-                pass
+                    candidate = match.group(1).strip()
+                    ast.parse(candidate)
+                    return candidate, True, "Reward function rewritten by the LLM."
+            except Exception as ex:
+                logging.warning(f"LLM reward rewrite failed, using safe deterministic path: {ex}")
 
-        # Deterministic reward rewrite based on directive keywords
-        code = current_code
-        fb = user_feedback.lower()
+        if not current_code or "def compute_reward" not in current_code:
+            return current_code, False, "No compute_reward() implementation was found to modify."
+        if not directives:
+            return current_code, False, "No concrete reward incentive was recognised in the request."
 
-        # Check for specific reward tweaks
-        additions = []
-        additions.append(f"        # Behavior directive: {user_feedback}\n")
-        if "stalling" in fb or "quick" in fb or "bonus" in fb or "faster" in fb:
-            additions.append('        # Quick win bonus & stalling penalty\n        steps = info.get("step_count", info.get("steps", 1))\n        bd["quick_win_bonus"] = 2.0 / max(1, steps)\n        bd["stalling_penalty"] = -0.05 * float(steps)\n')
-        if "aggressive" in fb or "fork" in fb:
-            additions.append('        # Tactical aggression & fork reward\n        bd["tactical_aggression"] = 1.5\n')
-        if "center" in fb:
-            additions.append('        # Center control priority\n        bd["center_control"] = 2.0\n')
-        if "corner" in fb:
-            additions.append('        # Corner opening strategic bonus\n        if action in [0, 2, 6, 8]:\n            bd["corner_opening_bonus"] = 2.0\n')
-        if "mistake" in fb or "penalize" in fb:
-            additions.append('        # Mistake avoidance penalty\n        bd["mistake_penalty"] = -2.5\n')
-        if "cardiac" in fb:
-            additions.append('        # Cardiac symptom safety: never deny cardiac cases, route to urgent review\n        if info.get("has_cardiac_symptoms", 0) and action == 3:\n            bd["cardiac_denial_penalty"] = -10.0\n        elif info.get("has_cardiac_symptoms", 0) and action == 2:\n            bd["cardiac_urgent_route_bonus"] = 5.0\n')
-        if "verified" in fb or "payroll" in fb or "false positive" in fb:
-            additions.append('        # Reduce false positives on verified corporate payroll accounts\n        if info.get("is_verified_corporate", 0) and action != 0:\n            bd["false_freeze_penalty"] = -5.0\n')
-        if "clearance" in fb or "7 days" in fb or "forbid" in fb:
-            additions.append('        # Forbid clearance when > 7 days remaining\n        if info.get("day_of_sale", 0) <= 7 and action == 3:\n            bd["premature_clearance_penalty"] = -8.0\n')
-        if "liability" in fb or "100,000" in fb or "100000" in fb:
-            additions.append('        # Strict liability cap verification over $100,000\n        if info.get("max_dollar_value", 0) >= 100000 and action != 1:\n            bd["unlimited_liability_penalty"] = -6.0\n')
-        if "obstacle" in fb or "safety" in fb:
-            additions.append('        # Increased obstacle safety clearance reward\n        bd["obstacle_safety_clearance"] = 2.0\n')
-        if "login_drop" in fb or "discount" in fb or "vip" in fb:
-            additions.append('        # Penalize offering discount when login_drop_pct < 20%\n        if info.get("login_drop_pct", 0) < 20.0 and action == 2:\n            bd["premature_discount_penalty"] = -5.0\n')
+        try:
+            tree = ast.parse(current_code)
+        except SyntaxError as ex:
+            return current_code, False, f"Current environment code is not parseable: {ex}"
 
-        if additions and "def compute_reward" in code:
-            injection = "".join(additions)
-            # Inject right before the return statement of compute_reward
-            ret_match = re.search(r"(def compute_reward[\s\S]*?)(^[ \t]*return\s+[^\n]+\n)", code, re.MULTILINE)
-            if ret_match:
-                prefix = ret_match.group(1).rstrip() + "\n"
-                setup_dict = (
-                    "        if 'bd' not in locals():\n"
-                    "            bd = info.get('reward_breakdown', {})\n"
-                    "        reward_breakdown = bd\n"
-                )
-                sum_code = (
-                    "        total = float(sum(bd.values()))\n"
-                    "        total_reward = total\n"
-                )
-                code = code.replace(ret_match.group(0), prefix + setup_dict + injection + sum_code + "        return total, bd\n")
-            else:
-                # Add comment and breakdown keys
-                code = code.replace("def compute_reward", f"# Behavior directive: {user_feedback}\n    def compute_reward")
+        target_func = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "compute_reward":
+                target_func = node
+                break
+        if target_func is None:
+            return current_code, False, "compute_reward() implementation not found."
 
-        return code
+        returns = [n for n in target_func.body if isinstance(n, ast.Return)]
+        if len(returns) != 1 or target_func.body[-1] is not returns[0]:
+            return current_code, False, (
+                "This reward function has multiple/early returns, so it cannot be transformed safely "
+                "without an LLM. No changes were applied."
+            )
+        ret = returns[0]
+        if not isinstance(ret.value, ast.Tuple) or len(ret.value.elts) != 2:
+            return current_code, False, "compute_reward() must return (total_reward, breakdown_dict)."
+
+        total_src = ast.get_source_segment(current_code, ret.value.elts[0]) or "0.0"
+        bd_name = ast.get_source_segment(current_code, ret.value.elts[1]) or "bd"
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", bd_name):
+            return current_code, False, "Reward breakdown is not a simple local variable."
+
+        lines = current_code.splitlines()
+        ret_lineno = ret.lineno - 1  # 0-based index of the return statement
+        indent = " " * (ret.col_offset)
+        new_keys = [name for name, _ in directives]
+        injected = [f"{indent}# User directive: {one_line}"]
+        for name, value in directives:
+            injected.append(f"{indent}{bd_name}[{name!r}] = {value}")
+        if "sum(" in total_src and bd_name in total_src:
+            injected.append(f"{indent}total_reward = float(sum({bd_name}.values()))")
+        else:
+            injected.append(
+                f"{indent}total_reward = float({total_src}) + float(sum({bd_name}[k] for k in {new_keys!r} if k in {bd_name}))"
+            )
+        injected.append(f"{indent}return total_reward, {bd_name}")
+
+        rewritten = "\n".join(lines[:ret_lineno] + injected + lines[ret_lineno + 1:]) + "\n"
+        try:
+            ast.parse(rewritten)
+        except SyntaxError as ex:
+            return current_code, False, f"Reward transformation produced invalid code ({ex}); no changes applied."
+        return rewritten, True, "Reward function updated with a validated function-level transformation."
+
+    def _reward_terms_from_text(self, text: str) -> list[tuple[str, float]]:
+        lowered = str(text or "").lower()
+        terms: list[tuple[str, float]] = []
+        for pattern, name, default_value in self._REWARD_CONCEPTS:
+            if re.search(pattern, lowered):
+                # A negated concept (e.g. "never penalize safety") flips the sign.
+                value = default_value
+                if re.search(r"\b(never|don't|do not|stop|avoid|reduce)\b[^.]{0,40}" + pattern, lowered):
+                    value = -abs(default_value)
+                terms.append((name, value))
+        return terms
 
     def _generate_diagnostic_explanation(self, conv: dict[str, Any], query: str) -> str:
         """Generates conversational diagnosis or answers questions using LLM or smart telemetry."""

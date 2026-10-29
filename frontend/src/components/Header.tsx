@@ -5,6 +5,7 @@ import {
   Archive,
   Download,
   CheckCircle2,
+  Activity,
   AlertTriangle,
   Zap,
   History,
@@ -99,12 +100,22 @@ export const Header: React.FC<HeaderProps> = ({
           className={`flex items-center space-x-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border ${
             driftStatus === 'healthy'
               ? 'bg-emerald-950/40 border-emerald-800/50 text-emerald-400'
-              : 'bg-amber-950/40 border-amber-800/50 text-amber-400'
+              : driftStatus === 'unmonitored'
+                ? 'bg-slate-900 border-slate-700 text-slate-400'
+                : 'bg-amber-950/40 border-amber-800/50 text-amber-400'
           }`}
-          title={driftStatus === 'healthy' ? 'Drift monitor: policy aligned' : 'Drift detected: re-tuning suggested'}
+          title={
+            driftStatus === 'healthy'
+              ? 'Drift monitor: policy aligned'
+              : driftStatus === 'unmonitored'
+                ? 'Drift monitoring has not reported a baseline for this session'
+                : 'Drift detected: re-tuning suggested'
+          }
         >
           {driftStatus === 'healthy' ? (
             <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
+          ) : driftStatus === 'unmonitored' ? (
+            <Activity className="h-3.5 w-3.5 text-slate-500" />
           ) : (
             <AlertTriangle className="h-3.5 w-3.5 text-amber-400" />
           )}

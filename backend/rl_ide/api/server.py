@@ -39,6 +39,7 @@ from rl_ide.autopilot.loop_controller import (
     SessionStateStore,
     SessionState,
     RoundSnapshot,
+    TrainingInProgressError,
 )
 from rl_ide.autopilot.auto_tuner import TuningResult
 from rl_ide.export.exporter import PolicyExporter
@@ -55,6 +56,7 @@ from rl_ide.llm.client import (
     init_llm_state,
 )
 from rl_ide.synthesizer.env_builder import JITEnvironmentSynthesizer, load_synthesized_env_class, instantiate_env
+from rl_ide.state.records_store import load_records, save_records
 from rl_ide.synthesizer.verifier import SandboxSmokeTester
 from rl_ide.synthesizer.arena_builder import JITArenaSynthesizer
 
@@ -70,7 +72,8 @@ def create_app() -> FastAPI:
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r".*",
+    # Local studio only: arbitrary origins must not be able to act with user credentials.
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -101,6 +104,29 @@ def require_verified_llm() -> None:
                 "Please configure and test your LLM API credentials in Settings."
             ),
         )
+
+
+# Optional shared-secret gate (enabled only when RL_IDE_API_TOKEN is set).
+_API_TOKEN = os.environ.get("RL_IDE_API_TOKEN", "").strip()
+
+# Strong references to background tasks so they are not garbage-collected mid-flight.
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _spawn_background(coro) -> None:
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+
+@app.middleware("http")
+async def _optional_api_token(request, call_next):
+    if _API_TOKEN and request.url.path.startswith("/api/"):
+        supplied = request.headers.get("x-api-token", "")
+        if supplied != _API_TOKEN:
+            from fastapi.responses import JSONResponse
+            return JSONResponse({"detail": "Invalid or missing API token."}, status_code=401)
+    return await call_next(request)
 
 
 # WebSocket Connection Manager
@@ -472,7 +498,7 @@ async def start_session(req: SessionStartRequest):
                     "message": f"Training loop error: {loop_err}",
                 })
 
-        asyncio.create_task(_run_background())
+        _spawn_background(_run_background())
         return {
             "session_id": sid,
             "status": "training",
@@ -527,6 +553,10 @@ def get_conversation(conversation_id: str):
             env_cls = load_synthesized_env_class(env_file)
             dataset = ingested_datasets_store.get(conv.get("dataset_id")) if conv.get("dataset_id") else None
             records = dataset.df.to_dict(orient="records") if (dataset and hasattr(dataset, "df")) else None
+            if records is None:
+                records = load_records(ws_dir)
+            else:
+                save_records(ws_dir, records)
             env = instantiate_env(env_cls, dataset_records=records)
             global_store.set_env(conversation_id, env)
 
@@ -632,6 +662,10 @@ def clear_all_conversations():
     """Deletes all conversations and cleans up all associated workspace files."""
     conv_store = get_conversation_store()
     deleted_count = conv_store.clear_all()
+    global_store._sessions.clear()
+    global_store._models.clear()
+    global_store._envs.clear()
+    ingested_datasets_store.clear()
     return {"success": True, "deleted_count": deleted_count}
 
 
@@ -643,6 +677,17 @@ def delete_conversation(conversation_id: str):
     if not conv:
         raise HTTPException(status_code=404, detail=f"Conversation '{conversation_id}' not found.")
     conv_store.delete(conversation_id)
+    global_store.delete_session(conversation_id)
+    ds_id = conv.get("dataset_id")
+    if ds_id:
+        # Only drop the dataset when no other conversation still references it.
+        still_used = any(
+            c.get("dataset_id") == ds_id
+            for c in conv_store.list_conversations()
+            if c.get("conversation_id") != conversation_id
+        )
+        if not still_used:
+            ingested_datasets_store.pop(ds_id, None)
     return {"success": True, "conversation_id": conversation_id}
 
 
@@ -696,18 +741,21 @@ async def conversation_omni_chat(conversation_id: str, req: UnifiedConversationC
     effective_ds_id = req.dataset_id or (existing_conv.get("dataset_id") if existing_conv else None)
     active_dataset = ingested_datasets_store.get(effective_ds_id) if effective_ds_id else None
 
-    response = await asyncio.to_thread(
-        global_omni_agent.process_message,
-        conversation_id=conversation_id,
-        user_message=msg,
-        dataset=active_dataset,
-        dataset_id=effective_ds_id,
-        selected_options=req.get_effective_answers(),
-        training_params=req.training_params,
-        force_action=req.force_action,
-        broadcast_callback=sync_broadcast,
-        run_sync=req.run_sync,
-    )
+    try:
+        response = await asyncio.to_thread(
+            global_omni_agent.process_message,
+            conversation_id=conversation_id,
+            user_message=msg,
+            dataset=active_dataset,
+            dataset_id=effective_ds_id,
+            selected_options=req.get_effective_answers(),
+            training_params=req.training_params,
+            force_action=req.force_action,
+            broadcast_callback=sync_broadcast,
+            run_sync=req.run_sync,
+        )
+    except TrainingInProgressError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
 
     # Launch asynchronous background training if training action was triggered
     if StudioActionType.RUN_OR_CONTINUE_TRAINING in response.action_types and not req.run_sync:
@@ -722,6 +770,8 @@ async def conversation_omni_chat(conversation_id: str, req: UnifiedConversationC
                 add_rounds = int(response.training_params.get("max_auto_tune_rounds") or bp.max_auto_tune_rounds or 5)
                 training_dataset = active_dataset or (ingested_datasets_store.get(bp.dataset_id) if bp.dataset_id else None)
 
+                prior_rounds = len(global_store.get_session(conversation_id).rounds_history) if global_store.get_session(conversation_id) else 0
+
                 async def _run_training_background():
                     try:
                         trained_session = await asyncio.to_thread(
@@ -732,8 +782,8 @@ async def conversation_omni_chat(conversation_id: str, req: UnifiedConversationC
                             dataset=training_dataset,
                             on_event_callback=sync_broadcast,
                             max_rounds=add_rounds,
+                            additional_rounds=add_rounds if prior_rounds else None,
                             episodes_per_burst=eps_per_burst,
-                            continue_training=True,
                         )
                         c_store = get_conversation_store()
                         c_store.save_or_update(
@@ -745,11 +795,13 @@ async def conversation_omni_chat(conversation_id: str, req: UnifiedConversationC
                             episodes=trained_session.episodes,
                             latest_model_zip_path=trained_session.latest_model_zip_path,
                         )
+                    except TrainingInProgressError as e:
+                        sync_broadcast({"event": "training_conflict", "message": str(e)})
                     except Exception as e:
                         print(f"Error in continuous background training: {e}")
                         sync_broadcast({"event": "error", "message": str(e)})
 
-                asyncio.create_task(_run_training_background())
+                _spawn_background(_run_training_background())
 
     return response
 
@@ -833,6 +885,11 @@ class InteractRequest(BaseModel):
 @app.post("/api/v4/sessions/{session_id}/interact")
 def session_interact(session_id: str, req: InteractRequest):
     """Executes live human play/inspection against the agent inside arena.html."""
+    if global_controller.is_busy(session_id):
+        raise HTTPException(
+            status_code=409,
+            detail="Training is currently mutating this session's policy; retry once the round completes.",
+        )
     env = global_store.get_env(session_id)
     model = global_store.get_model(session_id)
     if not env:
@@ -853,7 +910,7 @@ def session_interact(session_id: str, req: InteractRequest):
         if ws_env_file.exists():
             try:
                 env_cls = load_synthesized_env_class(ws_env_file)
-                env = instantiate_env(env_cls)
+                env = instantiate_env(env_cls, dataset_records=load_records(ws_dir))
                 global_store.set_env(session_id, env)
             except Exception as e:
                 print(f"Warning: could not instantiate env from {ws_env_file}: {e}")
@@ -891,6 +948,14 @@ def session_interact(session_id: str, req: InteractRequest):
                 except Exception as w_err:
                     print(f"Warning: could not load weights from {weights_path}: {w_err}")
 
+    # A changed environment must not be paired with an incompatible policy.
+    if model is not None and (
+        getattr(model, "observation_space", None) != env.observation_space
+        or getattr(model, "action_space", None) != env.action_space
+    ):
+        global_store.delete_model(session_id)
+        model = None
+
     def policy_predict(obs):
         if model:
             obs_t = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
@@ -905,8 +970,10 @@ def session_interact(session_id: str, req: InteractRequest):
             n_acts = env.action_space.n
             return 0, [1.0 / n_acts] * n_acts
 
-    res = env.interactive_step(req.get_effective_payload(), policy_predict)
-    return res
+    try:
+        return env.interactive_step(req.get_effective_payload(), policy_predict)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Interactive step failed: {exc}")
 
 
 class NudgeRequest(BaseModel):
@@ -920,6 +987,10 @@ def session_nudge(session_id: str, req: NudgeRequest):
     try:
         tuning_res = global_controller.nudge_session(session_id, req.feedback)
         return tuning_res
+    except TrainingInProgressError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 

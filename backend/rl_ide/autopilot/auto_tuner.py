@@ -35,6 +35,7 @@ class TuningResult(BaseModel):
     changes_summary: str
     updated_code: str
     verified: bool
+    applied: bool = True
     hyperparameter_diffs: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -148,6 +149,23 @@ class AutoTunerAgent:
                     "and refined demonstration priors."
                 )
 
+        if not current_code.strip():
+            # No environment source to transform: nothing to verify and nothing to change.
+            return TuningResult(
+                round=round_num,
+                current_metric=current_metric,
+                target_threshold=target,
+                diagnosis=diagnosis,
+                changes_summary="No environment source was available; reward function unchanged.",
+                updated_code=current_code,
+                verified=True,
+                applied=False,
+                hyperparameter_diffs={
+                    "ent_coef": max(0.005, 0.02 - round_num * 0.003),
+                    "learning_rate": 3e-4 if round_num == 1 else 2e-4,
+                },
+            )
+
         # 3. Rewrite compute_reward in code
         updated_code = self._rewrite_environment_code(
             current_code=current_code,
@@ -173,6 +191,13 @@ class AutoTunerAgent:
             "learning_rate": 3e-4 if round_num == 1 else 2e-4,
         }
 
+        applied = healed_code.strip() != current_code.strip()
+        if not applied:
+            changes_summary = (
+                "No material reward change was applied because no verified LLM rewrite was available; "
+                "the existing reward function was retained."
+            )
+
         return TuningResult(
             round=round_num,
             current_metric=current_metric,
@@ -181,6 +206,7 @@ class AutoTunerAgent:
             changes_summary=changes_summary,
             updated_code=healed_code,
             verified=verified,
+            applied=applied,
             hyperparameter_diffs=hyper_diffs,
         )
 
@@ -213,36 +239,6 @@ class AutoTunerAgent:
             except Exception as exc:
                 print(f"[AutoTunerAgent] LLM reward rewrite notice ({exc}); applying deterministic reward scaling.")
 
-        # Deterministic Rewrite (used for offline Fallback in test mode)
-        code = current_code
-
-        # Evolve reward weights in code (strictly clamped within [-10.0, +10.0])
-        # 1. Scale win bonus (capped at +10.0)
-        code = re.sub(r'breakdown\["win_bonus"\] = 10\.0', 'breakdown["win_bonus"] = 10.0', code)
-        code = re.sub(r'total \+= 10\.0', 'total += 10.0', code)
-
-        # 2. Scale loss penalty (capped at -10.0)
-        code = re.sub(r'breakdown\["loss_penalty"\] = -10\.0', 'breakdown["loss_penalty"] = -10.0', code)
-        code = re.sub(r'total \+= -10\.0', 'total += -10.0', code)
-
-        # 3. Scale draw bonus (capped at +5.0)
-        code = re.sub(r'breakdown\["draw_bonus"\] = 3\.0', 'breakdown["draw_bonus"] = 5.0', code)
-        code = re.sub(r'total \+= 3\.0', 'total += 5.0', code)
-
-        # 4. Scale illegal move penalty (capped at -5.0 / -10.0)
-        code = re.sub(r'breakdown\["illegal_move_penalty"\] = -\d+(?:\.\d+)?', 'breakdown["illegal_move_penalty"] = -5.0', code)
-        code = re.sub(r'total \+= -1\.0', 'total += -5.0', code)
-
-        # 5. Data reward evolution (clamped within [-10.0, +10.0])
-        code = re.sub(r'breakdown\["correct_decision"\] = 1\.0', 'breakdown["correct_decision"] = 2.5', code)
-        code = re.sub(r'breakdown\["incorrect_penalty"\] = -1\.0', 'breakdown["incorrect_penalty"] = -2.5', code)
-
-        # 6. Distance delta scaling
-        code = re.sub(r'dist_delta \* 2\.0', 'dist_delta * 4.0', code)
-
-        # Add comment noting round evolution
-        header_tag = f"# Auto-Tuned Round {round_num + 1}: {changes_summary}\n"
-        if header_tag not in code:
-            code = header_tag + code
-
-        return code
+        # Deterministic fallback: changing reward semantics without an LLM cannot be done safely,
+        # so the reward function is left untouched and the caller reports "not applied".
+        return current_code

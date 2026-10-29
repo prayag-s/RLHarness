@@ -20,6 +20,7 @@ from rl_ide.architect.models import AgentBlueprintSpec
 from rl_ide.autopilot.loop_controller import AutonomousLoopController, SessionStateStore
 from rl_ide.autopilot.auto_tuner import AutoTunerAgent, TuningResult
 from rl_ide.synthesizer.env_builder import JITEnvironmentSynthesizer
+from tests.fixtures.tictactoe_fixture_env import TicTacToeFixtureEnv
 from rl_ide.api.server import app, global_store, global_controller
 
 
@@ -58,14 +59,9 @@ def test_autonomous_multi_round_self_tuning_loop(tictactoe_blueprint_v4c: AgentB
     store = SessionStateStore(base_dir=tmp_path / "workspaces")
     controller = AutonomousLoopController(store=store)
 
-    # 1. Synthesize environment code
-    env_builder = JITEnvironmentSynthesizer()
+    # 1. Use a deterministic, learnable environment fixture (real contract, real metric)
     session_id = "test_loop_sess_1"
-    ws_dir = tmp_path / "workspaces" / session_id
-    code_str, env_path, env_cls = env_builder.synthesize(
-        blueprint=tictactoe_blueprint_v4c,
-        workspace_dir=ws_dir,
-    )
+    env_cls = TicTacToeFixtureEnv
 
     events_captured: list[dict] = []
 
@@ -113,12 +109,7 @@ def test_user_nudge_and_snapshot_rollback(tictactoe_blueprint_v4c: AgentBlueprin
     controller = AutonomousLoopController(store=store)
 
     session_id = "test_nudge_sess_2"
-    ws_dir = tmp_path / "workspaces" / session_id
-    env_builder = JITEnvironmentSynthesizer()
-    code_str, env_path, env_cls = env_builder.synthesize(
-        blueprint=tictactoe_blueprint_v4c,
-        workspace_dir=ws_dir,
-    )
+    env_cls = TicTacToeFixtureEnv
 
     # Run 1 quick round to establish baseline snapshot v1
     controller.run_loop(
@@ -132,7 +123,6 @@ def test_user_nudge_and_snapshot_rollback(tictactoe_blueprint_v4c: AgentBlueprin
     initial_session = store.get_session(session_id)
     assert initial_session is not None
     assert len(initial_session.rounds_history) == 1
-    r1_code = initial_session.env_module_code
 
     # 1. Apply Natural Language Nudge
     nudge_text = "Prioritize aggressive center control and punish corner traps heavily"

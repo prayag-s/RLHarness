@@ -70,7 +70,7 @@ export const App: React.FC = () => {
   const [currentRound, setCurrentRound] = useState<number>(1)
   const [maxRounds, setMaxRounds] = useState<number>(4)
   const [roundHistory, setRoundHistory] = useState<RoundSnapshot[]>([])
-  const [driftStatus, setDriftStatus] = useState<string>('healthy')
+  const [driftStatus] = useState<string>('unmonitored')
 
   // Dataset & Timeline
   const [attachedDataset, setAttachedDataset] = useState<IngestedDatasetSummary | null>(null)
@@ -455,6 +455,7 @@ export const App: React.FC = () => {
   const handleSendStudioMessage = async (
     message: string,
     explicitParams?: TrainingParams,
+    answers?: Record<string, string>,
   ): Promise<StudioChatResponse> => {
     if (!isLLMVerified) {
       setIsGateModalOpen(true)
@@ -478,6 +479,7 @@ export const App: React.FC = () => {
         conversation_id: cid,
         user_message: message,
         dataset_id: attachedDataset?.dataset_id,
+        selected_options: answers || {},
         training_params: explicitParams || trainingParams,
       })
 

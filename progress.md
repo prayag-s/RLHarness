@@ -1,12 +1,25 @@
 # RL-Native Agent IDE — Progress & Session Handoff Log
 
-**Project:** RL-Native Agent Studio v4.4 (Zero-Hardcoding Universal Generative Pipeline & Agentic Chat Planner)  
+**Project:** RL-Native Agent Studio v4.5 (Honest Metrics, Verified Synthesis, Isolated Training)  
 **Last Updated:** 2026-10-29  
-**Current Status:** v4.4 Verified. Fully generalized Universal Generative Pipeline implemented across Intake, Gymnasium Environment Synthesizer, Dynamic Arena Synthesizer, and Agentic Chat Planner. All static domain routing and rover fallbacks eliminated.  
-- **Backend Tests:** 53 / 53 Core Tests Passing (100% Green across all suites, including `test_universal_agentic_pipeline.py` and `test_agentic_chat_planner.py`).
-- **Live Browser Audit:** 11 / 11 Scenarios Passing (0 browser console errors, 0 duplicate key warnings, 0 unhandled promise rejections).
-- **Frontend Build:** `npm run build` clean (0 TypeScript / Vite errors, 1599 modules transformed).
-- **Git Commit:** Head updated with zero-hardcoding universal pipeline and code-aware chat planner.
+**Current Status:** v4.5 remediation complete — phases 0–E of
+[DESIGN_AUDIT_AND_PHASED_REMEDIATION.md](./DESIGN_AUDIT_AND_PHASED_REMEDIATION.md) are implemented and
+every audit issue is closed or explicitly accepted (see the closure ledger in that document).
+- **Backend Tests:** **72 passed, 0 failed** (`pytest -q`, ≈6 min). Includes new suites
+  `test_phase_hardening.py`, the rewritten `test_universal_agentic_pipeline.py`, and the behavioural
+  `test_agentic_chat_planner.py`.
+- **Frontend Build:** `npm run build` clean (tsc + vite, 1 599 modules).
+- **Browser suite:** **not executed in this environment** (requires a live server + verified LLM).
+  Previous “11/11 passing” claims in this log were not reproducible from the repository state and have
+  been removed.
+- **Metric semantics:** classification tasks report per-step accuracy; control tasks report the
+  terminal outcome; generic placeholder environments report **0 %** and are flagged.
+- **Known residuals:** see §6 of the audit document (no built-in auth, sample rows in exported
+  bundles for offline execution, advisory surgical instructions, drift monitoring not wired).
+
+> Historical sections below (v4.0–v4.4) are retained as an append-only log. Where they conflict with
+> the v4.5 status above (e.g. “all static domain routing eliminated”, “100 % mastery”, “53/53 tests”),
+> the v4.5 section at the end of this file is authoritative.
 
 ---
 
@@ -622,3 +635,110 @@ Automated verification suite `backend/tests/test_agentic_chat_planner.py` execut
 
 
 
+
+
+---
+
+## 9. v4.5 Remediation — Phases 0–E (2026-10-29)
+
+Authoritative record: [DESIGN_AUDIT_AND_PHASED_REMEDIATION.md](./DESIGN_AUDIT_AND_PHASED_REMEDIATION.md).
+All work was driven by the issue register F1–F33 in that document.
+
+### 9.1 What changed, by phase
+
+**Phase 0 — Transport verification**
+- Investigated the reported `Authorization: ******` blocker: the source already sends
+  `Bearer {api_key}` (`Bearer {api_key or 'ollama'}` for Ollama). The earlier report was a false
+  positive caused by secret redaction in tool output.
+- Added `test_llm_clients_send_bearer_authorization`, which captures outgoing headers with a mocked
+  `httpx` transport for deepseek/openai/ollama.
+
+**Phase A — Honest metrics and contracts**
+- `episode_metric_value()` replaces `any(step.is_success)`: classification tasks aggregate per-step
+  accuracy; control tasks use the terminal outcome.
+- Dataset environments expose `task_class="classification"`, `is_correct`, and a generic
+  `label_column`; the target column is excluded from observations (no label leakage).
+- The schema-driven fallback is now an explicit **placeholder**: `is_placeholder=True`,
+  `is_success=False`, reward `0.0`. Without a usable LLM, `synthesize_universal_env` raises
+  `EnvironmentSynthesisError` instead of fabricating a trainable task.
+- Rollout/evaluation use `episode_horizon` / `spec.max_episode_steps` (fallback 200) instead of a
+  fixed 50-step cap.
+- Verification enforces the declared `state_dict_schema` keys, label/space alignment, state
+  mutability, and reports success reachability as uncertainty.
+
+**Phase B — Training controls and isolation**
+- `max_rounds` now unambiguously means “rounds to run in this call”; the session target accumulates.
+- Budget: `episodes_per_round × 25` timesteps with an explicit 100 000 ceiling (no silent 1 024 cap).
+- Auto-tuner hyperparameters (`ent_coef`, `learning_rate`) are applied to the PPO model.
+- Unverified auto-tune output is rejected (`auto_tune_failed`) and never written/loaded.
+- Targets are parsed only from explicit target/goal/threshold phrases; unused `eval_every` and
+  `continue_training` were removed.
+- Per-session `threading.Lock`; `/interact` returns **409** while training mutates the model;
+  background tasks are retained in a strong-reference set.
+
+**Phase C — Mutation safety**
+- All write/import/train/hot-reload paths are gated on `verified`.
+- `_repair_code` no longer substitutes a different environment; unrepairable code fails explicitly.
+- `_safe_reward_rewrite()` replaces the regex rewriter: AST-validated insertion before the final
+  return, refuses early-return/anonymous-breakdown/trailing-code cases, sanitizes user text.
+- Inference-only plans no longer touch `compute_reward` or trigger retraining
+  (`INFERENCE_STRATEGY → UPDATE_INFERENCE`).
+- The inference patch is action-space aware (legal masking, `n_actions` bound, top-k fallback) and
+  returns `(code, applied)` so no-op patches are reported honestly.
+- Changed observation/action spaces reset the policy deliberately (`policy_reset` event + UI note).
+
+**Phase D — Zero hardcoding and the state contract**
+- Planner routing is a domain-free intent grammar (verbs + visual/style nouns) with word-boundary
+  capability patterns; “invoices” is no longer rejected as “voice”.
+- Arena generation uses the environment’s real `reset()` render state (or a neutral schema sample)
+  and renders only user-requested elements generically. Rover/HIPAA/burn-rate/arcade domain branches
+  were removed; duplicate `id="status-badge"` and unbalanced markup fixed; cell→action mapping only
+  when the counts match; restyle sees the full document.
+- Intake uses generic structure inference (quoted labels, `RxC` grids, `N columns/options/floors`),
+  task-shaped questions, forwards `conversation_history`, and applies answers mid-session.
+- `DynamicTaskBlueprint` now carries its own metric/threshold/round/episode contract.
+- Export parity uses real environment observations at `atol=1e-5`; bundles fail if `env_module.py`
+  or `arena.html` is missing; the UI reports drift as `unmonitored` instead of “healthy”.
+
+**Phase E — Isolation, durability, tests, docs**
+- `clear_all()` only deletes conversation-owned directories; `delete()` clears in-memory
+  model/env/session and unreferenced datasets.
+- Dataset records are persisted (`workspaces/<id>/dataset_records.json`) and reloaded by the loop,
+  rollback, nudge, interact and export paths.
+- CORS restricted to local origins; optional `RL_IDE_API_TOKEN`; HTML/JS escaping in arenas.
+- `sys.modules` cache bounded; `env_module_try_*` artefacts removed after verification attempts.
+- Tests rewritten to behavioural contracts; new `test_phase_hardening.py` (10 tests) covers transport,
+  isolation, export completeness, cleanup scoping, durability, mid-session answers, verification
+  gating, auto-tune rejection and target parsing.
+
+### 9.2 Test results (verbatim summary)
+
+```text
+$ pytest -q
+72 passed, 5 warnings in 377.22s (0:06:17)
+```
+
+Frontend:
+
+```text
+$ npm run build
+✓ 1599 modules transformed.
+✓ built in 5.32s
+```
+
+### 9.3 Test-file changes
+
+| File | Change |
+|---|---|
+| `tests/test_phase_hardening.py` | **New** — transport, isolation, export, cleanup, durability, intake answers, verification gating, auto-tune rejection, target parsing |
+| `tests/test_universal_agentic_pipeline.py` | Rewritten to 14 behavioural tests (placeholder honesty, accuracy metric, long horizon, action-space-aware patching, reward safety, inference-only immutability, structural no-hardcoding audit, schema contract, training lock) |
+| `tests/test_agentic_chat_planner.py` | Legal-action assertions instead of hardcoded `{0,2,4,6,8}`; reward assertions use the actual term names |
+| `tests/test_v4_0a.py` | Structured prompts (`3x3 board`) for deterministic mode; fuzzy-intent test replaced by a domain-free task-shape test |
+| `tests/test_v4_0b.py` | Shape mismatch now asserts explicit failure (no hidden substitution) |
+| `tests/test_v4_0c.py`, `tests/test_v4_convergence.py` | Convergence tests run against a real, learnable contract fixture (`tests/fixtures/tictactoe_fixture_env.py`) instead of the fabricated placeholder |
+| `tests/test_v4_2_commercial_suite.py` | Removed assertions for hardcoded overlays/canvas and fabricated mastery; asserts valid percentages and contract-bound arenas |
+
+### 9.4 Remaining risks
+
+See §6 of the audit document. None of them are silent failures: each is either surfaced in the UI,
+documented in code, or gated by configuration.

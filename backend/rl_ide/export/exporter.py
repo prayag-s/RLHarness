@@ -271,6 +271,9 @@ if __name__ == "__main__":
 """
 
 
+ONNX_PARITY_TOLERANCE = 1e-5
+
+
 class PolicyExporter:
     """Exports SB3 PPO policies to ONNX, performs parity checking, and packages self-contained run bundles."""
 
@@ -317,14 +320,27 @@ class PolicyExporter:
         onnx_path: str | Path,
         obs_dim: int,
         n_samples: int = 32,
+        sample_obs: np.ndarray | None = None,
     ) -> float:
-        """Verifies numerical parity between PyTorch policy and ONNX Runtime session."""
+        """Verifies numerical parity between PyTorch policy and ONNX Runtime session.
+
+        Parity is measured on real environment observations when available, at the documented
+        ``< 1e-5`` tolerance.
+        """
         orig_device = getattr(model.policy, "device", None)
         model.policy.to("cpu")
         wrapper = _OnnxActorWrapper(model.policy)
         wrapper.eval()
 
-        test_obs = np.random.randn(n_samples, obs_dim).astype(np.float32)
+        if sample_obs is not None and len(sample_obs) > 0:
+            test_obs = np.asarray(sample_obs, dtype=np.float32)
+            if test_obs.ndim == 1:
+                test_obs = test_obs.reshape(1, -1)
+            if test_obs.shape[1] < obs_dim:
+                test_obs = np.pad(test_obs, ((0, 0), (0, obs_dim - test_obs.shape[1])))
+            test_obs = test_obs[:, :obs_dim]
+        else:
+            test_obs = np.random.randn(n_samples, obs_dim).astype(np.float32)
         test_obs_tensor = torch.from_numpy(test_obs)
 
         with torch.no_grad():
@@ -337,8 +353,10 @@ class PolicyExporter:
         onnx_probs = sess.run(None, {"obs": test_obs})[0]
 
         max_diff = float(np.max(np.abs(pytorch_probs - onnx_probs)))
-        if not np.allclose(pytorch_probs, onnx_probs, atol=1e-4):
-            raise ValueError(f"ONNX parity check failed! Max diff: {max_diff:.3e} exceeds 1e-4")
+        if not np.allclose(pytorch_probs, onnx_probs, atol=ONNX_PARITY_TOLERANCE):
+            raise ValueError(
+                f"ONNX parity check failed! Max diff: {max_diff:.3e} exceeds {ONNX_PARITY_TOLERANCE}"
+            )
 
         return max_diff
 
@@ -357,6 +375,13 @@ class PolicyExporter:
         out_dir = Path(output_dir).resolve()
         out_dir.mkdir(parents=True, exist_ok=True)
 
+        missing = [str(p) for p in (env_module_path, arena_html_path) if not Path(p).exists()]
+        if missing:
+            # Never return a "successful" bundle that cannot be executed.
+            raise FileNotFoundError(
+                "Cannot package runbundle; missing required artefacts: " + ", ".join(missing)
+            )
+
         b_name = bundle_name or f"{session_id}.runbundle"
         bundle_dir = out_dir / b_name
         bundle_dir.mkdir(parents=True, exist_ok=True)
@@ -370,12 +395,35 @@ class PolicyExporter:
         else:
             obs_dim = len(blueprint.observation_features)
 
+        # Collect realistic observations from the packaged environment (used for parity + drift).
+        from rl_ide.synthesizer.env_builder import load_synthesized_env_class, instantiate_env
+        from rl_ide.state.records_store import load_records
+
+        real_obs_samples: list[list[float]] = []
+        try:
+            env_cls = load_synthesized_env_class(env_module_path)
+            sample_env = instantiate_env(env_cls, dataset_records=load_records(Path(env_module_path).parent))
+            for _ in range(5):
+                o, _ = sample_env.reset()
+                real_obs_samples.append([float(x) for x in o])
+                for _ in range(10):
+                    o, _, term, trunc, _ = sample_env.step(sample_env.action_space.sample())
+                    real_obs_samples.append([float(x) for x in o])
+                    if term or trunc:
+                        break
+        except Exception:
+            real_obs_samples = []
+
+        parity_obs = np.asarray(real_obs_samples, dtype=np.float32) if real_obs_samples else None
+
         orig_device = getattr(model.policy, "device", None) if model and hasattr(model, "policy") else None
         if model and hasattr(model, "policy"):
             model.policy.to("cpu")
         try:
             cls.export_onnx(model=model, output_path=onnx_file, obs_dim=obs_dim)
-            max_diff = cls.verify_parity(model=model, onnx_path=onnx_file, obs_dim=obs_dim)
+            max_diff = cls.verify_parity(
+                model=model, onnx_path=onnx_file, obs_dim=obs_dim, sample_obs=parity_obs
+            )
         finally:
             if orig_device is not None and model and hasattr(model, "policy"):
                 model.policy.to(orig_device)
@@ -394,33 +442,11 @@ class PolicyExporter:
         if arena_src.exists():
             shutil.copy2(str(arena_src), str(bundle_dir / "arena.html"))
 
-        # 4. Generate drift baseline fitted on realistic environment observations
+        # 4. Generate drift baseline fitted on the realistic observations captured above
         from rl_ide.contracts.adapter import EpisodeLog, StepResult
-        from rl_ide.synthesizer.env_builder import load_synthesized_env_class, instantiate_env
-
-        real_obs_samples: list[list[float]] = []
-        try:
-            if Path(env_module_path).exists():
-                env_cls = load_synthesized_env_class(env_module_path)
-                sample_env = instantiate_env(env_cls)
-                if hasattr(sample_env, "get_demonstrations"):
-                    demos_X, _ = sample_env.get_demonstrations(num_samples=50)
-                    real_obs_samples.extend(demos_X.tolist())
-                else:
-                    for _ in range(5):
-                        o, _ = sample_env.reset()
-                        real_obs_samples.append([float(x) for x in o])
-                        for _ in range(10):
-                            o, _, term, trunc, _ = sample_env.step(sample_env.action_space.sample())
-                            real_obs_samples.append([float(x) for x in o])
-                            if term or trunc:
-                                break
-        except Exception:
-            pass
 
         if not real_obs_samples:
-            for _ in range(50):
-                real_obs_samples.append(np.random.randn(obs_dim).tolist())
+            real_obs_samples = [[0.0] * obs_dim for _ in range(10)]
 
         dummy_episodes = []
         chunk_size = max(1, len(real_obs_samples) // 5)

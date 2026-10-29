@@ -146,9 +146,17 @@ def synthesize_blueprint_from_prompt(
     explicit_obs = extract_observation_features_from_prompt(clean_prompt)
 
     # Dynamic extraction of domain title
-    raw_title = re.sub(r"^(train|build|create|make|synthesize)\s+(an?\s+)?", "", clean_prompt, flags=re.IGNORECASE)
+    raw_title = re.sub(
+        r"^(train|build|create|make|synthesize)\s+(an?\s+)?(agent\s+to\s+)?(play\s+|for\s+)?",
+        "",
+        clean_prompt,
+        flags=re.IGNORECASE,
+    )
     raw_title = raw_title.split(".")[0].split("\n")[0].strip()
-    title_words = [w.capitalize() for w in raw_title.split()[:5]]
+    def _title_word(word: str) -> str:
+        return "-".join(part[:1].upper() + part[1:] if part else "" for part in word.split("-"))
+
+    title_words = [_title_word(w) for w in raw_title.split()[:5]]
     domain_title = " ".join(title_words) if title_words else "Universal RL Agent"
     if not any(kw in domain_title.lower() for kw in ["agent", "master", "controller"]):
         domain_title += " Agent"
@@ -156,62 +164,83 @@ def synthesize_blueprint_from_prompt(
     data_source = "uploaded_dataset" if dataset is not None else "pure_simulation"
     ds_id = getattr(dataset, "dataset_id", None) if dataset else None
 
-    # Check for discrete column count (e.g. "drops discs into 7 columns")
-    col_match = re.search(r"(\d+)\s*(?:columns|cols)", prompt_lower)
-    if col_match:
-        n_cols = int(col_match.group(1))
+    # Generic structure inference (no domain nouns/templates).
+    # 1) Explicit grid dimensions: "3x3", "6 x 7", "4 by 4"
+    grid_match = re.search(r"\b(\d+)\s*(?:x|×|by)\s*(\d+)\b", prompt_lower)
+    if grid_match:
+        rows, cols = int(grid_match.group(1)), int(grid_match.group(2))
+        n_cells = rows * cols
         actions = [
-            ActionSpec(index=c, label=f"Drop Col {c}", mechanic_description=f"Drop token into column {c}")
-            for c in range(n_cols)
+            ActionSpec(
+                index=i,
+                label=f"Cell {i // cols},{i % cols}",
+                mechanic_description=f"Select grid cell at row {i // cols}, column {i % cols}",
+            )
+            for i in range(n_cells)
         ]
-        n_rows = 6
         obs_features = [
-            ObservationFeatureSpec(name=f"cell_{r}_{c}", description=f"Grid cell row {r}, col {c}", low=-1.0, high=1.0)
-            for r in range(n_rows) for c in range(n_cols)
-        ]
+            ObservationFeatureSpec(
+                name=f"cell_{i // cols}_{i % cols}",
+                description=f"Grid cell row {i // cols}, column {i % cols}",
+                low=-1.0,
+                high=1.0,
+            )
+            for i in range(n_cells)
+        ] + [ObservationFeatureSpec(name="current_turn", description="Whose turn it is", low=-1.0, high=1.0)]
         state_schema = {
-            "board": f"list[list[int]] ({n_rows}x{n_cols} grid)",
+            "board": f"list[{n_cells}] cell values ({rows}x{cols} grid, row-major)",
             "current_player": "int",
-            "winner": "int",
+            "winner": "int (0=ongoing)",
         }
         return DynamicTaskBlueprint(
             domain_title=domain_title,
-            domain_summary=f"Competitive grid game on a {n_cols} column grid.",
-            visual_metaphor=f"Vertical {n_cols} column drop grid arena with interactive action buttons",
+            domain_summary=f"Turn-based {rows}x{cols} grid task.",
+            visual_metaphor=f"{rows}x{cols} interactive grid arena with per-cell selection",
             observation_features=obs_features,
             actions=actions,
             state_dict_schema=state_schema,
-            reward_components={"win_bonus": "Reward for winning line", "loss_penalty": "Penalty for loss"},
+            reward_components={
+                "goal_bonus": "Reward for achieving the objective",
+                "invalid_action_penalty": "Penalty for an illegal selection",
+                "draw_bonus": "Reward for a neutral/terminal draw",
+            },
             clarifying_questions=[],
             data_source_type=data_source,
             dataset_id=ds_id,
         )
 
-    # Check for 3x3 grid / board games
-    is_3x3 = bool(re.search(r"\b(3x3|3\s*by\s*3|ttt|tic|toe|x\s*and\s*o|noughts)\b", prompt_lower))
-    if is_3x3:
-        domain_title = "Tic-Tac-Toe Master Agent"
-        obs_features = [
-            ObservationFeatureSpec(name=f"cell_{r}_{c}", description=f"Board cell at row {r}, col {c}", low=-1.0, high=1.0)
-            for r in range(3) for c in range(3)
-        ] + [ObservationFeatureSpec(name="current_turn", description="Current player turn", low=-1.0, high=1.0)]
+    # 2) Explicit discrete choice count: "7 columns", "4 options", "3 classes", "5 lanes"
+    count_match = re.search(
+        r"\b(\d+)\s*(columns?|cols?|lanes?|options?|choices?|actions?|classes?|categories?|bins?|levels?|floors?|stops?|servers?|pumps?|queues?|tracks?)\b",
+        prompt_lower,
+    )
+    if count_match and 2 <= int(count_match.group(1)) <= 50:
+        n_choices = int(count_match.group(1))
+        noun = count_match.group(2).rstrip("s")
         actions = [
-            ActionSpec(index=i, label=f"Place ({i // 3},{i % 3})", mechanic_description=f"Place mark at row {i // 3}, col {i % 3}")
-            for i in range(9)
+            ActionSpec(
+                index=i,
+                label=f"{noun.capitalize()} {i + 1}",
+                mechanic_description=f"Choose {noun} {i + 1}",
+            )
+            for i in range(n_choices)
+        ]
+        obs_features = [
+            ObservationFeatureSpec(name=f"state_{i + 1}", description=f"Observed state for {noun} {i + 1}", low=-10.0, high=10.0)
+            for i in range(n_choices)
         ]
         state_schema = {
-            "board": "list[int] (9 cells: 0=empty, 1=X, 2=O)",
-            "current_player": "int",
-            "winner": "int (0=ongoing, 1=X, 2=O, 3=draw)",
+            f"state_{i + 1}": "float" for i in range(n_choices)
         }
+        state_schema["selected_index"] = "int"
         return DynamicTaskBlueprint(
             domain_title=domain_title,
-            domain_summary="Zero-sum competitive 3x3 board game agent learning optimal play.",
-            visual_metaphor="Modern 3x3 dark-mode grid with neon glow and winning lines",
+            domain_summary=f"Discrete decision task over {n_choices} {noun}s.",
+            visual_metaphor=f"Decision console with {n_choices} {noun} controls and live telemetry",
             observation_features=obs_features,
             actions=actions,
             state_dict_schema=state_schema,
-            reward_components={"win_bonus": "Reward for winning", "draw_bonus": "Reward for draw", "loss_penalty": "Penalty for losing"},
+            reward_components={"objective_progress": "Reward for moving towards the objective"},
             clarifying_questions=[],
             data_source_type=data_source,
             dataset_id=ds_id,
@@ -219,27 +248,44 @@ def synthesize_blueprint_from_prompt(
 
     # Dataset-driven blueprint
     if dataset is not None and hasattr(dataset, "df") and dataset.df is not None:
-        cols = list(dataset.df.columns)[:8]
-        obs_features = [
-            ObservationFeatureSpec(name=c, description=f"Dataset column: {c}", low=-1000.0, high=1000.0)
-            for c in cols
-        ]
+        from rl_ide.ingest.profiler import infer_label_column
+
         act_labels = explicit_actions or ["Approve / Safe", "Flag / Investigate"]
         actions = [
             ActionSpec(index=i, label=lbl, mechanic_description=f"Classify record as {lbl}")
             for i, lbl in enumerate(act_labels)
         ]
+        label_column = infer_label_column(dataset.df, len(actions))
+        # Never expose the target column as an observation (label leakage).
+        cols = [c for c in dataset.df.columns if c != label_column][:8]
+        obs_features = [
+            ObservationFeatureSpec(name=c, description=f"Dataset column: {c}", low=-1000.0, high=1000.0)
+            for c in cols
+        ]
+        if label_column:
+            summary = f"Data-driven decision agent trained on {len(dataset.df)} records."
+            metaphor = "Real-time tabular decision ledger with feature gauges and accuracy metrics"
+            state_schema = {"record_index": "int", "accuracy_pct": "float", "last_action": "int"}
+            data_source = "uploaded_dataset"
+        else:
+            # Telemetry-only dataset: it informs observations, but the task is a control problem.
+            summary = f"Decision agent operating on live telemetry from {len(dataset.df)} records."
+            metaphor = "Live telemetry dashboard with action controls and metric history"
+            state_schema = {c: "float" for c in cols}
+            state_schema["selected_index"] = "int"
+            data_source = "hybrid_doc_and_sim"
         return DynamicTaskBlueprint(
             domain_title=domain_title,
-            domain_summary=f"Data-driven decision agent trained on {len(dataset.df)} records.",
-            visual_metaphor="Real-time tabular decision ledger with feature gauges and accuracy metrics",
+            domain_summary=summary,
+            visual_metaphor=metaphor,
             observation_features=obs_features,
             actions=actions,
-            state_dict_schema={"record_index": "int", "accuracy_pct": "float", "last_action": "str"},
+            state_dict_schema=state_schema,
             reward_components={"accuracy_reward": "Reward for correct classification"},
             clarifying_questions=[],
-            data_source_type="uploaded_dataset",
+            data_source_type=data_source,
             dataset_id=ds_id,
+            label_column=label_column,
         )
 
     # General Novel Domain
@@ -283,6 +329,39 @@ def synthesize_blueprint_from_prompt(
     )
 
 
+def apply_answers_to_blueprint(
+    blueprint: AgentBlueprintSpec,
+    answers: dict[str, Any] | None,
+) -> AgentBlueprintSpec:
+    """Applies optional intake answers (by question id or pillar) to a blueprint in place."""
+    ans = answers or {}
+
+    def _pick(*keys: str) -> str | None:
+        for key in keys:
+            val = ans.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+        return None
+
+    custom_obj = _pick("objective", "q_objective")
+    if custom_obj:
+        blueprint.domain_summary = f"{blueprint.domain_summary} Objective: {custom_obj}"
+    custom_ui = _pick("arena_ui", "q_arena_ui")
+    if custom_ui:
+        blueprint.arena_visual_description = custom_ui
+        blueprint.visual_metaphor = custom_ui
+    custom_exp = _pick("expectations", "q_expectations")
+    if custom_exp:
+        m_pct = re.search(r"(\d+(?:\.\d+)?)\s*%", custom_exp)
+        if m_pct:
+            blueprint.target_metric_threshold = float(m_pct.group(1))
+        m_rnd = re.search(r"(\d+)\s*rounds?", custom_exp, re.IGNORECASE)
+        if m_rnd:
+            blueprint.max_auto_tune_rounds = int(m_rnd.group(1))
+
+    return blueprint
+
+
 class IntakeArchitectAgent:
     """Conversational intake architect managing 5-Pillar interviews and blueprint generation."""
 
@@ -320,6 +399,7 @@ class IntakeArchitectAgent:
             answers=answers,
             wants_defaults=should_default,
             training_params=training_params,
+            conversation_history=conversation_history,
         )
 
     def _deterministic_intake(
@@ -329,6 +409,7 @@ class IntakeArchitectAgent:
         answers: dict[str, str] | None = None,
         wants_defaults: bool = False,
         training_params: dict[str, Any] | None = None,
+        conversation_history: list[dict[str, str]] | None = None,
     ) -> IntakeResponse:
         """Determines whether to ask universal clarifying questions or lock the blueprint."""
         ans = answers or {}
@@ -338,6 +419,7 @@ class IntakeArchitectAgent:
         dyn_blueprint = synthesize_blueprint_from_prompt(
             prompt=prompt,
             dataset=dataset,
+            conversation_history=conversation_history,
             answers=ans,
             training_params=training_params,
             client=self.client,
@@ -361,56 +443,74 @@ class IntakeArchitectAgent:
 
         if needs_clarification:
             domain_name = blueprint.task_title.replace(" Agent", "").replace(" Master", "")
+            is_data_task = blueprint.data_source_type == "uploaded_dataset"
+            metaphor = blueprint.visual_metaphor or f"a live view of {domain_name}"
             questions = [
                 ClarifyingQuestion(
                     id="q_objective",
                     question_id="q_objective",
                     pillar=PILLAR_OBJECTIVE,
-                    question=f"What strategic gameplay behavior and reward priorities should the {domain_name} agent learn?",
+                    question=f"What outcome and trade-offs should the {domain_name} agent optimize?",
                     suggested_options=[
-                        f"Optimal minimax play: Win whenever possible and maximize success",
-                        f"Aggressive high-variance play: Prioritize immediate offensive opportunities",
-                        f"Defensive counter-puncher: Prioritize threat mitigation and stability",
+                        "Maximize the primary success metric while avoiding costly mistakes",
+                        "Maximize speed/efficiency even if risk is slightly higher",
+                        "Prioritize safety and stability over peak performance",
                     ],
-                    default_option=f"Optimal minimax play: Win whenever possible and maximize success",
+                    default_option="Maximize the primary success metric while avoiding costly mistakes",
                 ),
                 ClarifyingQuestion(
                     id="q_arena_ui",
                     question_id="q_arena_ui",
                     pillar=PILLAR_ARENA_UI,
-                    question=f"How would you like to visualize the {domain_name} arena in the center panel?",
+                    question=f"How should the {domain_name} arena look in the center panel?",
                     suggested_options=[
-                        f"Modern 3x3 dark-mode grid with neon glow and winning lines" if "tic" in domain_name.lower() or "3x3" in domain_name.lower() else f"Modern dark-mode reactive visual stage for {domain_name}",
-                        f"Minimalist clean board with move history ledger",
-                        f"Retro arcade 8-bit styling with animated action markers",
-                        f"Compact numeric matrix with live value heatmaps",
+                        f"Render it as described: {metaphor}",
+                        "Minimalist dark-mode layout focused on the main metric",
+                        "Detailed telemetry dashboard with history and per-action probabilities",
+                        "Retro arcade styling with animated state changes",
                     ],
-                    default_option=f"Modern 3x3 dark-mode grid with neon glow and winning lines" if "tic" in domain_name.lower() or "3x3" in domain_name.lower() else f"Modern dark-mode reactive visual stage for {domain_name}",
+                    default_option=f"Render it as described: {metaphor}",
                 ),
                 ClarifyingQuestion(
                     id="q_interaction",
                     question_id="q_interaction",
                     pillar=PILLAR_INTERACTION,
-                    question=f"How will you interactively test and challenge the agent on the board?",
-                    suggested_options=[
-                        "Click-to-place human vs agent interactive board with reset button",
-                        "Dynamic side switching and play inspection",
-                        "Self-play spectator simulation with speed controls",
-                    ],
-                    default_option="Click-to-place human vs agent interactive board with reset button",
+                    question=(
+                        "How do you want to inspect or override individual records?"
+                        if is_data_task
+                        else f"How do you want to test the {domain_name} agent interactively?"
+                    ),
+                    suggested_options=(
+                        [
+                            "Step through records and override the agent's decision",
+                            "Review misclassified records with the agent's probabilities",
+                            "Run a batch audit and export the confusion summary",
+                        ]
+                        if is_data_task
+                        else [
+                            "Interactive controls to drive the environment turn by turn",
+                            "Watch live training episodes with replay",
+                            "Both: play manually and watch training",
+                        ]
+                    ),
+                    default_option=(
+                        "Step through records and override the agent's decision"
+                        if is_data_task
+                        else "Interactive controls to drive the environment turn by turn"
+                    ),
                 ),
                 ClarifyingQuestion(
                     id="q_expectations",
                     question_id="q_expectations",
                     pillar=PILLAR_EXPECTATIONS,
-                    question=f"What target mastery win/draw rate and auto-tune round budget should we aim for?",
+                    question="What success threshold and auto-tune round budget should we aim for?",
                     suggested_options=[
-                        "85% Win/Draw Rate (4 rounds)",
-                        "90% Win/Draw Rate (4 rounds)",
-                        "95% Near-Optimal Mastery (5 rounds)",
-                        "75% Fast Prototyping (2 rounds)",
+                        f"85% {blueprint.success_metric_name} (4 rounds)",
+                        f"90% {blueprint.success_metric_name} (4 rounds)",
+                        f"95% {blueprint.success_metric_name} (5 rounds)",
+                        "75% Fast prototyping (2 rounds)",
                     ],
-                    default_option="85% Win/Draw Rate (4 rounds)",
+                    default_option=f"85% {blueprint.success_metric_name} (4 rounds)",
                 ),
             ]
 
@@ -423,20 +523,7 @@ class IntakeArchitectAgent:
 
         # Apply user answers to customize blueprint
         if ans:
-            custom_obj = ans.get("objective") or ans.get("q_objective")
-            if custom_obj:
-                blueprint.domain_summary = f"{blueprint.domain_summary} Strategy: {custom_obj}"
-            custom_ui = ans.get("arena_ui") or ans.get("q_arena_ui")
-            if custom_ui:
-                blueprint.arena_visual_description = custom_ui
-            custom_exp = ans.get("expectations") or ans.get("q_expectations")
-            if custom_exp:
-                m_pct = re.search(r"(\d+(?:\.\d+)?)\s*%", custom_exp)
-                if m_pct:
-                    blueprint.target_metric_threshold = float(m_pct.group(1))
-                m_rnd = re.search(r"(\d+)\s*rounds?", custom_exp, re.IGNORECASE)
-                if m_rnd:
-                    blueprint.max_auto_tune_rounds = int(m_rnd.group(1))
+            blueprint = apply_answers_to_blueprint(blueprint, ans)
 
         return IntakeResponse(
             status="ready_to_build",

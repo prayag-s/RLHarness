@@ -27,6 +27,16 @@ from rl_ide.llm.client import BaseLLMClient, FallbackCodeSynthesizer, get_active
 from rl_ide.llm.prompts import ENV_BUILDER_SYSTEM_PROMPT
 
 
+class EnvironmentSynthesisError(RuntimeError):
+    """Raised when no verified, task-specific environment could be synthesized."""
+
+
+def is_test_mode() -> bool:
+    """Local import wrapper so env synthesis can decide about deterministic placeholders."""
+    from rl_ide.llm.client import is_test_mode as _is_test_mode
+    return _is_test_mode()
+
+
 def extract_python_code(raw: str) -> str:
     """Extracts valid Python code from raw LLM output, handling markdown fences and truncated blocks."""
     if not raw:
@@ -58,6 +68,10 @@ def extract_python_code(raw: str) -> str:
     return text
 
 
+_LOADED_MODULES: list[str] = []
+_MAX_LOADED_MODULES = 64
+
+
 def load_synthesized_env_class(file_path: Path | str, class_name: str = "SynthesizedGymEnv") -> type[gym.Env]:
     """Dynamically loads the synthesized Gymnasium environment class from file."""
     path = Path(file_path).resolve()
@@ -71,6 +85,10 @@ def load_synthesized_env_class(file_path: Path | str, class_name: str = "Synthes
 
     module = importlib.util.module_from_spec(spec)
     sys.modules[unique_mod_name] = module
+    _LOADED_MODULES.append(unique_mod_name)
+    while len(_LOADED_MODULES) > _MAX_LOADED_MODULES:
+        stale = _LOADED_MODULES.pop(0)
+        sys.modules.pop(stale, None)
     spec.loader.exec_module(module)
 
     if not hasattr(module, class_name):
@@ -152,6 +170,11 @@ class SynthesizedGymEnv(gym.Env):
         self.step_count = 0
         self.done = False
         self.last_move = None
+        # Honest placeholder metadata: this module implements no domain objective.
+        self.is_placeholder = True
+        self.task_class = "control"
+        self.episode_horizon = 25
+        self.success_criteria = "Placeholder environment: no domain objective was synthesized."
         has_board_schema = "board" in {state_schema} or self.n_actions == 9
         self.board = [0] * (self.n_actions if self.n_actions > 0 else 9) if has_board_schema else None
         self.reset()
@@ -178,6 +201,8 @@ class SynthesizedGymEnv(gym.Env):
         return self._get_obs(), {{
             "reward_breakdown": {{}},
             "is_success": False,
+            "is_correct": None,
+            "is_placeholder": self.is_placeholder,
             "arena_state": self.get_render_state(),
         }}
 
@@ -193,12 +218,15 @@ class SynthesizedGymEnv(gym.Env):
             curr_val = self.state_vars.get(f, 0.0)
             self.state_vars[f] = float(np.clip(curr_val + delta + random.uniform(-0.05, 0.05), -10.0, 10.0))
 
-        terminated = (self.step_count >= 25)
+        terminated = (self.step_count >= self.episode_horizon)
         obs = self._get_obs()
-        reward, bd = self.compute_reward(obs, act, obs, {{"reward_breakdown": {{"step_progress": 1.0}}}})
+        reward, bd = self.compute_reward(obs, act, obs, {{"reward_breakdown": {{}}}})
         info = {{
             "reward_breakdown": bd,
-            "is_success": terminated and reward > 0,
+            # A placeholder has no objective, so it must never claim success.
+            "is_success": False,
+            "is_correct": None,
+            "is_placeholder": True,
             "arena_state": self.get_render_state(),
         }}
         return obs, float(reward), terminated, False, info
@@ -206,10 +234,9 @@ class SynthesizedGymEnv(gym.Env):
     def compute_reward(self, obs, action, next_obs, info) -> tuple[float, dict[str, float]]:
         if not self.state_vars:
             self.reset()
-        total = 0.0
-        bd = info.get("reward_breakdown", {{}})
-        total = float(sum(bd.values()))
-        return total, bd
+        # Neutral reward: a placeholder must not manufacture a learning signal.
+        bd = dict((info or {{}}).get("reward_breakdown", {{}}))
+        return 0.0, bd
 
     def get_render_state(self) -> dict[str, Any]:
         if not self.state_vars:
@@ -308,8 +335,16 @@ def synthesize_universal_env(
     dataset: IngestedDataset | None = None,
     client: BaseLLMClient | None = None,
     max_retries: int = 3,
+    allow_placeholder: bool | None = None,
 ) -> str:
-    """Universal LLM Gymnasium Code Synthesizer with 3-Attempt Self-Healing Sandbox Loop."""
+    """Universal LLM Gymnasium Code Synthesizer with 3-Attempt Self-Healing Sandbox Loop.
+
+    When no usable LLM is available, an explicit placeholder module is only produced in test
+    mode (or when ``allow_placeholder`` is explicitly true). In every other case synthesis
+    fails loudly instead of fabricating a trainable task.
+    """
+    if allow_placeholder is None:
+        allow_placeholder = is_test_mode()
     active_client = client or get_active_llm_client()
     task_title = getattr(blueprint, "domain_title", None) or getattr(blueprint, "task_title", "") or "Custom RL Environment"
     summary = getattr(blueprint, "domain_summary", "") or "Dynamic simulation task."
@@ -334,7 +369,8 @@ def synthesize_universal_env(
                 f"6. get_render_state(self) -> dict matching state_dict_schema\n"
                 f"7. render_arena_state(self) -> dict alias to get_render_state()\n"
                 f"8. interactive_step(self, payload, policy_predict_fn=None, mode='agent_vs_env') -> dict\n"
-                f"9. get_demonstrations(self, num_samples=32) -> (np.ndarray, np.ndarray)\n\n"
+                f"9. get_demonstrations(self, num_samples=32) -> (np.ndarray, np.ndarray)\n"
+                f"10. Optional: get_valid_actions() and get_critical_actions() when the domain has legal/tactical actions\n\n"
                 f"Output ONLY valid Python code inside ```python ... ```."
             )
             raw = active_client.generate(prompt, system_prompt=ENV_BUILDER_SYSTEM_PROMPT)
@@ -344,8 +380,13 @@ def synthesize_universal_env(
         except Exception:
             code = None
 
-    # Fallback to schema-driven code generation
+    # No usable LLM output: refuse to fabricate a task unless a placeholder is allowed.
     if not code:
+        if not allow_placeholder:
+            raise EnvironmentSynthesisError(
+                "No verified environment code could be synthesized for this task. "
+                "A working LLM is required to generate a task-specific environment."
+            )
         code = _generate_schema_driven_env_code(bp_spec, user_prompt=user_prompt)
 
     # Pre-import AST security audit
@@ -353,6 +394,8 @@ def synthesize_universal_env(
     try:
         audit_ast_security(code)
     except Exception:
+        if not allow_placeholder:
+            raise
         code = _generate_schema_driven_env_code(bp_spec, user_prompt=user_prompt)
         audit_ast_security(code)
 
@@ -364,9 +407,11 @@ def synthesize_universal_env(
         dataset=dataset,
         max_retries=max_retries,
     )
-    if verified:
-        return healed_code
-    return code
+    if not verified:
+        raise EnvironmentSynthesisError(
+            "Generated environment failed sandbox verification: " + (logs[-1][-500:] if logs else "unknown error")
+        )
+    return healed_code
 
 
 class JITEnvironmentSynthesizer:
@@ -396,8 +441,11 @@ class JITEnvironmentSynthesizer:
 
         bp_spec = blueprint if isinstance(blueprint, AgentBlueprintSpec) else blueprint.to_agent_blueprint_spec()
 
-        # Path 1: Uploaded tabular/document dataset
-        if dataset is not None or bp_spec.data_source_type == "uploaded_dataset":
+        # Path 1: supervised tabular task (requires an identifiable label column)
+        has_label = bool(bp_spec.label_column) or bool(
+            dataset is not None and self._infer_label_column(dataset, max(1, len(bp_spec.action_labels)))
+        )
+        if bp_spec.data_source_type == "uploaded_dataset" and has_label:
             code_str = self._build_dataset_code(bp_spec, dataset)
         else:
             # Path 2: Universal LLM-driven environment synthesis
@@ -407,12 +455,23 @@ class JITEnvironmentSynthesizer:
                 client=self.client,
             )
 
-        from rl_ide.synthesizer.verifier import audit_ast_security
+        from rl_ide.synthesizer.verifier import audit_ast_security, SandboxSmokeTester
         audit_ast_security(code_str)
 
-        file_path.write_text(code_str, encoding="utf-8")
+        # Generated code is untrusted until the smoke test passes: never write/import before.
+        verified, healed_code, logs = SandboxSmokeTester(self.client).verify_and_heal(
+            code_str=code_str,
+            blueprint=bp_spec,
+            dataset=dataset,
+            workspace_dir=out_dir,
+        )
+        if not verified:
+            raise EnvironmentSynthesisError(
+                "Environment failed sandbox verification: " + (logs[-1][-500:] if logs else "unknown error")
+            )
+        file_path.write_text(healed_code, encoding="utf-8")
         env_cls = load_synthesized_env_class(file_path)
-        return code_str, file_path, env_cls
+        return healed_code, file_path, env_cls
 
     def generate_env_code(
         self,
@@ -422,7 +481,10 @@ class JITEnvironmentSynthesizer:
     ) -> str:
         """Synthesizes python code via universal generative pipeline."""
         bp_spec = blueprint if isinstance(blueprint, AgentBlueprintSpec) else blueprint.to_agent_blueprint_spec()
-        if dataset is not None or bp_spec.data_source_type == "uploaded_dataset":
+        has_label = bool(bp_spec.label_column) or bool(
+            dataset is not None and self._infer_label_column(dataset, max(1, len(bp_spec.action_labels)))
+        )
+        if bp_spec.data_source_type == "uploaded_dataset" and has_label:
             return self._build_dataset_code(bp_spec, dataset)
         return synthesize_universal_env(
             blueprint=bp_spec,
@@ -430,6 +492,15 @@ class JITEnvironmentSynthesizer:
             dataset=dataset,
             client=self.client,
         )
+
+    @staticmethod
+    def _infer_label_column(dataset: IngestedDataset | None, n_actions: int) -> str | None:
+        """Infers a target/label column generically (see ``ingest.profiler.infer_label_column``)."""
+        from rl_ide.ingest.profiler import infer_label_column
+
+        if dataset is None or not hasattr(dataset, "df"):
+            return None
+        return infer_label_column(dataset.df, n_actions)
 
     def _build_dataset_code(
         self,
@@ -441,6 +512,7 @@ class JITEnvironmentSynthesizer:
         obs_dim = max(1, len(obs_features))
         action_labels = blueprint.action_labels
         n_actions = max(1, len(action_labels))
+        label_column = blueprint.label_column or self._infer_label_column(dataset, n_actions)
 
         sample_records = []
         if dataset is not None and hasattr(dataset, "df") and dataset.df is not None:
@@ -452,14 +524,26 @@ class JITEnvironmentSynthesizer:
                         rec[col] = float(val)
                     except (ValueError, TypeError):
                         rec[col] = float(hash(str(val)) % 100) / 10.0
+                if label_column and label_column in row:
+                    try:
+                        rec[str(label_column)] = int(float(row[label_column]))
+                    except (ValueError, TypeError):
+                        pass
                 sample_records.append(rec)
 
         if not sample_records:
             for i in range(100):
                 rec = {col: float(math.sin(i * 0.1 + j)) for j, col in enumerate(obs_features)}
+                if label_column:
+                    rec[str(label_column)] = i % max(1, n_actions)
                 sample_records.append(rec)
 
-        records_json = json.dumps(sample_records)
+        records_json = json.dumps(sample_records, default=str)
+        if not label_column:
+            raise EnvironmentSynthesisError(
+                "No label/target column could be identified in the uploaded dataset. "
+                "Name the target column 'label'/'target'/'is_*', or specify it explicitly."
+            )
 
         return f'''"""Auto-synthesized Gymnasium environment for Data Inspection & Decision."""
 
@@ -497,6 +581,12 @@ class SynthesizedGymEnv(gym.Env):
         self.step_count = 0
         self.correct_count = 0
         self.last_action = None
+        self.label_column = {label_column!r}
+        self._declared_state_schema = {dict(blueprint.state_dict_schema or {})!r}
+        self.is_placeholder = False
+        self.task_class = "classification" if self.label_column else "control"
+        self.episode_horizon = 25
+        self.success_criteria = "Predict the label column correctly for every record in the episode."
 
     def _extract_obs(self, record: dict[str, Any]) -> np.ndarray:
         obs = np.zeros(self.obs_dim, dtype=np.float32)
@@ -529,25 +619,8 @@ class SynthesizedGymEnv(gym.Env):
         self.last_action = int(action)
         rec = self.records[self.current_idx]
 
-        target_keys = ["is_fraud", "churn_risk", "is_policy_violation", "target", "label", "class", "sop_compliance_score"]
-        found_target = None
-        for tk in target_keys:
-            if tk in rec:
-                found_target = rec[tk]
-                break
-
-        if found_target is not None:
-            try:
-                truth = int(float(found_target)) % self.n_actions
-            except (ValueError, TypeError):
-                truth = 0
-            is_correct = (int(action) == truth)
-        else:
-            first_val = rec.get(self.observation_features[0], 0.0)
-            try:
-                is_correct = (int(action) == (int(float(first_val)) % self.n_actions))
-            except (ValueError, TypeError):
-                is_correct = (int(action) == 0)
+        truth = self._truth_for(rec)
+        is_correct = (truth is not None and int(action) == truth)
 
         reward, breakdown = self.compute_reward(None, action, None, {{"is_correct": is_correct}})
         if is_correct:
@@ -559,12 +632,22 @@ class SynthesizedGymEnv(gym.Env):
 
         info = {{
             "record_index": self.current_idx,
+            # Step-level correctness only; the evaluator aggregates it into accuracy.
             "is_success": is_correct,
+            "is_correct": is_correct,
             "accuracy_pct": round((self.correct_count / self.step_count) * 100, 1),
             "reward_breakdown": breakdown,
             "arena_state": self.render_arena_state(),
         }}
         return next_obs, reward, terminated, False, info
+
+    def _truth_for(self, rec: dict[str, Any]) -> int | None:
+        if self.label_column and self.label_column in rec:
+            try:
+                return int(float(rec[self.label_column])) % self.n_actions
+            except (ValueError, TypeError):
+                return None
+        return None
 
     def compute_reward(self, obs, action, next_obs, info) -> tuple[float, dict[str, float]]:
         is_correct = info.get("is_correct", False)
@@ -578,15 +661,21 @@ class SynthesizedGymEnv(gym.Env):
     def render_arena_state(self) -> dict[str, Any]:
         rec = self.records[self.current_idx % len(self.records)]
         acc = (self.correct_count / max(1, self.step_count)) * 100
-        return {{
+        state = {{
             "record_index": self.current_idx,
             "total_records": len(self.records),
             "step_count": self.step_count,
             "accuracy_pct": round(acc, 1),
+            "last_action": self.last_action if self.last_action is not None else -1,
             "last_action_label": self.action_labels[self.last_action] if self.last_action is not None else "None",
             "current_record_preview": {{k: str(v)[:30] for k, v in list(rec.items())[:6]}},
             "action_labels": self.action_labels,
         }}
+        for _key, _kind in self._declared_state_schema.items():
+            if _key not in state:
+                _k = str(_kind).lower()
+                state[_key] = [] if "list" in _k else (0 if "int" in _k else (0.0 if "float" in _k else ""))
+        return state
 
     def interactive_step(self, payload: dict[str, Any], policy_predict_fn: Callable = None, mode: str = "agent_vs_env") -> dict[str, Any]:
         custom_record = payload.get("custom_params") or payload.get("record") if isinstance(payload, dict) else None
@@ -617,15 +706,18 @@ class SynthesizedGymEnv(gym.Env):
         n = num_samples
         X = np.zeros((n, self.obs_dim), dtype=np.float32)
         y = np.zeros(n, dtype=np.int64)
+        usable = 0
         for i in range(n):
             rec = self.records[i % len(self.records)]
             obs = self._extract_obs(rec)
-            first_feat = rec.get(self.observation_features[0], 0.0)
-            try:
-                truth = int(float(first_feat)) % self.n_actions
-            except (ValueError, TypeError):
-                truth = i % self.n_actions
-            X[i] = obs
-            y[i] = truth
-        return X, y
+            truth = self._truth_for(rec)
+            if truth is None:
+                continue
+            X[usable] = obs
+            y[usable] = truth
+            usable += 1
+        if usable == 0:
+            # No label column: no supervised signal is available.
+            return X[:0].reshape(0, self.obs_dim), y[:0]
+        return X[:usable], y[:usable]
 '''

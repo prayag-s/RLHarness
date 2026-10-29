@@ -84,8 +84,10 @@ export const TelemetryPanel: React.FC<TelemetryPanelProps> = ({
 
           <div className="flex items-center justify-between text-[11px] text-gray-400 pt-1">
             <span className="flex items-center space-x-1">
-              <span className={`h-2 w-2 rounded-full ${driftStatus === 'healthy' ? 'bg-emerald-400' : 'bg-amber-400'}`} />
-              <span className="capitalize">{driftStatus} Policy Drift</span>
+              <span className={`h-2 w-2 rounded-full ${
+                driftStatus === 'healthy' ? 'bg-emerald-400' : driftStatus === 'unmonitored' ? 'bg-slate-600' : 'bg-amber-400'
+              }`} />
+              <span className="capitalize">{driftStatus === 'unmonitored' ? 'Drift not monitored' : `${driftStatus} Policy Drift`}</span>
             </span>
             <span className="font-mono text-gray-500">{isTargetAchieved ? '100% Met' : `${progressPercent.toFixed(0)}% of Goal`}</span>
           </div>
