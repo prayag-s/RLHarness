@@ -419,6 +419,7 @@ class JITEnvironmentSynthesizer:
 
     def __init__(self, llm_client: BaseLLMClient | None = None):
         self._llm_client = llm_client
+        self.last_warnings: list[str] = []
 
     @property
     def client(self) -> BaseLLMClient:
@@ -443,10 +444,16 @@ class JITEnvironmentSynthesizer:
 
         # Path 1: supervised tabular task (requires an identifiable label column)
         has_label = bool(bp_spec.label_column) or bool(
-            dataset is not None and self._infer_label_column(dataset, max(1, len(bp_spec.action_labels)))
+            dataset is not None
+            and self._infer_label_column(
+                dataset, max(1, len(bp_spec.action_labels)), list(bp_spec.action_labels or [])
+            )
         )
         if bp_spec.data_source_type == "uploaded_dataset" and has_label:
-            code_str = self._build_dataset_code(bp_spec, dataset)
+            code_str, derived_features = self._build_dataset_code(bp_spec, dataset)
+            if derived_features and derived_features != list(bp_spec.observation_features or []):
+                # Observations are derived from the real columns, not from proposed names.
+                bp_spec.observation_features = derived_features
         else:
             # Path 2: Universal LLM-driven environment synthesis
             code_str = synthesize_universal_env(
@@ -459,7 +466,8 @@ class JITEnvironmentSynthesizer:
         audit_ast_security(code_str)
 
         # Generated code is untrusted until the smoke test passes: never write/import before.
-        verified, healed_code, logs = SandboxSmokeTester(self.client).verify_and_heal(
+        tester = SandboxSmokeTester(self.client)
+        verified, healed_code, logs = tester.verify_and_heal(
             code_str=code_str,
             blueprint=bp_spec,
             dataset=dataset,
@@ -469,6 +477,7 @@ class JITEnvironmentSynthesizer:
             raise EnvironmentSynthesisError(
                 "Environment failed sandbox verification: " + (logs[-1][-500:] if logs else "unknown error")
             )
+        self.last_warnings = list(tester.last_warnings)
         file_path.write_text(healed_code, encoding="utf-8")
         env_cls = load_synthesized_env_class(file_path)
         return healed_code, file_path, env_cls
@@ -482,10 +491,16 @@ class JITEnvironmentSynthesizer:
         """Synthesizes python code via universal generative pipeline."""
         bp_spec = blueprint if isinstance(blueprint, AgentBlueprintSpec) else blueprint.to_agent_blueprint_spec()
         has_label = bool(bp_spec.label_column) or bool(
-            dataset is not None and self._infer_label_column(dataset, max(1, len(bp_spec.action_labels)))
+            dataset is not None
+            and self._infer_label_column(
+                dataset, max(1, len(bp_spec.action_labels)), list(bp_spec.action_labels or [])
+            )
         )
         if bp_spec.data_source_type == "uploaded_dataset" and has_label:
-            return self._build_dataset_code(bp_spec, dataset)
+            code_str, derived_features = self._build_dataset_code(bp_spec, dataset)
+            if derived_features and derived_features != list(bp_spec.observation_features or []):
+                bp_spec.observation_features = derived_features
+            return code_str
         return synthesize_universal_env(
             blueprint=bp_spec,
             user_prompt=user_prompt,
@@ -494,61 +509,143 @@ class JITEnvironmentSynthesizer:
         )
 
     @staticmethod
-    def _infer_label_column(dataset: IngestedDataset | None, n_actions: int) -> str | None:
+    def _synthetic_feature_frame(features: list[str], label_column: str, n_actions: int, rows: int = 120) -> Any:
+        """Deterministic stand-in table for blueprints that declare a schema but bring no dataset."""
+        import pandas as pd
+
+        names = [str(f) for f in features] or [f"feature_{i}" for i in range(4)]
+        data: dict[str, Any] = {}
+        for j, name in enumerate(names):
+            data[name] = [round(math.sin(0.13 * i + 0.7 * j) * 0.5 + 0.5, 6) for i in range(rows)]
+        data[label_column] = [i % max(2, n_actions) for i in range(rows)]
+        return pd.DataFrame(data)
+
+    @staticmethod
+    def _infer_label_column(
+        dataset: IngestedDataset | None,
+        n_actions: int,
+        action_labels: list[str] | None = None,
+    ) -> str | None:
         """Infers a target/label column generically (see ``ingest.profiler.infer_label_column``)."""
         from rl_ide.ingest.profiler import infer_label_column
 
         if dataset is None or not hasattr(dataset, "df"):
             return None
-        return infer_label_column(dataset.df, n_actions)
+        return infer_label_column(dataset.df, n_actions, action_labels)
+
+    @classmethod
+    def _select_label_column(
+        cls,
+        df: Any,
+        declared: str | None,
+        action_labels: list[str],
+        n_actions: int,
+    ) -> str | None:
+        """Picks the target column that actually explains the declared actions.
+
+        A declared column that only covers two of four actions (or a generic flag an LLM guessed)
+        must not beat a column whose values name every action.
+        """
+        from rl_ide.synthesizer.feature_engineering import infer_label_map
+
+        candidates: list[str] = []
+        if declared:
+            candidates.append(str(declared))
+        inferred = cls._infer_label_column_for_frame(df, n_actions, action_labels)
+        if inferred and str(inferred) not in candidates:
+            candidates.append(str(inferred))
+
+        best_col, best_score = None, -1
+        for col in candidates:
+            if col not in list(df.columns):
+                continue
+            try:
+                values = list(df[col].dropna().unique())
+            except Exception:
+                continue
+            score = len(set(infer_label_map(values, action_labels).values()))
+            if score > best_score:
+                best_col, best_score = col, score
+        return best_col or (candidates[0] if candidates else None)
+
+    @staticmethod
+    def _infer_label_column_for_frame(df: Any, n_actions: int, action_labels: list[str]) -> str | None:
+        from rl_ide.ingest.profiler import infer_label_column
+
+        return infer_label_column(df, n_actions, action_labels)
 
     def _build_dataset_code(
         self,
         blueprint: AgentBlueprintSpec,
         dataset: IngestedDataset | None,
-    ) -> str:
-        """Generates custom data-driven Gymnasium environment stepping through records."""
-        obs_features = blueprint.observation_features
-        obs_dim = max(1, len(obs_features))
-        action_labels = blueprint.action_labels
+    ) -> tuple[str, list[str]]:
+        """Builds a supervised tabular env whose observations are derived from the real columns.
+
+        Returns ``(code, observation_feature_names)``. Feature names are returned so the caller can
+        keep the blueprint (and therefore arena/telemetry schemas) in sync with the generated env.
+        """
+        from rl_ide.synthesizer.feature_engineering import (
+            derive_feature_ops,
+            infer_label_map,
+            records_from_frame,
+            select_usable_rows,
+        )
+
+        action_labels = list(blueprint.action_labels or [])
         n_actions = max(1, len(action_labels))
-        label_column = blueprint.label_column or self._infer_label_column(dataset, n_actions)
+        declared_label = blueprint.label_column or self._infer_label_column(
+            dataset, n_actions, action_labels
+        )
 
-        sample_records = []
-        if dataset is not None and hasattr(dataset, "df") and dataset.df is not None:
-            for _, row in dataset.df.head(100).iterrows():
-                rec = {}
-                for col in obs_features:
-                    val = row.get(col, 0.0)
-                    try:
-                        rec[col] = float(val)
-                    except (ValueError, TypeError):
-                        rec[col] = float(hash(str(val)) % 100) / 10.0
-                if label_column and label_column in row:
-                    try:
-                        rec[str(label_column)] = int(float(row[label_column]))
-                    except (ValueError, TypeError):
-                        pass
-                sample_records.append(rec)
-
-        if not sample_records:
-            for i in range(100):
-                rec = {col: float(math.sin(i * 0.1 + j)) for j, col in enumerate(obs_features)}
-                if label_column:
-                    rec[str(label_column)] = i % max(1, n_actions)
-                sample_records.append(rec)
-
-        records_json = json.dumps(sample_records, default=str)
-        if not label_column:
+        df = getattr(dataset, "df", None) if dataset is not None else None
+        if (df is None or len(df) == 0) and declared_label:
+            # No table on hand: fall back to deterministic synthetic demonstrations that honour
+            # the declared feature schema, so the blueprint is still trainable.
+            df = self._synthetic_feature_frame(
+                features=list(blueprint.observation_features or []),
+                label_column=str(declared_label),
+                n_actions=n_actions,
+            )
+        if df is None or len(df) == 0:
+            raise EnvironmentSynthesisError(
+                "Supervised synthesis requires a tabular dataset, but none was provided."
+            )
+        label_column = self._select_label_column(df, declared_label, action_labels, n_actions)
+        if not label_column or str(label_column) not in list(df.columns):
             raise EnvironmentSynthesisError(
                 "No label/target column could be identified in the uploaded dataset. "
                 "Name the target column 'label'/'target'/'is_*', or specify it explicitly."
             )
+        label_column = str(label_column)
+        blueprint.label_column = label_column
 
-        return f'''"""Auto-synthesized Gymnasium environment for Data Inspection & Decision."""
+        feature_ops, feature_names = derive_feature_ops(df, label_column)
+        if not feature_ops:
+            raise EnvironmentSynthesisError(
+                f"Dataset has no usable feature columns beside '{label_column}' "
+                "(constant, empty, and free-text-only columns cannot be learned from)."
+            )
+
+        label_map = infer_label_map(list(df[label_column].dropna().unique()), action_labels)
+        if len({int(v) for v in label_map.values()}) < 2:
+            raise EnvironmentSynthesisError(
+                f"Target column '{label_column}' could not be mapped onto the declared actions "
+                f"{action_labels}. Rename the target values to match the actions."
+            )
+
+        usable = select_usable_rows(df, label_column, label_map)
+        if len(usable) < 8:
+            raise EnvironmentSynthesisError(
+                f"Only {len(usable)} rows of '{label_column}' map onto the declared actions; "
+                "at least 8 labelled rows are required to train a supervised policy."
+            )
+
+        records_json = json.dumps(records_from_frame(usable), default=str)
+        obs_dim = len(feature_names)
+
+        return f'''"""Auto-synthesized Gymnasium environment for supervised tabular decisions."""
 
 from __future__ import annotations
-import json
 import math
 import random
 from typing import Any, Callable
@@ -561,42 +658,98 @@ class SynthesizedGymEnv(gym.Env):
     """Auto-synthesized Gymnasium environment for: {blueprint.task_title}"""
     metadata = {{"render_modes": ["json"]}}
 
+    # (kind, column, low, high) for numeric min-max scaling, or (kind, column, value, None) for one-hot.
+    _feature_ops = {feature_ops!r}
+    _label_map = {label_map!r}
+    _records = {records_json}
+
     def __init__(self, dataset_records=None, config=None):
         super().__init__()
         self.action_labels = {action_labels}
-        self.observation_features = {obs_features}
+        self.observation_features = {feature_names}
         self.obs_dim = {obs_dim}
         self.n_actions = {n_actions}
 
         self.observation_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=(self.obs_dim,), dtype=np.float32
+            low=0.0, high=1.0, shape=(self.obs_dim,), dtype=np.float32
         )
         self.action_space = spaces.Discrete(self.n_actions)
 
-        self.records = dataset_records if dataset_records is not None else {records_json}
-        if not self.records:
-            self.records = [{{{", ".join(f"'{c}': 0.0" for c in obs_features)}}}]
+        source = [dict(r) for r in dataset_records] if dataset_records else [dict(r) for r in self._records]
+        self.records = source or [{{}}]
+        self._feature_ops = self._fit_bounds(self.records)
 
         self.current_idx = 0
         self.step_count = 0
         self.correct_count = 0
+        self.cumulative_score = 0.0
         self.last_action = None
+        self.last_feedback = ""
+        self.last_reward_breakdown = {{}}
         self.label_column = {label_column!r}
         self._declared_state_schema = {dict(blueprint.state_dict_schema or {})!r}
         self.is_placeholder = False
-        self.task_class = "classification" if self.label_column else "control"
+        self.task_class = "classification"
         self.episode_horizon = 25
-        self.success_criteria = "Predict the label column correctly for every record in the episode."
+        self.success_criteria = (
+            "Classify each record into the action whose label matches the dataset target column."
+        )
+
+    def _fit_bounds(self, records):
+        """Fits numeric min-max bounds to the records actually in use (baked bounds are a fallback)."""
+        fitted = []
+        for kind, column, low, high in self._feature_ops:
+            if kind != "num":
+                fitted.append((kind, column, low, high))
+                continue
+            values = []
+            for record in records:
+                try:
+                    value = float(record.get(column))
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(value):
+                    values.append(value)
+            if values and max(values) > min(values):
+                fitted.append((kind, column, min(values), max(values)))
+            else:
+                fitted.append((kind, column, low, high))
+        return fitted
 
     def _extract_obs(self, record: dict[str, Any]) -> np.ndarray:
         obs = np.zeros(self.obs_dim, dtype=np.float32)
-        for i, feat in enumerate(self.observation_features):
-            val = record.get(feat, 0.0)
-            try:
-                obs[i] = float(val)
-            except (ValueError, TypeError):
-                obs[i] = 0.0
+        for i, (kind, column, low, high) in enumerate(self._feature_ops):
+            raw = record.get(column)
+            if raw is None:
+                continue
+            if kind == "num":
+                try:
+                    value = float(raw)
+                except (TypeError, ValueError):
+                    continue
+                if not math.isfinite(value):
+                    continue
+                span = float(high) - float(low)
+                if span > 0:
+                    obs[i] = float(np.clip((value - float(low)) / span, 0.0, 1.0))
+            else:
+                if str(raw).strip().lower() == str(low).strip().lower():
+                    obs[i] = 1.0
         return obs
+
+    def _truth_for(self, record: dict[str, Any]) -> int | None:
+        if not self.label_column or self.label_column not in record:
+            return None
+        raw = record[self.label_column]
+        mapped = self._label_map.get(str(raw))
+        if mapped is None:
+            mapped = self._label_map.get(str(raw).strip())
+        if mapped is not None:
+            return int(mapped) % self.n_actions
+        try:
+            return int(float(raw)) % self.n_actions
+        except (TypeError, ValueError):
+            return None
 
     def reset(self, seed=None, options=None) -> tuple[np.ndarray, dict[str, Any]]:
         super().reset(seed=seed)
@@ -604,53 +757,62 @@ class SynthesizedGymEnv(gym.Env):
             random.seed(seed)
             np.random.seed(seed)
 
-        self.current_idx = random.randint(0, len(self.records) - 1)
+        self.current_idx = random.randrange(len(self.records))
         self.step_count = 0
         self.correct_count = 0
+        self.cumulative_score = 0.0
         self.last_action = None
+        self.last_feedback = ""
+        self.last_reward_breakdown = {{}}
 
         obs = self._extract_obs(self.records[self.current_idx])
-        info = {{"record_index": self.current_idx, "is_success": False, "reward_breakdown": {{}}}}
-        info["arena_state"] = self.render_arena_state()
+        info = {{
+            "record_index": self.current_idx,
+            "is_success": False,
+            "reward_breakdown": {{}},
+            "arena_state": self.render_arena_state(),
+        }}
         return obs, info
 
     def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
+        action = int(action) % self.n_actions
         self.step_count += 1
-        self.last_action = int(action)
-        rec = self.records[self.current_idx]
+        self.last_action = action
 
-        truth = self._truth_for(rec)
-        is_correct = (truth is not None and int(action) == truth)
+        record = self.records[self.current_idx]
+        truth = self._truth_for(record)
+        is_correct = truth is not None and action == truth
 
         reward, breakdown = self.compute_reward(None, action, None, {{"is_correct": is_correct}})
         if is_correct:
             self.correct_count += 1
+        self.cumulative_score += float(reward)
+        self.last_reward_breakdown = breakdown
+        self.last_feedback = (
+            f"Correct: {{self.action_labels[action]}}"
+            if is_correct
+            else f"Incorrect: {{self.action_labels[action]}}"
+        )
 
+        previous_idx = self.current_idx
         self.current_idx = (self.current_idx + 1) % len(self.records)
         next_obs = self._extract_obs(self.records[self.current_idx])
-        terminated = (self.step_count >= 25)
+        terminated = self.step_count >= self.episode_horizon
 
         info = {{
             "record_index": self.current_idx,
-            # Step-level correctness only; the evaluator aggregates it into accuracy.
-            "is_success": is_correct,
-            "is_correct": is_correct,
-            "accuracy_pct": round((self.correct_count / self.step_count) * 100, 1),
+            "decision_record_index": previous_idx,
+            "is_success": bool(is_correct),
+            "is_correct": bool(is_correct),
+            "correct_count": self.correct_count,
+            "accuracy_pct": round((self.correct_count / max(1, self.step_count)) * 100, 1),
             "reward_breakdown": breakdown,
             "arena_state": self.render_arena_state(),
         }}
-        return next_obs, reward, terminated, False, info
-
-    def _truth_for(self, rec: dict[str, Any]) -> int | None:
-        if self.label_column and self.label_column in rec:
-            try:
-                return int(float(rec[self.label_column])) % self.n_actions
-            except (ValueError, TypeError):
-                return None
-        return None
+        return next_obs, float(reward), terminated, False, info
 
     def compute_reward(self, obs, action, next_obs, info) -> tuple[float, dict[str, float]]:
-        is_correct = info.get("is_correct", False)
+        is_correct = bool(info.get("is_correct", False)) if isinstance(info, dict) else False
         base = 1.0 if is_correct else -1.0
         breakdown = {{"accuracy_reward": float(base)}}
         return float(base), breakdown
@@ -659,65 +821,69 @@ class SynthesizedGymEnv(gym.Env):
         return self.render_arena_state()
 
     def render_arena_state(self) -> dict[str, Any]:
-        rec = self.records[self.current_idx % len(self.records)]
-        acc = (self.correct_count / max(1, self.step_count)) * 100
+        record = self.records[self.current_idx % len(self.records)]
+        accuracy = (self.correct_count / max(1, self.step_count)) * 100
+        visible = {{k: str(v)[:40] for k, v in record.items() if k != self.label_column}}
         state = {{
             "record_index": self.current_idx,
             "total_records": len(self.records),
             "step_count": self.step_count,
-            "accuracy_pct": round(acc, 1),
+            "accuracy_pct": round(accuracy, 1),
             "last_action": self.last_action if self.last_action is not None else -1,
-            "last_action_label": self.action_labels[self.last_action] if self.last_action is not None else "None",
-            "current_record_preview": {{k: str(v)[:30] for k, v in list(rec.items())[:6]}},
+            "last_action_label": (
+                self.action_labels[self.last_action] if self.last_action is not None else "None"
+            ),
+            "current_record": visible,
             "action_labels": self.action_labels,
         }}
         for _key, _kind in self._declared_state_schema.items():
             if _key not in state:
-                _k = str(_kind).lower()
-                state[_key] = [] if "list" in _k else (0 if "int" in _k else (0.0 if "float" in _k else ""))
+                _kind_text = str(_kind).lower()
+                state[_key] = (
+                    [] if "list" in _kind_text
+                    else (0 if "int" in _kind_text else (0.0 if "float" in _kind_text else ""))
+                )
         return state
 
     def interactive_step(self, payload: dict[str, Any], policy_predict_fn: Callable = None, mode: str = "agent_vs_env") -> dict[str, Any]:
         custom_record = payload.get("custom_params") or payload.get("record") if isinstance(payload, dict) else None
         if custom_record and isinstance(custom_record, dict):
             obs = self._extract_obs(custom_record)
+            self.records = self.records + [dict(custom_record)]
+            self.current_idx = len(self.records) - 1
         else:
-            rec_idx = int(payload.get("user_action", self.current_idx)) % len(self.records) if isinstance(payload, dict) else 0
-            self.current_idx = rec_idx
-            active_rec = self.records[rec_idx]
-            obs = self._extract_obs(active_rec)
+            index = int(payload.get("user_action", self.current_idx)) % len(self.records) if isinstance(payload, dict) else 0
+            self.current_idx = index
+            obs = self._extract_obs(self.records[index])
 
         if policy_predict_fn is not None:
             action_idx, probs = policy_predict_fn(obs)
-            action_idx = int(action_idx)
+            action_idx = int(action_idx) % self.n_actions
         else:
             action_idx = 0
             probs = [1.0 / self.n_actions] * self.n_actions
 
-        label = self.action_labels[action_idx % self.n_actions]
+        label = self.action_labels[action_idx]
         return {{
             "arena_state": self.render_arena_state(),
             "agent_action_label": label,
             "action_probs": [float(p) for p in probs],
-            "status_text": f"Agent classified record as: {{label}}",
+            "status_text": f"Agent routed this record to: {{label}}",
         }}
 
     def get_demonstrations(self, num_samples: int = 200) -> tuple[np.ndarray, np.ndarray]:
-        n = num_samples
-        X = np.zeros((n, self.obs_dim), dtype=np.float32)
-        y = np.zeros(n, dtype=np.int64)
+        features = np.zeros((num_samples, self.obs_dim), dtype=np.float32)
+        targets = np.zeros(num_samples, dtype=np.int64)
         usable = 0
-        for i in range(n):
-            rec = self.records[i % len(self.records)]
-            obs = self._extract_obs(rec)
-            truth = self._truth_for(rec)
+        for i in range(num_samples):
+            record = self.records[i % len(self.records)]
+            truth = self._truth_for(record)
             if truth is None:
                 continue
-            X[usable] = obs
-            y[usable] = truth
+            features[usable] = self._extract_obs(record)
+            targets[usable] = truth
             usable += 1
         if usable == 0:
-            # No label column: no supervised signal is available.
-            return X[:0].reshape(0, self.obs_dim), y[:0]
-        return X[:usable], y[:usable]
-'''
+            return features[:0].reshape(0, self.obs_dim), targets[:0]
+        return features[:usable], targets[:usable]
+''', feature_names

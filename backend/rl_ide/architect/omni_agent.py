@@ -669,6 +669,7 @@ class StudioOmniAgent:
             # Synthesize + verify the environment first so the arena is bound to real state.
             sample_state: dict[str, Any] | None = None
             synthesis_error: str | None = None
+            synthesis_warnings: list[str] = []
             if active_dataset is not None and hasattr(active_dataset, "df"):
                 save_records(ws_dir, active_dataset.df.to_dict(orient="records"))
 
@@ -681,6 +682,7 @@ class StudioOmniAgent:
                     )
                     current_env_code = code_str
                     sample_state = self._render_sample_state(env_cls, active_dataset)
+                    synthesis_warnings = list(getattr(self.env_synthesizer, "last_warnings", []) or [])
                 except Exception as ex:
                     synthesis_error = str(ex)
                     sample_state = self._neutral_sample_state(blueprint)
@@ -727,6 +729,9 @@ class StudioOmniAgent:
                 f"✨ Generated a live Arena preview for **{blueprint.task_title}** bound to the environment's real state. "
                 "Ask me in chat to adjust the look & feel, or click **[ 🔒 Lock Arena & Start Training ]** when ready."
             )
+            if synthesis_warnings:
+                # Surface verification uncertainty instead of silently training toward a 0% KPI.
+                assistant_reply += "\n\n⚠️ " + " ".join(synthesis_warnings)
             quick_chips = [
                 "🎨 Neon Cyberpunk Theme",
                 "📊 Add Detailed Telemetry HUD",

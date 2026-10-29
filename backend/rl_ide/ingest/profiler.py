@@ -24,20 +24,27 @@ def sanitize_column_name(col: str) -> str:
     return clean
 
 
-def infer_label_column(df: Any, n_actions: int) -> str | None:
+def infer_label_column(
+    df: Any,
+    n_actions: int,
+    action_labels: list[str] | None = None,
+) -> str | None:
     """Infers a supervised target column generically (no domain-specific column names).
 
-    Preference order: conventional ML names (`label`, `target`, `is_*`, ...), then any
-    low-cardinality numeric/boolean column, scanning right to left.
+    A target must be *class-like*: a small number of discrete values. Continuous floats are
+    rejected (a sentiment score is a feature, not a class), and when the declared actions are
+    known, the column whose values actually name those actions wins.
+
+    Preference order: values matching the declared actions, conventional ML names
+    (`label`, `target`, `is_*`, ...), then any low-cardinality discrete column, right to left.
     """
     if df is None or getattr(df, "shape", (0, 0))[1] == 0:
         return None
 
-    preferred = []
-    for col in df.columns:
-        name = str(col).strip().lower()
-        if name in {"label", "target", "class", "outcome", "y", "truth", "result"} or name.startswith("is_"):
-            preferred.append(col)
+    max_classes = max(2, int(n_actions))
+
+    def _normalise(value: Any) -> str:
+        return re.sub(r"[^a-z0-9]+", "_", str(value).strip().lower()).strip("_")
 
     def _candidate(col: str) -> bool:
         series = df[col]
@@ -45,12 +52,33 @@ def infer_label_column(df: Any, n_actions: int) -> str | None:
             nunique = int(series.nunique(dropna=True))
         except Exception:
             return False
-        if nunique < 2:
+        if nunique < 2 or nunique > max_classes:
             return False
-        dtype_name = str(series.dtype)
-        if dtype_name.startswith("float") and nunique > 10:
-            return False
-        return nunique <= max(2, int(n_actions))
+        if pd.api.types.is_float_dtype(series):
+            values = series.dropna().astype(float)
+            # Only integral floats (0.0/1.0 style flags) can act as classes.
+            if not bool((values == values.round()).all()):
+                return False
+        return True
+
+    if action_labels:
+        wanted = {_normalise(a) for a in action_labels}
+        best_col, best_hits = None, 0
+        for col in df.columns:
+            if not _candidate(col):
+                continue
+            values = {_normalise(v) for v in df[col].dropna().unique()}
+            hits = len(values & wanted)
+            if hits > best_hits:
+                best_col, best_hits = col, hits
+        if best_col is not None and best_hits >= max(2, len(wanted) // 2):
+            return str(best_col)
+
+    preferred = []
+    for col in df.columns:
+        name = str(col).strip().lower()
+        if name in {"label", "target", "class", "outcome", "y", "truth", "result"} or name.startswith("is_"):
+            preferred.append(col)
 
     for col in preferred:
         if _candidate(col):

@@ -7,7 +7,8 @@ export contract, and the supporting frontend.
 **Purpose:** Single register of every correctness/design deviation found in the audit, mapped to
 the remediation phase that fixes it. Status is updated as phases land.
 
-> **Post-remediation status (2026-10-29):** all phases 0–E executed. Backend suite **72 passed, 0 failed**;
+> **Post-remediation status (2026-10-30):** all phases 0–E executed, plus the round-2 real-world
+> validation (§7) which closed F34–F39. Backend suite **90 passed, 0 failed**;
 > frontend `npm run build` clean. Every issue below is either **CLOSED** with a regression test or
 > explicitly **ACCEPTED** with rationale (see §5 and §6). The `******` "Authorization" finding in the
 > previous report was a **false positive caused by tool-output secret redaction** — the source already
@@ -48,7 +49,7 @@ reports mastery for it — the exact failure the v4.4 spec was written to preven
 
 | Check | Before remediation | After remediation |
 |---|---|---|
-| Backend `pytest` | 54 passed | **72 passed, 0 failed** (≈6 min) |
+| Backend `pytest` | 54 passed | **90 passed, 0 failed** (≈11 min) |
 | Frontend `npm run build` | passed | **passed** (tsc + vite, 1 599 modules) |
 | LLM transport | verified correct (false positive) | regression-tested (`Bearer` header per provider) |
 | Metric trustworthiness | `any(step)` success; placeholder always 100 % | terminal-outcome metric; dataset accuracy; placeholders 0 % |
@@ -247,3 +248,76 @@ backend suite; update this register and `progress.md`; commit only when the whol
    is intentionally not automated.
 6. **Drift monitoring is not wired to live inference.** Baselines are exported and the UI reports
    `unmonitored` rather than a fabricated healthy state.
+
+---
+
+## 7. Round 2 — real-world commercial validation (2026-10-30)
+
+The suite above proved the *plumbing* was honest, not that the product learns anything a customer
+would pay for. This round drove four paid-use-case problems through the running app in a real browser
+(`browser_test_real_world_value.js`) and fixed what that exposed.
+
+| Use case | Data | Result before round 2 | Result after round 2 |
+|---|---|---|---|
+| B2B support ticket routing (4 queues) | 600-row CSV | 62.4 → 66.1 % accuracy over 5 rounds (chance 25 %) | **87.0 % in round 1**, all four actions preserved |
+| SaaS renewal save-play selection | 500-row CSV | not measurable (same defect) | **95.4 % in round 1** |
+| Insurance claim handling path | 520-row CSV | not measurable (same defect) | **81.2 % in round 1** |
+| Peak-season inventory replenishment (control) | none | 0 % in both rounds, silently | **100 %** — but unstable across runs (100/62/18/6/100 %), so scored as advisory |
+
+### P1 — Correctness
+
+| ID | Issue | Evidence | Phase |
+|---|---|---|---|
+| F34 | **Supervised envs observe the wrong columns.** `_build_dataset_code` copied LLM-invented `observation_features` with `row.get(col, 0.0)`, so 23 of 24 dimensions were permanently `0.0` on a real CSV; categoricals fell back to `hash(str)` (process-salted, so training and inference disagreed); string targets could not be mapped, so `get_demonstrations()` returned 0 rows → verification failed → `_repair_code` rewrote the whole module (with the same zeroed features). The policy was effectively trained on one feature. | `synthesizer/env_builder.py:505-760` | F |
+| F35 | **Label inference accepted continuous floats as a target.** A DOCX-derived table got `sentiment_score` as its "label", forcing the supervised path and failing with "target column could not be mapped onto the declared actions". | `ingest/profiler.py:27-61` | F |
+| F38 | **The user's enumerated actions were not a contract.** A prompt naming four routing queues produced a generic two-action blueprint ("Approve / Safe", "Flag / Investigate") from the intake LLM, which then trained to 90 % on a task nobody asked for — no error, no warning. Only *quoted* action lists were ever extracted, and only on the deterministic path. | `architect/intake.py:59` | F |
+| F39 | **A declared label column beat the real target.** `_build_dataset_code` trusted `blueprint.label_column` even when it explained 2 of 4 actions (`mentions_outage`) while the dataset contained a column naming all four (`resolution_queue`). | `synthesizer/env_builder.py:552` | F |
+| F37 | **Arena labels were cut to four characters.** The generic renderer treated *any* array whose length equalled the action count as a board, so a routing arena drew "Retention Specialist" as `Rete` in a 40 px square, and control buttons/probability labels clipped long action names. | `synthesizer/arena_builder.py:462,412` | F |
+| F36 | **Unreachable success was reported as uncertainty and then dropped.** The probe stepped 25 random actions, so a terminal-only success signal on a 30-step horizon could never be observed; the warning never reached the user, who then watched a KPI sit at 0 % forever. Short-horizon envs also tripped a false "static arena_state" failure because only the first and last snapshots were compared. | `synthesizer/verifier.py:220-260` | F |
+
+### Phase F — Learn from the dataset you were given (executed)
+
+1. **New `synthesizer/feature_engineering.py`.** Observations are derived from the real columns:
+   numeric → min-max (`[0,1]`), booleans → `0/1`, low-cardinality categoricals → one-hot, free text and
+   identifiers → skipped. The op list is embedded in `env_module.py`, so raw records can be transformed
+   after a restart or inside an export. Bounds are re-fitted to the records actually loaded (baked
+   bounds only when no records are supplied).
+2. **Action-aware label mapping.** `infer_label_map` maps target values onto action indices by
+   normalised name/token overlap (numeric values use index semantics), drops labels that cannot be tied
+   to an action, and the builder refuses fewer than 8 usable rows or fewer than 2 mapped classes.
+3. **The supervised path needs no LLM.** With labels mapped and features derived, the template passes
+   `verify_and_heal` on attempt 0; a test asserts that any LLM call on this path is a failure.
+4. **Label inference requires a class-like column.** Non-integral floats are rejected, and a column whose
+   values name the declared actions wins outright — so `resolution_queue` beats `ticket_channel`, and a
+   document table with only continuous scores yields `None` (universal LLM path) instead of a bogus target.
+5. **Verifier hardening.** A **dead observation vector** (≥90 % of dimensions constant across the probe)
+   now fails verification — that check alone would have caught F34. Success reachability is probed over
+   complete, horizon-aware episodes using `get_critical_actions()` when available plus random actions;
+   the resulting warning is surfaced in the chat reply instead of being discarded. Static-state detection
+   compares the whole snapshot sequence, so short-horizon envs are no longer false positives.
+
+### Ledger (round 2)
+
+| ID | Status | Regression test |
+|---|---|---|
+| F34 | CLOSED | `tests/test_dataset_feature_engineering.py::test_synthetic_env_observes_real_values_and_produces_demonstrations`, `::test_supervised_env_passes_verification_without_llm_repair`, `::test_feature_derivation_is_deterministic_across_process_boundaries`, `::test_dead_observation_vector_fails_verification` |
+| F35 | CLOSED | `::test_continuous_float_feature_is_not_mistaken_for_a_target`, `::test_action_named_column_is_preferred_over_an_unrelated_discrete_column` |
+| F36 | CLOSED | `::test_probe_observes_terminal_only_success`, `::test_probe_reports_unreachable_success`, `::test_synthesis_surfaces_unreachable_success_warning` |
+| F37 | CLOSED | `tests/test_arena_rendering.py::test_text_array_state_renders_readable_labels_not_fragments`, `::test_numeric_array_state_still_renders_clickable_cells` |
+| F38 | CLOSED | `tests/test_intake_action_contract.py::test_explicit_enumerations_are_extracted_without_quotes`, `::test_llm_blueprint_is_overridden_by_the_users_action_list`, `::test_intake_keeps_all_declared_actions` |
+| F39 | CLOSED | `::test_declared_label_covering_fewer_actions_is_replaced_by_the_real_target` |
+
+### Verification after round 2
+
+| Check | Result |
+|---|---|
+| Backend `pytest -q` | **90 passed, 0 failed** |
+| Browser, real-world use cases | see `test_screenshots/real_world/report.json` and `progress.md` §10 |
+
+### Residual risk added by round 2
+
+6. **LLM-authored control environments are not reliably learnable.** Four runs of one inventory
+   prompt produced 100 %, 62 %, 18 % and 0 % success; the success criteria are regenerated per
+   synthesis and are sometimes knife-edge. The verifier now detects and surfaces unreachable success,
+   but it does not rewrite the criteria — the user sees an explicit warning and can ask for a change in
+   chat. Dataset-driven tasks (label contract from the CSV) were stable across every run.

@@ -56,16 +56,103 @@ Respond in strict JSON with the following structure:
 """
 
 
+_LIST_SPLIT = re.compile(r"\s*(?:,|;|\s+or\s+|\s+and\s+)\s*", re.IGNORECASE)
+
+
+def _clean_items(raw: str) -> list[str]:
+    """Splits an enumeration into usable label candidates."""
+    text = raw.strip().strip(".:;")
+    items = [
+        re.sub(r"^(?:or|and|nor)\s+", "", i.strip(" .:;\"'"), flags=re.IGNORECASE)
+        for i in _LIST_SPLIT.split(text)
+        if i.strip(" .:;\"'")
+    ]
+    cleaned: list[str] = []
+    for item in items:
+        if not item or len(item) > 60:
+            continue
+        if item.lower().startswith(("using ", "use ", "and use", "since ", "because ")):
+            break
+        if item not in cleaned:
+            cleaned.append(item)
+    return cleaned
+
+
+def _looks_like_labels(items: list[str]) -> bool:
+    """Rejects prose that happens to contain commas."""
+    if not 2 <= len(items) <= 12:
+        return False
+    capitalised = sum(1 for i in items if i[:1].isupper() or i[:1].isdigit())
+    return capitalised >= max(2, int(0.6 * len(items)))
+
+
 def extract_action_labels_from_prompt(text: str) -> list[str] | None:
-    """Extracts explicit quoted action labels from user prompt."""
+    """Extracts explicitly enumerated action labels from the user prompt.
+
+    Handles quoted lists (``actions: 'A', 'B'``) and plain enumerations introduced by a cue
+    (``route each ticket to the correct queue: A, B, or C``) without any domain vocabulary.
+    """
     if not text:
         return None
-    m = re.search(r"(?:actions|classify into|into)\s*:?\s*([\'\"][^\.\n]+)", text, re.IGNORECASE)
-    if m:
-        acts = re.findall(r"[\'\"]([^\'\"]+)[\'\"]", m.group(1))
+
+    quoted = re.search(r"(?:actions?|options?|queues?|into)\s*:?\s*([\'\"][^\.\n]+)", text, re.IGNORECASE)
+    if quoted:
+        acts = [a.strip() for a in re.findall(r"[\'\"]([^\'\"]+)[\'\"]", quoted.group(1)) if a.strip()]
         if len(acts) >= 2:
-            return [a.strip() for a in acts if a.strip()]
+            return acts
+
+    cue_patterns = [
+        r"(?:actions?|options?|queues?|categories|classes|decision|label)\s*(?:are|is)?\s*:\s*([^\n.;]+)",
+        r"(?:classify|route|sort|assign|label|categoris|categoriz|dispatch)\b[^:.;\n]{0,60}?\binto\s*:?\s*([^\n.;]+)",
+        r"(?:select|choose|decide)\b[^:.;\n]{0,40}?(?:between|among|from)\s*:?\s*([^\n.;]+)",
+    ]
+    for pattern in cue_patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if not match:
+            continue
+        items = _clean_items(match.group(1))
+        if _looks_like_labels(items):
+            return items
+
+    colon = re.search(r":\s*([^\n.;]+)", text)
+    if colon:
+        items = _clean_items(colon.group(1))
+        if len(items) >= 3 and _looks_like_labels(items):
+            return items
+
+    trailing = re.search(r"\bto\s+([A-Z0-9][^.;\n]{10,220})", text)
+    if trailing:
+        items = _clean_items(trailing.group(1))
+        if len(items) >= 3 and _looks_like_labels(items):
+            return items
     return None
+
+
+def enforce_explicit_actions(
+    blueprint: DynamicTaskBlueprint,
+    explicit_actions: list[str] | None,
+) -> DynamicTaskBlueprint:
+    """The user's enumerated actions are a contract: never silently collapse them.
+
+    A generic 2-action blueprint for a prompt that names four queues silently degrades the task
+    (and the reported metric) without any error, so the declared list wins.
+    """
+    if not explicit_actions or len(explicit_actions) < 2:
+        return blueprint
+
+    def _norm(value: Any) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", str(value).strip().lower()).strip()
+
+    current = [_norm(a.label) for a in blueprint.actions]
+    wanted = [_norm(label) for label in explicit_actions]
+    if current == wanted:
+        return blueprint
+
+    blueprint.actions = [
+        ActionSpec(index=i, label=label, mechanic_description=f"Execute action {label}")
+        for i, label in enumerate(explicit_actions)
+    ]
+    return blueprint
 
 
 def extract_observation_features_from_prompt(text: str) -> list[str] | None:
@@ -423,6 +510,9 @@ class IntakeArchitectAgent:
             answers=ans,
             training_params=training_params,
             client=self.client,
+        )
+        dyn_blueprint = enforce_explicit_actions(
+            dyn_blueprint, extract_action_labels_from_prompt(prompt)
         )
         blueprint = dyn_blueprint.to_agent_blueprint_spec()
 

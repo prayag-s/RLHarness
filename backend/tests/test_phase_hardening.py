@@ -261,8 +261,12 @@ def test_dataset_reward_shaping_preserves_base_signal(tmp_path):
     conv_id = f"test_reward_{uuid.uuid4().hex[:6]}"
     dataset = load_bytes(
         filename="audit.csv",
-        content=b"amount,risk,label\n10,0.1,0\n20,0.9,1\n30,0.2,0\n40,0.8,1\n",
+        content=(
+            b"amount,risk,label\n"
+            + b"".join(f"{10 + i * 5},{round((i % 10) / 10, 2)},{i % 2}\n".encode() for i in range(40))
+        ),
     )
+
     assert agent.process_message(conv_id, "Train an auditor on this table", dataset=dataset).status == "arena_preview"
 
     response = agent.process_message(conv_id, "Penalize mistakes more heavily")

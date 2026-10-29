@@ -75,6 +75,7 @@ class SandboxSmokeTester:
 
     def __init__(self, llm_client: BaseLLMClient | None = None):
         self._llm_client = llm_client
+        self.last_warnings: list[str] = []
 
     @property
     def client(self) -> BaseLLMClient:
@@ -132,6 +133,7 @@ class SandboxSmokeTester:
         # 4. Step through 25 actions
         snapshot: list[dict[str, Any]] = []
         step_infos: list[dict[str, Any]] = []
+        observed: list[np.ndarray] = [np.asarray(obs, dtype=np.float64)]
         for step_idx in range(25):
             action = env.action_space.sample()
             step_res = env.step(action)
@@ -143,6 +145,7 @@ class SandboxSmokeTester:
                 raise ValueError(f"step() obs.shape {step_obs.shape} does not match {obs_shape}")
             if not np.all(np.isfinite(step_obs)):
                 raise ValueError(f"step() observation contains NaNs or infinite values at step {step_idx}")
+            observed.append(np.asarray(step_obs, dtype=np.float64))
 
             if not isinstance(reward, (float, int, np.floating)):
                 raise TypeError(f"step() reward must be float/int, got {type(reward)}")
@@ -231,17 +234,34 @@ class SandboxSmokeTester:
             raise ValueError(f"interactive_step result is not JSON serializable: {e}")
 
         # Declared state must actually change over an episode (a frozen render state is a bug).
+        # Compare the whole sequence: short-horizon envs legitimately reset mid-probe, so checking
+        # only the first/last snapshots would flag them as static.
         if len(snapshot) > 1:
-            first, last = snapshot[0], snapshot[-1]
-            if first == last:
+            distinct = {json.dumps(item, sort_keys=True, default=str) for item in snapshot}
+            if len(distinct) < 2:
                 raise ValueError("arena_state never changes during an episode; declared state contract is static")
 
-        # Success reachability is reported as uncertainty, never silently assumed.
+        # Dead observation vectors make a policy unlearnable: most dimensions must carry signal.
+        obs_matrix = np.vstack(observed)
+        degenerate = int(np.sum(np.std(obs_matrix, axis=0) < 1e-9))
+        if obs_matrix.shape[1] > 0 and degenerate >= max(1, math.ceil(0.9 * obs_matrix.shape[1])):
+            raise ValueError(
+                f"{degenerate}/{obs_matrix.shape[1]} observation features are constant during the "
+                "probe; the observation vector carries no learnable signal (check that feature "
+                "names match real state fields)."
+            )
+
+        # Success reachability is reported as uncertainty, never silently assumed. A 25-step window
+        # cannot see terminal-only success signals, so fall back to complete episodes.
         success_observed = any(bool(s.get("is_success")) for s in step_infos)
+        if not success_observed and not getattr(env, "is_placeholder", False):
+            success_observed = self._probe_success(env)
+
         warnings: list[str] = []
         if not success_observed and not getattr(env, "is_placeholder", False):
             warnings.append(
-                "Success signal not observed during the 25-step random probe; reachability could not be verified."
+                "Success signal never observed across full probe episodes; the reported KPI may stay "
+                "at 0% until the environment's success criteria are reachable."
             )
 
         return {
@@ -253,6 +273,50 @@ class SandboxSmokeTester:
             "warnings": warnings,
             "sample_arena_state": interactive_res["arena_state"],
         }
+
+    @staticmethod
+    def _probe_success(env: Any, episodes_per_policy: int = 3, max_steps: int = 200) -> bool:
+        """Runs complete episodes to observe terminal-only success signals.
+
+        Uses the environment's own ``get_critical_actions`` hint when available (many synthesized
+        envs expose it) and falls back to random actions. Any observed success ends the probe.
+        """
+        horizon = getattr(env, "episode_horizon", None)
+        if horizon is None:
+            spec = getattr(env, "spec", None)
+            horizon = getattr(spec, "max_episode_steps", None) if spec is not None else None
+        try:
+            horizon = int(horizon) if horizon is not None else 50
+        except (TypeError, ValueError):
+            horizon = 50
+        horizon = max(1, min(horizon, max_steps))
+
+        policies: list[Any] = []
+        critical = getattr(env, "get_critical_actions", None)
+        if callable(critical):
+            def _critical_action() -> int:
+                hinted = critical()
+                return int(hinted[0]) if hinted else 0
+
+            policies.append(_critical_action)
+        policies.append(None)
+
+        try:
+            for policy in policies:
+                for _ in range(episodes_per_policy):
+                    _, info = env.reset()
+                    if isinstance(info, dict) and info.get("is_success"):
+                        return True
+                    for _ in range(horizon):
+                        action = policy() if policy is not None else int(env.action_space.sample())
+                        _, _, terminated, truncated, info = env.step(action)
+                        if isinstance(info, dict) and info.get("is_success"):
+                            return True
+                        if terminated or truncated:
+                            break
+        except Exception:
+            return False
+        return False
 
     def verify_and_heal(
         self,
@@ -297,7 +361,10 @@ class SandboxSmokeTester:
                 # Canonicalize output file
                 canonical_file.write_text(current_code, encoding="utf-8")
 
+                self.last_warnings = list(res.get("warnings") or [])
                 repair_logs.append(f"Attempt {attempt}: Verification PASSED 100% (25 steps, demos, interactive).")
+                for warning in self.last_warnings:
+                    repair_logs.append(f"Attempt {attempt} WARNING: {warning}")
                 try:
                     attempt_file.unlink()
                 except Exception:

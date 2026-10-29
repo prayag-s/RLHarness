@@ -1,0 +1,601 @@
+ticket_channel,customer_plan,monthly_spend,account_age_days,prior_tickets_30d,sentiment_score,mentions_outage,sla_hours_remaining,historic_csat,resolution_queue
+email,Starter,42.69,1360,1,0.097,0,0.61,4.04,Tier 1 Support
+chat,Starter,51.5,1707,5,-0.198,0,7.39,3.33,Senior Support
+email,Pro,307.22,1069,5,-0.012,0,2.03,2.14,Senior Support
+phone,Starter,43.82,1445,1,0.027,0,12.17,4.66,Tier 1 Support
+phone,Pro,335.43,628,3,-0.376,1,1.06,2.53,Engineering Escalation
+phone,Free,0.0,140,2,0.666,0,10.46,4.61,Tier 1 Support
+phone,Free,0.0,1062,7,-0.238,1,12.19,2.88,Senior Support
+email,Starter,43.02,654,0,0.398,0,13.04,4.84,Tier 1 Support
+email,Pro,338.56,534,6,0.013,0,10.27,2.6,Senior Support
+phone,Pro,329.97,528,6,-0.608,1,10.81,3.86,Senior Support
+chat,Enterprise,2143.41,871,5,-0.467,0,9.23,2.89,Retention Specialist
+email,Starter,43.77,1575,6,-0.686,0,10.12,3.62,Retention Specialist
+email,Enterprise,2479.91,21,2,-0.884,1,10.38,4.09,Engineering Escalation
+email,Pro,265.87,1635,2,-0.496,0,9.31,3.56,Retention Specialist
+phone,Free,0.0,717,1,0.073,0,12.07,4.57,Tier 1 Support
+email,Starter,52.83,145,0,0.104,0,0.31,4.03,Tier 1 Support
+chat,Starter,45.18,1423,0,0.423,0,15.33,3.94,Tier 1 Support
+email,Pro,300.65,1000,6,-0.422,0,1.99,3.23,Retention Specialist
+chat,Free,0.0,1172,1,0.288,0,8.37,4.61,Tier 1 Support
+chat,Starter,52.6,1624,1,0.366,0,4.95,4.59,Tier 1 Support
+chat,Starter,53.46,761,5,-0.048,1,3.33,2.57,Senior Support
+widget,Pro,292.58,1488,5,-0.907,1,11.99,3.59,Engineering Escalation
+email,Starter,41.82,256,6,-0.122,0,4.23,3.27,Senior Support
+phone,Pro,272.75,225,5,-0.34,0,6.18,3.88,Engineering Escalation
+widget,Free,0.0,1512,0,0.307,0,11.3,3.95,Tier 1 Support
+chat,Starter,52.52,152,4,-0.242,1,9.21,3.17,Senior Support
+chat,Starter,55.31,1673,0,0.459,0,14.9,4.19,Tier 1 Support
+email,Starter,48.24,1345,2,0.464,0,11.21,4.11,Tier 1 Support
+phone,Enterprise,2250.03,678,1,-0.268,1,3.0,3.52,Engineering Escalation
+widget,Pro,268.48,307,7,-0.209,0,0.39,2.2,Retention Specialist
+chat,Starter,47.4,346,6,-0.092,0,9.18,3.33,Senior Support
+chat,Enterprise,2326.07,1028,3,0.009,1,9.11,3.5,Engineering Escalation
+email,Free,0.0,84,0,0.649,0,8.61,3.51,Tier 1 Support
+chat,Pro,256.6,1417,6,-0.908,0,3.4,2.71,Retention Specialist
+email,Free,0.0,558,0,0.06,0,7.86,4.39,Tier 1 Support
+chat,Starter,55.72,1044,6,-0.415,0,7.43,4.42,Senior Support
+email,Starter,55.14,31,7,0.526,0,13.18,3.55,Senior Support
+email,Pro,314.99,38,6,-0.083,0,0.0,2.7,Senior Support
+email,Pro,276.33,501,2,-0.257,0,10.13,3.12,Retention Specialist
+email,Pro,288.17,1300,0,-0.098,0,8.88,4.59,Tier 1 Support
+chat,Pro,280.69,706,1,0.355,0,11.04,4.24,Tier 1 Support
+phone,Pro,334.55,1366,2,-0.062,0,5.0,3.5,Retention Specialist
+chat,Pro,284.94,620,0,-0.13,0,5.84,4.25,Tier 1 Support
+phone,Enterprise,2324.13,276,3,0.019,1,10.17,3.51,Engineering Escalation
+phone,Pro,267.74,176,7,-0.23,0,11.95,3.08,Senior Support
+email,Pro,300.11,1160,3,-0.576,1,7.84,3.87,Engineering Escalation
+email,Pro,339.71,187,6,-0.592,0,2.07,3.06,Senior Support
+phone,Pro,317.73,1008,5,-0.504,0,6.89,2.43,Engineering Escalation
+widget,Free,0.0,812,1,-0.265,0,6.17,4.37,Tier 1 Support
+email,Pro,267.67,657,2,-0.543,1,10.29,4.31,Engineering Escalation
+email,Starter,49.52,735,7,0.686,0,14.52,3.17,Senior Support
+email,Starter,41.83,521,7,-0.692,0,11.15,3.78,Senior Support
+chat,Enterprise,2214.67,400,1,-0.823,1,4.11,3.05,Engineering Escalation
+chat,Pro,335.34,525,3,-0.757,0,8.86,2.54,Retention Specialist
+phone,Pro,307.4,294,5,-0.23,0,4.7,3.45,Engineering Escalation
+email,Starter,53.56,598,2,0.471,0,9.89,4.39,Tier 1 Support
+widget,Pro,309.76,579,5,-0.935,1,2.49,4.16,Engineering Escalation
+chat,Enterprise,2362.77,1424,2,-0.317,0,12.49,1.97,Retention Specialist
+email,Pro,268.45,848,0,-0.035,0,10.31,3.86,Tier 1 Support
+widget,Pro,320.73,1537,4,-0.098,1,8.17,2.83,Senior Support
+email,Enterprise,2325.04,57,5,-0.349,1,10.39,4.1,Engineering Escalation
+chat,Free,0.0,906,0,-0.23,0,3.17,4.38,Tier 1 Support
+chat,Starter,49.9,947,2,0.32,0,6.97,4.23,Tier 1 Support
+email,Starter,55.56,142,7,0.313,0,4.84,2.09,Senior Support
+chat,Free,0.0,1017,1,-0.248,0,5.62,3.41,Tier 1 Support
+email,Free,0.0,661,2,0.435,0,2.3,3.68,Tier 1 Support
+chat,Starter,50.0,1225,6,0.458,0,14.07,3.02,Senior Support
+phone,Starter,52.81,1623,2,-0.222,0,7.27,3.84,Tier 1 Support
+phone,Pro,318.47,24,2,-0.584,0,7.16,3.62,Retention Specialist
+phone,Starter,45.48,562,5,-0.066,0,9.46,3.33,Senior Support
+chat,Starter,48.72,236,0,0.689,0,17.76,3.43,Tier 1 Support
+email,Pro,273.71,1703,0,0.739,0,12.47,3.14,Tier 1 Support
+email,Pro,331.83,138,4,-0.679,1,3.22,2.64,Engineering Escalation
+email,Starter,42.14,207,6,-0.463,0,10.71,2.15,Senior Support
+phone,Starter,47.38,549,8,-0.548,0,5.24,3.93,Senior Support
+phone,Enterprise,2590.73,640,3,-0.406,1,6.52,3.51,Engineering Escalation
+email,Pro,287.83,235,2,-0.506,1,4.4,4.53,Engineering Escalation
+email,Free,0.0,1214,0,0.021,0,5.71,4.0,Tier 1 Support
+email,Pro,265.11,710,7,-0.182,0,10.69,2.05,Retention Specialist
+email,Starter,47.37,352,0,0.667,0,15.51,5.0,Tier 1 Support
+email,Free,0.0,759,1,0.208,0,4.24,4.04,Tier 1 Support
+chat,Starter,50.02,275,1,0.473,0,8.5,3.96,Tier 1 Support
+phone,Starter,45.06,101,0,0.315,0,13.35,5.0,Tier 1 Support
+chat,Starter,48.69,1181,6,-0.696,0,5.06,3.7,Senior Support
+email,Starter,42.85,1276,3,-0.758,0,2.29,2.28,Retention Specialist
+email,Pro,285.79,811,0,0.995,0,3.39,3.67,Tier 1 Support
+chat,Pro,283.46,173,2,-0.637,0,6.46,2.88,Retention Specialist
+email,Free,0.0,891,6,0.183,0,2.7,3.43,Senior Support
+email,Starter,49.92,647,1,0.46,0,12.72,3.83,Tier 1 Support
+chat,Pro,280.85,1763,6,-0.683,0,10.01,3.18,Retention Specialist
+chat,Pro,310.75,738,2,-0.494,1,10.59,2.23,Retention Specialist
+chat,Starter,45.38,114,2,0.328,0,14.75,5.0,Tier 1 Support
+phone,Enterprise,2147.57,53,7,-0.888,0,1.09,3.57,Retention Specialist
+widget,Pro,283.27,1145,4,0.226,0,11.72,3.23,Senior Support
+widget,Starter,52.84,1450,7,-0.229,1,6.99,3.22,Retention Specialist
+chat,Pro,256.3,296,1,-0.371,1,11.97,3.67,Engineering Escalation
+phone,Starter,52.72,1053,2,-0.482,0,10.36,2.33,Retention Specialist
+chat,Starter,42.65,740,5,-0.878,1,17.96,2.97,Senior Support
+chat,Pro,290.93,223,2,0.133,0,9.94,2.96,Retention Specialist
+email,Enterprise,2452.45,955,2,-0.763,1,9.54,4.1,Engineering Escalation
+email,Pro,322.0,1643,4,-1.0,1,0.0,2.64,Engineering Escalation
+email,Starter,55.31,560,7,-0.428,0,8.37,3.59,Senior Support
+phone,Enterprise,2445.08,1052,2,-0.419,1,12.86,4.16,Engineering Escalation
+email,Pro,279.7,169,5,-0.265,0,13.25,2.93,Retention Specialist
+chat,Starter,51.79,1060,6,0.04,0,7.03,3.79,Senior Support
+email,Starter,54.07,1459,7,-0.812,0,9.0,2.32,Retention Specialist
+chat,Enterprise,2082.12,1143,1,-0.855,1,2.49,3.42,Engineering Escalation
+email,Starter,56.28,954,1,0.38,0,6.7,3.29,Tier 1 Support
+chat,Starter,49.08,1550,5,-0.563,0,6.96,3.17,Senior Support
+chat,Pro,267.74,1534,7,0.034,1,0.48,3.02,Senior Support
+chat,Pro,292.62,1713,4,-0.17,0,11.47,2.46,Senior Support
+email,Pro,278.84,1401,4,0.688,0,7.78,2.42,Senior Support
+phone,Enterprise,2443.34,1302,3,-0.03,1,3.32,4.22,Engineering Escalation
+email,Enterprise,2495.43,69,6,-0.952,0,7.19,2.91,Retention Specialist
+email,Pro,332.2,791,4,-0.657,1,6.94,3.23,Engineering Escalation
+chat,Pro,308.23,11,5,-0.386,1,1.68,3.03,Engineering Escalation
+email,Pro,291.78,1054,2,-0.391,1,3.95,3.66,Retention Specialist
+chat,Free,0.0,1150,2,0.336,0,15.83,3.94,Tier 1 Support
+email,Pro,338.86,1030,3,-0.385,1,7.07,3.19,Engineering Escalation
+email,Pro,270.41,480,5,-0.288,0,6.62,2.54,Retention Specialist
+phone,Enterprise,2534.58,379,3,-0.826,0,7.29,2.64,Retention Specialist
+chat,Enterprise,2693.25,1297,3,-0.635,1,2.73,3.37,Engineering Escalation
+email,Starter,43.73,289,4,-0.043,0,8.24,2.94,Senior Support
+widget,Enterprise,2553.57,1413,1,-0.062,1,11.77,4.79,Engineering Escalation
+email,Enterprise,2259.84,1662,4,-0.697,1,6.95,3.15,Retention Specialist
+chat,Starter,47.89,1798,1,-0.325,0,10.07,3.46,Tier 1 Support
+email,Free,0.0,1540,0,0.721,0,8.65,4.74,Tier 1 Support
+chat,Free,0.0,706,1,-0.108,0,13.36,4.11,Tier 1 Support
+widget,Pro,321.14,1487,1,-0.636,1,11.22,2.98,Engineering Escalation
+chat,Free,0.0,509,4,-0.271,0,9.51,1.76,Senior Support
+chat,Pro,328.98,1039,7,-0.629,0,7.37,1.84,Retention Specialist
+phone,Starter,52.54,1304,6,-0.555,0,5.78,2.56,Senior Support
+phone,Pro,340.06,1702,4,-0.044,0,9.41,3.1,Senior Support
+widget,Pro,320.64,1648,1,0.512,0,2.83,4.47,Tier 1 Support
+phone,Starter,52.65,862,7,-0.539,1,16.25,3.01,Senior Support
+email,Free,0.0,1718,2,0.4,0,2.64,4.31,Tier 1 Support
+widget,Starter,43.8,1675,7,0.03,0,10.42,3.37,Senior Support
+chat,Pro,276.31,871,6,-0.563,0,9.31,3.76,Retention Specialist
+widget,Starter,49.72,134,7,-0.785,1,4.64,2.82,Retention Specialist
+email,Pro,314.7,306,2,-0.326,1,6.6,3.8,Engineering Escalation
+widget,Pro,290.27,1217,9,-0.461,1,4.17,3.04,Senior Support
+email,Starter,43.54,625,2,0.234,0,5.89,3.58,Tier 1 Support
+widget,Enterprise,2745.43,828,5,-0.486,1,8.25,3.01,Engineering Escalation
+phone,Enterprise,2145.54,1320,5,-0.335,1,12.18,3.96,Engineering Escalation
+email,Pro,261.66,1042,6,-0.879,0,9.75,3.17,Senior Support
+phone,Starter,53.35,465,6,0.058,0,5.9,2.88,Senior Support
+chat,Pro,284.44,1615,2,-0.648,0,10.56,3.05,Retention Specialist
+email,Enterprise,2574.6,797,5,-1.0,1,7.6,4.08,Engineering Escalation
+email,Pro,317.94,381,2,0.057,0,16.86,3.97,Tier 1 Support
+email,Starter,45.44,807,4,-0.337,0,3.68,3.62,Senior Support
+chat,Free,0.0,1620,1,0.539,0,12.93,4.63,Tier 1 Support
+email,Starter,46.33,790,0,0.213,0,3.3,3.51,Tier 1 Support
+widget,Pro,302.4,1100,6,-0.253,0,9.32,3.76,Senior Support
+phone,Free,0.0,104,1,-0.059,0,3.19,4.07,Tier 1 Support
+widget,Starter,44.22,357,0,0.106,0,5.86,4.81,Tier 1 Support
+widget,Starter,55.46,839,5,0.364,0,1.33,3.79,Senior Support
+phone,Pro,309.77,108,5,-0.149,1,6.92,3.91,Retention Specialist
+email,Pro,281.06,1699,0,0.663,0,8.82,4.69,Tier 1 Support
+chat,Starter,51.37,1409,6,-0.551,0,9.53,3.33,Retention Specialist
+widget,Starter,54.96,1182,7,-0.068,0,10.18,3.78,Senior Support
+email,Pro,263.64,1519,2,-0.887,1,11.14,2.47,Retention Specialist
+chat,Pro,271.93,1112,5,-0.093,1,9.45,2.74,Engineering Escalation
+widget,Starter,51.28,1768,9,0.084,1,5.28,3.08,Senior Support
+chat,Pro,328.02,585,7,-0.669,0,9.74,2.61,Retention Specialist
+chat,Pro,309.39,1238,5,-0.54,0,8.22,2.99,Retention Specialist
+email,Enterprise,2440.76,1076,5,-0.547,0,12.56,2.54,Retention Specialist
+widget,Starter,50.08,1650,3,0.294,0,11.42,4.71,Tier 1 Support
+chat,Starter,49.53,1510,5,0.135,0,2.23,3.0,Senior Support
+email,Free,0.0,1101,4,-0.385,0,3.89,3.21,Senior Support
+email,Pro,322.73,749,3,-0.347,1,14.28,3.5,Engineering Escalation
+chat,Pro,312.16,206,3,-0.529,1,7.96,3.7,Engineering Escalation
+phone,Enterprise,2338.79,246,4,-1.0,0,6.79,1.98,Retention Specialist
+chat,Starter,53.33,251,5,-0.31,0,10.26,3.83,Senior Support
+email,Starter,45.14,1070,4,-0.019,0,6.8,1.86,Retention Specialist
+chat,Pro,261.61,446,4,-0.353,0,8.28,2.56,Senior Support
+email,Enterprise,2363.3,323,2,-0.262,1,9.54,4.14,Engineering Escalation
+chat,Pro,313.38,156,4,-0.079,1,10.26,3.94,Engineering Escalation
+phone,Pro,336.37,318,6,-1.0,0,9.25,3.73,Retention Specialist
+email,Enterprise,2091.06,1382,3,-0.506,1,6.27,3.22,Engineering Escalation
+email,Pro,277.15,240,4,-0.298,1,19.4,3.17,Engineering Escalation
+phone,Starter,45.85,350,8,-0.318,0,8.4,3.08,Senior Support
+phone,Starter,49.1,633,6,0.04,0,1.74,3.2,Senior Support
+chat,Enterprise,2287.45,1316,5,-0.608,1,6.21,2.5,Engineering Escalation
+phone,Free,0.0,1020,1,0.164,0,7.16,3.95,Tier 1 Support
+widget,Enterprise,2450.75,812,2,-0.667,1,10.2,3.88,Engineering Escalation
+chat,Enterprise,2664.59,396,6,-0.994,0,9.77,2.72,Retention Specialist
+chat,Pro,274.83,361,1,0.285,0,12.91,4.85,Tier 1 Support
+widget,Pro,280.16,821,1,-0.701,1,8.02,2.72,Engineering Escalation
+email,Pro,291.21,350,3,0.552,0,8.86,3.67,Tier 1 Support
+email,Pro,291.26,789,6,-0.882,1,9.12,3.29,Senior Support
+phone,Starter,49.47,503,1,0.421,0,1.73,3.74,Tier 1 Support
+chat,Pro,264.65,262,6,-0.883,0,9.21,3.49,Retention Specialist
+chat,Pro,305.4,483,1,0.62,0,4.71,3.83,Tier 1 Support
+phone,Enterprise,2125.92,39,7,-0.844,0,8.21,3.43,Retention Specialist
+widget,Pro,279.99,544,2,-0.52,0,10.05,2.49,Retention Specialist
+widget,Free,0.0,325,2,-0.203,0,14.3,4.81,Tier 1 Support
+chat,Starter,43.1,602,5,-0.537,0,6.84,2.72,Retention Specialist
+email,Pro,291.11,1425,5,-0.216,1,0.0,3.03,Engineering Escalation
+chat,Starter,55.81,1284,8,-0.062,0,8.94,3.05,Senior Support
+phone,Free,0.0,1042,1,0.418,0,6.58,5.0,Tier 1 Support
+email,Free,0.0,140,1,0.187,0,7.88,4.6,Tier 1 Support
+email,Enterprise,2130.07,215,5,-0.462,0,8.96,2.94,Engineering Escalation
+email,Pro,308.38,519,3,-0.262,0,11.75,3.13,Retention Specialist
+chat,Pro,282.7,135,2,0.497,0,12.6,3.96,Tier 1 Support
+email,Starter,51.79,1197,8,-0.262,0,7.6,3.04,Senior Support
+widget,Free,0.0,689,1,0.047,0,7.62,4.53,Tier 1 Support
+email,Pro,277.17,277,4,-0.977,0,14.16,3.35,Engineering Escalation
+phone,Pro,311.24,997,5,-0.501,0,6.38,3.58,Retention Specialist
+email,Pro,321.52,695,0,0.661,0,12.24,3.47,Tier 1 Support
+email,Pro,261.94,864,2,-0.41,1,0.0,2.95,Engineering Escalation
+chat,Pro,294.35,77,8,0.764,0,1.67,2.36,Senior Support
+email,Free,0.0,1228,7,-0.197,0,16.19,3.65,Senior Support
+chat,Enterprise,2411.96,64,4,-0.014,1,5.77,3.59,Retention Specialist
+phone,Pro,317.02,1643,2,0.686,0,19.37,4.04,Tier 1 Support
+chat,Enterprise,2276.25,643,3,-0.288,0,8.96,2.69,Retention Specialist
+email,Free,0.0,496,0,0.328,0,11.33,4.9,Tier 1 Support
+chat,Starter,49.22,1550,2,0.36,0,7.5,3.98,Tier 1 Support
+email,Pro,334.72,1246,2,-0.773,0,12.54,3.0,Retention Specialist
+email,Pro,256.05,966,4,-0.274,0,3.87,2.11,Retention Specialist
+widget,Pro,323.12,202,2,-0.98,0,12.89,2.22,Retention Specialist
+chat,Starter,46.65,563,6,0.229,0,10.99,3.3,Senior Support
+chat,Pro,300.36,1594,1,0.249,0,0.0,4.89,Tier 1 Support
+phone,Enterprise,2353.04,525,2,-0.411,1,9.41,3.32,Retention Specialist
+email,Starter,49.47,443,1,0.115,0,13.15,4.42,Tier 1 Support
+email,Pro,266.36,1375,1,-0.403,1,1.5,3.07,Engineering Escalation
+widget,Enterprise,2208.44,464,2,-0.339,0,8.43,4.56,Retention Specialist
+email,Pro,328.02,836,5,-0.225,0,6.24,2.79,Retention Specialist
+widget,Enterprise,2301.18,260,4,-0.731,1,9.85,2.65,Engineering Escalation
+phone,Pro,318.29,507,4,-0.22,0,11.99,3.38,Senior Support
+email,Enterprise,2150.25,1514,7,-0.7,0,3.54,3.64,Retention Specialist
+email,Enterprise,2693.51,1724,2,-0.475,1,4.71,2.33,Engineering Escalation
+phone,Pro,293.04,686,2,0.768,0,5.93,4.69,Tier 1 Support
+email,Free,0.0,265,1,0.595,0,11.66,4.41,Tier 1 Support
+email,Enterprise,2291.98,1416,5,-0.599,1,8.87,3.17,Engineering Escalation
+email,Enterprise,2547.9,538,3,-0.39,1,6.91,3.44,Engineering Escalation
+chat,Pro,288.33,537,8,-0.423,1,9.22,3.3,Senior Support
+phone,Starter,47.51,506,2,-0.449,0,10.09,2.59,Retention Specialist
+email,Starter,48.27,208,6,0.078,0,21.13,3.04,Senior Support
+chat,Starter,55.81,1057,9,0.013,0,2.55,3.89,Senior Support
+widget,Enterprise,2234.99,960,1,-0.354,1,14.02,3.65,Engineering Escalation
+phone,Pro,313.51,474,3,-0.617,1,7.05,3.01,Engineering Escalation
+phone,Enterprise,2606.64,1365,5,-0.163,0,4.45,2.5,Retention Specialist
+phone,Enterprise,2751.5,938,5,-0.694,1,9.65,2.59,Engineering Escalation
+widget,Pro,294.16,841,3,-0.809,1,6.68,4.01,Engineering Escalation
+chat,Starter,53.23,282,0,0.701,0,8.24,4.27,Tier 1 Support
+email,Starter,43.49,550,1,-0.602,0,4.68,4.18,Tier 1 Support
+phone,Starter,49.63,484,8,0.528,1,9.6,2.77,Senior Support
+chat,Enterprise,2117.5,1416,4,-0.629,1,8.81,4.12,Engineering Escalation
+chat,Free,0.0,1695,1,0.382,0,3.1,4.62,Tier 1 Support
+phone,Starter,42.78,1753,2,0.063,0,3.06,4.52,Tier 1 Support
+chat,Enterprise,2595.57,1731,2,-0.887,1,17.21,2.66,Engineering Escalation
+chat,Starter,44.43,564,3,0.96,0,3.38,4.07,Tier 1 Support
+widget,Free,0.0,1052,0,0.129,0,5.57,3.93,Tier 1 Support
+email,Free,0.0,1060,7,-0.089,1,7.2,3.17,Senior Support
+email,Pro,268.62,442,6,-0.686,0,7.38,3.71,Retention Specialist
+chat,Pro,334.51,860,2,-0.347,0,9.88,1.89,Retention Specialist
+email,Pro,304.31,1076,5,-0.87,0,4.08,2.77,Retention Specialist
+phone,Enterprise,2500.07,884,4,-0.485,0,16.02,2.29,Retention Specialist
+chat,Starter,44.15,1682,6,-0.846,0,8.94,2.52,Retention Specialist
+email,Pro,291.97,1269,2,-0.378,1,9.69,3.17,Engineering Escalation
+chat,Free,0.0,1713,1,0.239,0,13.89,3.72,Tier 1 Support
+chat,Enterprise,2241.84,1263,4,-0.26,1,10.48,3.64,Engineering Escalation
+chat,Starter,53.47,1047,8,-0.487,0,9.46,3.01,Senior Support
+phone,Starter,46.34,1504,0,0.299,0,3.66,4.27,Tier 1 Support
+chat,Starter,54.81,1298,0,0.008,0,10.39,4.29,Tier 1 Support
+chat,Pro,261.06,357,3,-0.555,1,11.24,3.62,Engineering Escalation
+chat,Starter,41.86,1318,6,0.066,1,4.42,3.99,Senior Support
+chat,Pro,278.04,89,1,-0.29,0,5.6,4.07,Tier 1 Support
+widget,Pro,309.76,466,2,-0.12,1,10.2,2.68,Retention Specialist
+email,Starter,41.96,833,1,0.287,0,10.84,4.45,Tier 1 Support
+chat,Free,0.0,658,6,0.057,0,2.86,3.53,Senior Support
+email,Pro,307.92,1577,4,-0.346,0,6.71,2.38,Senior Support
+phone,Enterprise,2120.96,1358,1,-0.517,1,6.66,3.13,Engineering Escalation
+email,Free,0.0,527,6,-0.039,1,7.36,3.78,Senior Support
+widget,Starter,56.02,1694,1,0.352,0,4.32,4.27,Tier 1 Support
+chat,Starter,44.41,124,1,0.363,0,6.51,4.04,Tier 1 Support
+chat,Pro,329.65,152,6,-0.226,1,9.05,3.12,Senior Support
+widget,Free,0.0,1441,4,-0.309,0,8.36,3.43,Senior Support
+chat,Enterprise,2081.71,1200,3,-0.196,1,4.41,3.52,Engineering Escalation
+phone,Pro,276.33,759,0,0.392,0,9.14,4.46,Tier 1 Support
+phone,Starter,55.39,236,7,-0.299,0,5.47,2.9,Senior Support
+widget,Enterprise,2271.45,582,2,0.229,0,5.86,1.69,Retention Specialist
+email,Free,0.0,618,1,-0.304,0,6.64,3.94,Tier 1 Support
+chat,Pro,267.22,1713,2,0.238,0,3.37,4.27,Tier 1 Support
+widget,Starter,53.35,406,7,0.119,0,5.31,2.17,Senior Support
+widget,Pro,301.85,353,4,-0.616,0,4.71,2.76,Retention Specialist
+chat,Starter,46.09,849,3,-0.014,0,5.84,4.38,Tier 1 Support
+phone,Pro,322.2,449,7,-0.205,0,15.59,2.04,Retention Specialist
+email,Pro,287.74,618,6,-0.283,1,5.57,2.76,Retention Specialist
+chat,Starter,52.88,200,4,0.159,1,12.58,2.25,Senior Support
+chat,Pro,288.24,1649,1,0.012,1,9.27,3.54,Engineering Escalation
+phone,Free,0.0,567,9,-0.093,0,11.46,3.16,Senior Support
+chat,Pro,259.28,1727,1,0.828,0,8.04,3.86,Tier 1 Support
+chat,Enterprise,2697.37,1009,4,-0.076,1,7.69,3.65,Engineering Escalation
+chat,Pro,336.98,1774,7,-0.724,0,12.08,3.01,Retention Specialist
+widget,Free,0.0,1578,0,0.58,0,4.65,4.73,Tier 1 Support
+email,Starter,43.94,1679,0,0.489,1,3.88,4.61,Tier 1 Support
+email,Pro,333.34,1592,5,-0.072,1,11.31,3.38,Senior Support
+chat,Pro,285.49,1277,2,0.083,0,7.98,3.23,Engineering Escalation
+chat,Starter,54.46,392,6,-0.249,0,8.81,3.39,Senior Support
+email,Pro,328.95,199,1,0.256,0,9.48,4.68,Tier 1 Support
+phone,Starter,53.22,1717,1,0.16,0,7.79,4.49,Tier 1 Support
+phone,Pro,307.2,730,8,0.036,0,8.88,3.17,Senior Support
+widget,Free,0.0,115,1,0.673,0,5.08,4.52,Tier 1 Support
+email,Enterprise,2712.96,1304,1,0.399,1,1.43,2.88,Engineering Escalation
+phone,Free,0.0,1599,0,-0.112,0,3.58,4.21,Tier 1 Support
+phone,Starter,48.87,39,1,0.452,0,13.04,3.09,Tier 1 Support
+email,Starter,46.52,30,1,-0.067,0,7.42,4.05,Tier 1 Support
+phone,Pro,295.07,655,2,-0.75,1,9.64,2.55,Engineering Escalation
+phone,Free,0.0,1406,3,0.007,0,14.97,4.53,Tier 1 Support
+email,Pro,277.25,520,7,-0.502,0,3.28,2.68,Retention Specialist
+widget,Starter,41.91,949,7,0.32,0,8.1,3.26,Senior Support
+phone,Pro,340.9,1122,1,-0.352,0,6.4,2.09,Engineering Escalation
+widget,Starter,52.99,153,5,-0.401,0,11.4,2.82,Senior Support
+email,Starter,55.35,293,2,-0.037,0,4.19,4.17,Tier 1 Support
+widget,Enterprise,2325.13,1381,5,-0.833,0,14.54,4.07,Retention Specialist
+chat,Pro,323.1,1781,5,-0.278,1,6.89,3.23,Retention Specialist
+email,Starter,42.04,1229,4,-0.681,0,8.56,3.14,Retention Specialist
+chat,Pro,304.25,67,4,-0.49,0,9.39,4.22,Senior Support
+email,Starter,54.12,917,0,-0.177,0,7.51,3.56,Tier 1 Support
+phone,Free,0.0,1669,0,0.076,0,5.96,5.0,Tier 1 Support
+chat,Pro,307.75,1495,0,0.351,0,11.05,4.93,Tier 1 Support
+chat,Enterprise,2050.83,1151,2,-0.768,1,8.16,3.52,Retention Specialist
+email,Pro,260.59,1551,7,0.141,1,11.46,3.9,Senior Support
+chat,Starter,53.89,895,0,-0.168,0,9.34,4.17,Tier 1 Support
+widget,Pro,268.26,61,6,0.294,0,10.66,3.09,Senior Support
+email,Free,0.0,44,7,-0.122,0,11.66,3.31,Senior Support
+email,Enterprise,2062.8,1194,3,-0.95,0,13.26,2.68,Retention Specialist
+phone,Free,0.0,616,0,0.161,0,13.34,4.63,Tier 1 Support
+chat,Pro,304.3,1320,6,0.289,1,17.65,3.12,Senior Support
+chat,Starter,54.09,1029,7,-0.47,0,4.83,1.83,Retention Specialist
+phone,Enterprise,2688.98,419,4,-0.49,1,2.47,2.96,Engineering Escalation
+chat,Pro,290.1,1051,4,-1.0,0,4.4,2.61,Retention Specialist
+email,Pro,266.99,247,0,0.077,0,6.55,3.94,Tier 1 Support
+chat,Enterprise,2233.26,1647,5,-0.594,1,5.64,3.4,Engineering Escalation
+phone,Free,0.0,797,2,0.339,0,8.75,4.13,Tier 1 Support
+widget,Starter,47.3,323,0,0.166,0,10.53,4.26,Tier 1 Support
+chat,Starter,50.0,1180,6,-0.261,0,11.23,2.83,Retention Specialist
+email,Starter,50.78,1419,5,-0.654,0,11.99,2.94,Retention Specialist
+email,Starter,45.19,1703,1,0.326,0,8.39,3.37,Tier 1 Support
+phone,Pro,296.63,770,8,-0.316,0,14.23,2.82,Senior Support
+email,Pro,337.55,764,8,0.224,0,8.91,2.26,Senior Support
+phone,Starter,48.82,1563,7,0.56,0,6.19,3.53,Senior Support
+email,Free,0.0,1450,1,0.334,0,10.66,4.43,Tier 1 Support
+chat,Pro,288.46,202,5,0.123,0,4.91,2.62,Senior Support
+chat,Starter,51.77,1345,1,-0.441,0,4.4,3.82,Tier 1 Support
+chat,Pro,312.17,179,2,-0.67,1,10.37,3.36,Engineering Escalation
+widget,Free,0.0,464,6,-0.065,0,8.42,3.1,Senior Support
+phone,Starter,53.59,1150,1,-0.431,0,12.15,4.16,Tier 1 Support
+widget,Pro,327.34,271,6,-0.418,0,2.18,2.93,Retention Specialist
+chat,Free,0.0,71,5,-0.039,0,1.99,3.6,Senior Support
+chat,Enterprise,2612.08,495,1,-0.139,1,3.41,2.3,Engineering Escalation
+phone,Pro,258.93,562,2,-0.446,1,6.56,2.34,Engineering Escalation
+chat,Starter,44.14,828,7,-1.0,0,3.72,2.78,Senior Support
+chat,Enterprise,2609.5,739,5,-0.737,0,6.44,3.06,Retention Specialist
+phone,Free,0.0,1308,1,0.521,0,9.1,4.37,Tier 1 Support
+email,Pro,279.88,1756,6,-0.012,0,12.85,2.77,Senior Support
+widget,Pro,322.32,660,5,-0.998,1,11.17,2.94,Engineering Escalation
+phone,Enterprise,2723.69,1579,2,-0.61,0,10.47,2.15,Retention Specialist
+widget,Pro,284.77,731,2,-0.425,0,7.08,3.37,Retention Specialist
+phone,Pro,266.9,1582,7,-0.664,0,10.22,2.79,Retention Specialist
+chat,Free,0.0,869,8,-0.328,0,6.28,2.26,Senior Support
+phone,Starter,53.26,594,7,-1.0,0,7.98,3.15,Senior Support
+email,Pro,302.37,263,7,-0.567,1,4.94,2.58,Retention Specialist
+phone,Starter,47.94,584,9,0.112,0,7.96,3.43,Senior Support
+widget,Pro,256.81,887,7,-0.118,0,5.23,2.7,Retention Specialist
+email,Pro,328.52,1073,2,-1.0,0,6.3,1.8,Retention Specialist
+email,Pro,335.75,480,6,-0.723,0,2.86,3.45,Senior Support
+widget,Pro,338.94,1610,3,-0.572,0,8.98,2.46,Retention Specialist
+email,Pro,342.62,707,6,0.259,0,11.58,3.02,Senior Support
+widget,Pro,313.35,868,1,0.099,0,8.66,4.13,Tier 1 Support
+phone,Free,0.0,1344,2,-0.029,0,11.48,5.0,Tier 1 Support
+widget,Free,0.0,520,2,0.15,0,3.44,4.23,Tier 1 Support
+chat,Pro,304.4,1411,2,-0.237,0,7.51,3.11,Retention Specialist
+chat,Enterprise,2750.18,778,3,-0.498,1,8.33,2.86,Engineering Escalation
+widget,Pro,294.79,1481,6,-0.4,0,9.15,2.55,Retention Specialist
+email,Starter,56.05,806,6,-0.073,1,9.88,2.97,Senior Support
+phone,Pro,332.15,1601,1,0.077,1,5.88,3.36,Engineering Escalation
+phone,Pro,306.13,735,7,-0.644,0,13.18,1.7,Retention Specialist
+phone,Starter,50.31,747,5,-0.063,0,4.15,2.85,Senior Support
+email,Starter,51.08,1320,8,-0.299,0,3.44,3.29,Senior Support
+chat,Enterprise,2627.93,488,5,-0.576,1,11.69,2.72,Engineering Escalation
+email,Starter,43.56,433,6,0.369,0,13.75,2.62,Senior Support
+email,Starter,48.59,745,4,-0.316,0,9.98,2.34,Retention Specialist
+phone,Enterprise,2148.47,1457,2,-0.748,1,8.3,2.79,Engineering Escalation
+email,Starter,50.31,369,7,-0.644,0,1.12,3.73,Senior Support
+chat,Free,0.0,1073,7,-0.457,0,5.8,3.02,Senior Support
+email,Starter,50.04,1076,6,-0.162,0,7.09,3.32,Senior Support
+email,Starter,42.19,1174,0,0.403,0,5.47,3.91,Tier 1 Support
+email,Enterprise,2339.7,900,6,-1.0,0,19.29,2.63,Retention Specialist
+chat,Free,0.0,403,1,0.447,0,3.11,3.76,Tier 1 Support
+chat,Starter,48.45,1496,8,-0.248,0,5.69,3.39,Senior Support
+chat,Pro,298.35,267,6,0.113,0,12.19,2.64,Senior Support
+email,Pro,265.93,884,5,-0.427,0,9.91,3.54,Engineering Escalation
+email,Starter,49.21,1560,5,-0.303,0,15.13,2.95,Senior Support
+email,Enterprise,2308.58,601,1,-0.23,1,6.12,2.94,Engineering Escalation
+email,Free,0.0,699,6,0.192,1,8.26,2.71,Senior Support
+phone,Pro,257.63,1110,5,-0.471,0,4.48,1.91,Retention Specialist
+chat,Pro,329.57,1474,4,0.253,0,9.96,3.73,Engineering Escalation
+phone,Starter,46.4,497,8,-0.516,0,14.52,3.65,Senior Support
+phone,Starter,51.78,791,6,0.092,0,12.49,2.36,Senior Support
+email,Starter,51.95,229,1,0.002,0,10.82,4.55,Tier 1 Support
+chat,Pro,291.69,775,8,-0.268,0,3.39,2.94,Senior Support
+phone,Starter,55.28,862,0,-0.33,0,9.17,4.57,Tier 1 Support
+email,Pro,316.87,297,1,0.694,0,9.27,5.0,Tier 1 Support
+phone,Starter,46.89,557,7,0.079,0,4.06,2.59,Senior Support
+phone,Pro,262.18,1010,3,-1.0,1,1.43,4.01,Engineering Escalation
+email,Pro,265.21,546,6,-0.193,0,3.04,3.0,Senior Support
+chat,Enterprise,2043.1,1172,5,-0.265,0,11.0,3.35,Retention Specialist
+phone,Pro,338.19,1231,5,-0.305,0,0.0,3.46,Retention Specialist
+widget,Starter,52.29,1232,2,0.048,0,10.59,3.77,Tier 1 Support
+email,Starter,54.45,40,7,-0.518,0,7.22,2.4,Retention Specialist
+email,Starter,47.61,1057,1,0.257,0,10.68,4.51,Tier 1 Support
+email,Pro,328.19,1794,2,-0.346,0,7.17,3.66,Retention Specialist
+phone,Pro,327.15,688,4,0.401,0,9.64,3.5,Senior Support
+chat,Pro,255.21,756,7,-0.828,0,7.44,2.02,Retention Specialist
+email,Starter,49.71,291,6,-0.507,1,0.82,3.59,Senior Support
+email,Starter,51.36,1597,1,0.154,1,0.66,3.71,Tier 1 Support
+email,Pro,255.97,840,2,-0.361,0,3.32,3.7,Retention Specialist
+chat,Starter,49.37,1508,3,-0.365,0,4.86,3.03,Retention Specialist
+widget,Pro,333.26,1560,6,-0.066,0,0.0,3.52,Senior Support
+chat,Starter,50.58,1736,5,0.588,0,4.98,3.11,Senior Support
+email,Starter,45.85,10,1,-0.134,0,11.29,4.27,Tier 1 Support
+phone,Pro,337.86,1331,5,-0.533,0,2.83,3.12,Retention Specialist
+chat,Pro,337.42,1557,4,-0.09,0,13.61,3.36,Retention Specialist
+phone,Starter,43.09,1755,5,-0.185,0,8.53,3.06,Senior Support
+widget,Starter,48.12,1034,7,0.002,0,2.23,3.8,Senior Support
+chat,Pro,257.24,1651,0,0.519,0,9.25,3.65,Tier 1 Support
+email,Free,0.0,195,1,0.372,0,10.56,4.01,Tier 1 Support
+chat,Pro,312.06,1769,4,0.414,0,7.69,2.8,Senior Support
+email,Starter,45.95,1451,8,0.375,0,2.49,2.93,Senior Support
+phone,Pro,277.92,813,2,-0.545,1,8.18,3.88,Engineering Escalation
+chat,Pro,274.39,1154,0,0.127,0,7.97,5.0,Tier 1 Support
+email,Pro,319.87,1606,1,-0.352,1,2.03,3.59,Engineering Escalation
+email,Pro,284.14,1179,5,-0.647,0,11.84,2.57,Retention Specialist
+chat,Enterprise,2460.15,1474,5,-0.914,0,3.46,2.96,Retention Specialist
+email,Free,0.0,1257,1,0.263,0,12.05,3.96,Tier 1 Support
+phone,Pro,302.02,1396,3,-0.333,0,5.91,2.27,Retention Specialist
+phone,Starter,49.8,88,1,0.299,0,8.22,4.46,Tier 1 Support
+chat,Pro,316.13,1070,1,0.083,0,11.15,3.81,Tier 1 Support
+phone,Enterprise,2188.17,879,4,-0.156,1,12.71,1.62,Engineering Escalation
+phone,Starter,55.79,996,1,0.109,0,0.0,4.1,Tier 1 Support
+widget,Pro,295.02,683,1,0.107,1,7.08,4.44,Tier 1 Support
+email,Starter,47.74,671,2,-0.194,0,9.92,4.47,Tier 1 Support
+email,Starter,45.85,602,1,0.1,0,4.02,3.72,Tier 1 Support
+widget,Pro,334.02,1788,2,-0.284,0,4.02,2.26,Retention Specialist
+email,Starter,45.82,947,4,-0.041,0,5.95,3.45,Senior Support
+widget,Starter,51.72,1117,4,-0.661,0,12.36,3.79,Retention Specialist
+email,Pro,316.87,1563,4,0.086,0,8.76,2.22,Senior Support
+chat,Enterprise,2695.93,1295,5,-0.388,0,1.99,2.91,Retention Specialist
+widget,Enterprise,2220.85,936,5,-0.733,1,8.07,3.03,Engineering Escalation
+widget,Pro,312.11,1437,0,1.0,1,5.53,4.78,Tier 1 Support
+widget,Starter,51.71,503,2,-0.291,0,5.56,3.06,Retention Specialist
+chat,Enterprise,2757.37,288,2,0.137,1,4.8,3.47,Engineering Escalation
+email,Starter,41.91,1585,1,0.656,0,6.41,4.1,Tier 1 Support
+email,Enterprise,2261.54,1093,1,-0.347,1,7.39,3.59,Engineering Escalation
+chat,Free,0.0,381,0,1.0,0,9.53,4.37,Tier 1 Support
+email,Pro,288.42,49,5,-0.32,0,7.97,3.12,Retention Specialist
+email,Enterprise,2520.88,37,6,-1.0,0,4.09,3.36,Retention Specialist
+chat,Pro,296.4,1383,0,0.112,0,2.98,3.82,Tier 1 Support
+chat,Pro,276.98,1762,5,-0.601,1,2.78,3.19,Engineering Escalation
+email,Starter,52.51,1482,2,0.465,0,0.99,3.97,Tier 1 Support
+chat,Starter,46.61,1678,6,-0.703,0,13.01,3.18,Senior Support
+chat,Pro,263.46,1659,5,0.064,1,0.0,3.46,Engineering Escalation
+chat,Starter,55.8,1571,2,0.259,0,9.47,3.54,Tier 1 Support
+email,Free,0.0,538,0,0.225,0,8.75,4.52,Tier 1 Support
+chat,Pro,287.81,943,7,0.098,1,12.94,2.89,Senior Support
+phone,Enterprise,2486.6,1092,7,-0.561,0,11.02,2.58,Retention Specialist
+widget,Free,0.0,160,7,0.456,0,6.11,3.16,Senior Support
+phone,Enterprise,2406.85,1513,4,-0.53,1,11.04,3.78,Engineering Escalation
+phone,Starter,48.85,827,5,-0.108,0,7.56,2.42,Senior Support
+email,Pro,281.79,1235,6,0.066,0,4.16,3.62,Senior Support
+phone,Enterprise,2215.92,249,6,-0.388,0,9.95,3.22,Retention Specialist
+widget,Starter,53.52,25,0,0.454,0,5.62,3.55,Tier 1 Support
+phone,Starter,44.71,587,7,-0.459,0,9.59,3.42,Senior Support
+email,Enterprise,2633.03,1562,5,-0.503,0,5.79,4.36,Retention Specialist
+email,Starter,48.5,943,5,-0.984,1,1.39,3.12,Retention Specialist
+phone,Starter,42.86,1787,5,0.157,0,6.24,2.81,Senior Support
+phone,Free,0.0,78,1,0.419,0,3.09,3.68,Tier 1 Support
+chat,Starter,46.11,1208,7,-0.618,0,11.59,3.55,Senior Support
+chat,Free,0.0,643,9,0.004,0,5.17,3.32,Senior Support
+email,Free,0.0,1397,0,0.213,0,4.16,3.18,Tier 1 Support
+phone,Pro,257.43,129,0,-0.184,0,2.19,4.19,Tier 1 Support
+widget,Free,0.0,1436,2,0.426,0,3.75,4.07,Tier 1 Support
+chat,Starter,53.01,1673,6,0.441,0,3.95,3.95,Senior Support
+phone,Pro,327.76,1128,5,-0.209,1,12.55,2.52,Senior Support
+chat,Starter,48.83,1531,7,-0.587,0,7.48,2.7,Senior Support
+phone,Starter,52.04,940,9,-0.153,0,5.77,2.81,Senior Support
+chat,Pro,332.39,402,6,-0.71,0,3.89,2.86,Retention Specialist
+phone,Free,0.0,1362,1,0.834,0,7.57,3.84,Tier 1 Support
+phone,Starter,44.96,521,0,1.0,0,9.9,3.49,Tier 1 Support
+email,Starter,48.88,317,1,0.148,0,7.05,4.7,Tier 1 Support
+email,Pro,339.5,1372,1,-0.423,1,6.68,2.44,Engineering Escalation
+email,Starter,43.96,1206,0,0.185,0,10.92,4.63,Tier 1 Support
+widget,Pro,331.62,1506,0,0.42,0,8.85,5.0,Tier 1 Support
+email,Starter,44.38,183,2,-0.579,0,6.78,2.72,Retention Specialist
+phone,Pro,327.67,869,3,-0.042,1,8.29,2.1,Engineering Escalation
+phone,Starter,45.0,251,4,0.265,0,7.99,3.03,Senior Support
+chat,Enterprise,2519.2,1310,7,-0.615,0,9.65,2.64,Retention Specialist
+email,Free,0.0,168,5,-0.111,0,7.37,2.04,Senior Support
+widget,Free,0.0,361,7,0.106,0,6.35,3.57,Senior Support
+chat,Enterprise,2549.38,1556,6,-0.566,0,2.37,2.89,Retention Specialist
+chat,Enterprise,2520.38,306,3,-0.128,0,7.36,2.54,Engineering Escalation
+phone,Enterprise,2259.41,313,2,-0.348,1,16.19,3.33,Engineering Escalation
+chat,Pro,279.33,1529,4,-0.173,1,8.75,3.65,Engineering Escalation
+chat,Free,0.0,778,5,-0.223,0,0.75,2.9,Senior Support
+chat,Starter,53.03,898,1,0.315,0,9.34,4.08,Tier 1 Support
+email,Pro,324.73,719,0,-0.095,0,9.91,4.37,Tier 1 Support
+widget,Enterprise,2612.5,1314,2,-0.071,0,4.55,3.17,Retention Specialist
+email,Pro,266.54,1256,3,-0.71,0,8.41,3.57,Engineering Escalation
+chat,Starter,44.63,173,0,0.307,0,11.29,3.71,Tier 1 Support
+phone,Enterprise,2623.96,1509,5,-0.439,1,13.02,2.66,Engineering Escalation
+email,Enterprise,2040.18,309,1,-0.107,1,6.62,3.61,Engineering Escalation
+widget,Pro,264.17,1710,6,-0.466,0,2.97,2.05,Retention Specialist
+email,Starter,48.46,1338,5,-1.0,1,10.14,3.43,Retention Specialist
+chat,Starter,48.99,1645,2,0.092,0,15.49,5.0,Tier 1 Support
+email,Pro,298.95,1386,6,0.747,0,9.84,2.72,Senior Support
+chat,Enterprise,2199.85,686,3,-0.188,1,9.0,2.65,Engineering Escalation
+email,Starter,49.35,1615,3,-0.189,0,4.07,4.18,Tier 1 Support
+chat,Enterprise,2200.22,1281,4,-0.721,1,5.7,2.63,Engineering Escalation
+widget,Enterprise,2393.85,1572,1,-0.599,1,10.32,3.25,Engineering Escalation
+chat,Free,0.0,1209,1,0.258,0,9.71,3.78,Tier 1 Support
+email,Enterprise,2139.25,731,3,-0.195,0,8.54,3.97,Retention Specialist
+chat,Starter,54.73,782,1,0.78,0,4.11,3.97,Tier 1 Support
+phone,Free,0.0,1453,2,0.259,0,11.94,3.7,Tier 1 Support
+email,Starter,56.21,478,2,-0.199,0,4.03,4.27,Tier 1 Support
+email,Starter,53.52,994,7,-0.792,0,11.86,4.01,Retention Specialist
+email,Enterprise,2479.82,706,2,-0.093,1,10.28,2.82,Engineering Escalation
+chat,Enterprise,2224.79,1037,7,-0.798,0,8.86,2.55,Retention Specialist
+email,Pro,304.72,1128,5,-0.28,1,2.34,3.42,Engineering Escalation
+chat,Pro,267.86,1289,3,-0.981,0,5.16,2.13,Retention Specialist
+phone,Pro,336.67,1583,5,0.131,0,6.61,3.37,Senior Support
+phone,Enterprise,2178.25,825,3,-0.398,1,0.0,3.21,Engineering Escalation
+chat,Pro,280.61,1712,4,-0.539,0,11.87,2.1,Retention Specialist
+chat,Starter,42.68,1459,7,-0.273,0,11.93,2.58,Senior Support
+email,Pro,277.84,12,6,-0.545,0,9.88,1.61,Retention Specialist
+phone,Enterprise,2408.45,103,4,-0.284,1,11.02,3.63,Engineering Escalation
+chat,Free,0.0,1691,1,0.027,0,14.66,4.49,Tier 1 Support
+email,Enterprise,2325.66,540,6,-0.31,0,0.0,2.74,Retention Specialist
+email,Starter,46.85,880,6,-0.519,0,7.88,3.35,Senior Support
+widget,Starter,49.63,136,8,-0.178,0,12.11,3.64,Senior Support
+chat,Starter,43.01,132,0,0.269,0,5.48,4.04,Tier 1 Support
+email,Enterprise,2537.54,1509,3,-0.983,1,12.58,3.77,Engineering Escalation
+chat,Enterprise,2196.57,425,4,-0.724,0,6.56,3.75,Engineering Escalation
+phone,Pro,263.7,1669,5,0.022,1,10.19,3.07,Engineering Escalation
+email,Starter,51.24,947,2,0.229,0,15.44,4.42,Tier 1 Support
+email,Enterprise,2444.8,1766,5,-0.298,0,11.21,3.74,Retention Specialist
+widget,Enterprise,2568.8,692,1,-0.359,1,2.73,3.58,Engineering Escalation
+email,Starter,50.03,172,4,0.306,1,9.91,2.72,Senior Support
+chat,Starter,45.01,1763,1,0.411,0,6.6,4.02,Tier 1 Support
+email,Enterprise,2253.92,1167,2,-0.628,0,5.71,3.41,Retention Specialist
+email,Free,0.0,1706,0,0.211,0,9.13,4.88,Tier 1 Support
+phone,Enterprise,2320.51,1599,5,-0.476,1,4.47,2.78,Retention Specialist
+email,Pro,332.58,436,7,-0.199,1,8.13,2.51,Retention Specialist
+email,Pro,257.4,1347,6,-0.18,1,12.38,3.17,Senior Support
+widget,Pro,254.84,763,6,-0.493,0,8.2,3.86,Senior Support
+email,Pro,315.46,1799,5,-0.335,1,7.31,2.9,Senior Support
+chat,Free,0.0,1326,0,0.685,0,7.93,3.95,Tier 1 Support
+phone,Enterprise,2264.8,332,5,-0.294,0,6.74,3.03,Retention Specialist
+widget,Enterprise,2058.91,1505,4,-0.582,1,6.66,2.9,Engineering Escalation
+email,Enterprise,2233.06,1087,3,-0.549,0,0.46,3.02,Retention Specialist
+chat,Starter,45.6,1020,6,-0.559,0,8.55,2.41,Retention Specialist
+email,Pro,312.93,1480,1,0.241,0,10.86,4.06,Tier 1 Support
+chat,Pro,259.51,727,7,-0.098,0,13.13,3.89,Senior Support
+email,Pro,272.46,1169,8,0.399,0,12.94,3.69,Senior Support
+chat,Starter,52.22,937,6,-0.169,0,2.77,2.72,Retention Specialist
+email,Starter,46.94,1540,5,-0.406,0,11.6,3.08,Retention Specialist
+email,Enterprise,2443.74,372,1,-0.519,1,2.86,3.82,Engineering Escalation
+chat,Free,0.0,1726,2,0.24,0,9.78,2.99,Tier 1 Support
+widget,Starter,55.37,514,5,-0.019,0,9.57,2.61,Senior Support
+email,Starter,42.07,850,8,0.254,0,8.55,2.78,Senior Support
+chat,Starter,52.04,1665,4,-0.589,0,7.84,2.02,Retention Specialist
+chat,Free,0.0,1726,1,0.577,0,6.0,5.0,Tier 1 Support
+chat,Enterprise,2315.64,1003,2,-0.076,1,13.07,4.29,Engineering Escalation
+email,Free,0.0,1267,6,0.063,0,8.49,3.09,Senior Support
+phone,Free,0.0,1116,3,0.775,0,10.84,4.58,Tier 1 Support
+email,Starter,55.54,1193,7,-0.388,0,2.52,2.95,Retention Specialist
+widget,Enterprise,2383.15,701,2,-0.832,1,6.42,4.56,Engineering Escalation
+email,Pro,291.38,1106,6,-0.412,0,12.73,2.53,Senior Support
+email,Pro,286.95,1222,7,-0.503,0,9.63,3.03,Retention Specialist
+phone,Free,0.0,1508,1,0.108,0,8.51,5.0,Tier 1 Support
+email,Starter,52.47,1417,9,0.067,0,11.21,3.52,Senior Support
+email,Starter,43.81,1141,0,0.175,0,7.79,4.27,Tier 1 Support
+chat,Pro,308.88,1003,7,-0.259,1,8.39,1.57,Retention Specialist
+email,Starter,48.42,252,1,0.132,0,10.08,4.09,Tier 1 Support
+email,Starter,42.53,1479,1,0.222,0,8.6,5.0,Tier 1 Support
+phone,Pro,314.26,981,1,0.74,0,5.05,3.79,Tier 1 Support
+phone,Enterprise,2146.12,1679,5,-0.134,0,5.47,2.59,Retention Specialist
+email,Starter,47.31,788,2,0.489,0,0.35,3.36,Tier 1 Support
+phone,Pro,277.93,357,1,-0.288,0,14.01,4.43,Tier 1 Support
+widget,Enterprise,2400.88,106,5,-0.345,1,0.0,3.81,Engineering Escalation
+email,Starter,42.96,167,1,0.436,0,4.1,4.48,Tier 1 Support
+email,Pro,308.39,578,1,0.391,0,10.72,3.75,Tier 1 Support
+widget,Enterprise,2643.09,1116,5,-0.292,0,3.03,2.81,Retention Specialist
+chat,Pro,302.0,211,5,-1.0,0,7.9,1.8,Retention Specialist
+chat,Enterprise,2397.56,72,5,-0.271,1,9.8,3.17,Engineering Escalation
+chat,Starter,44.78,901,1,-0.048,0,10.16,4.49,Tier 1 Support
+chat,Pro,306.13,1307,5,-0.782,0,8.94,2.41,Senior Support
+phone,Pro,254.34,1130,1,-0.767,0,3.64,4.35,Engineering Escalation
+phone,Starter,52.17,428,0,0.939,0,0.0,3.35,Tier 1 Support

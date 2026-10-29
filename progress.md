@@ -1,17 +1,19 @@
 # RL-Native Agent IDE — Progress & Session Handoff Log
 
-**Project:** RL-Native Agent Studio v4.5 (Honest Metrics, Verified Synthesis, Isolated Training)  
-**Last Updated:** 2026-10-29  
-**Current Status:** v4.5 remediation complete — phases 0–E of
-[DESIGN_AUDIT_AND_PHASED_REMEDIATION.md](./DESIGN_AUDIT_AND_PHASED_REMEDIATION.md) are implemented and
-every audit issue is closed or explicitly accepted (see the closure ledger in that document).
-- **Backend Tests:** **72 passed, 0 failed** (`pytest -q`, ≈6 min). Includes new suites
-  `test_phase_hardening.py`, the rewritten `test_universal_agentic_pipeline.py`, and the behavioural
-  `test_agentic_chat_planner.py`.
+**Project:** RL-Native Agent Studio v4.6 (Honest Metrics, Verified Synthesis, Dataset-Grounded Learning)  
+**Last Updated:** 2026-10-30  
+**Current Status:** v4.5 remediation (phases 0–E) plus the v4.6 round-2 commercial validation (§10) are
+complete. All audit issues F1–F36 are closed or explicitly accepted in
+[DESIGN_AUDIT_AND_PHASED_REMEDIATION.md](./DESIGN_AUDIT_AND_PHASED_REMEDIATION.md).
+- **Backend Tests:** **90 passed, 0 failed** (`pytest -q`, ≈11 min). Includes `test_phase_hardening.py`,
+  `test_dataset_feature_engineering.py`, `test_arena_rendering.py`, `test_intake_action_contract.py`,
+  the rewritten `test_universal_agentic_pipeline.py`, and the behavioural `test_agentic_chat_planner.py`.
 - **Frontend Build:** `npm run build` clean (tsc + vite, 1 599 modules).
-- **Browser suite:** **not executed in this environment** (requires a live server + verified LLM).
-  Previous “11/11 passing” claims in this log were not reproducible from the repository state and have
-  been removed.
+- **Browser suite:** **executed** against the live app (`browser_test_real_world_value.js`): four
+  commercial use cases, 4/4 passing at 87.0 % / 95.4 % / 81.2 % / 100 % with ONNX parity < 1e-6 and
+  all four declared actions preserved. The LLM-authored **control** task remains statistically
+  unstable across runs (see §10.4) and is scored as an advisory learning check.
+  See §10.
 - **Metric semantics:** classification tasks report per-step accuracy; control tasks report the
   terminal outcome; generic placeholder environments report **0 %** and are flagged.
 - **Known residuals:** see §6 of the audit document (no built-in auth, sample rows in exported
@@ -742,3 +744,90 @@ $ npm run build
 
 See §6 of the audit document. None of them are silent failures: each is either surfaced in the UI,
 documented in code, or gated by configuration.
+
+---
+
+## 10. v4.6 — Real-World Commercial Validation (2026-10-30)
+
+The v4.5 work proved the pipeline was honest; it did not prove it learned anything a customer would
+pay for. This section records what happened when four paid-use-case problems were driven through the
+**running app in a real browser** (`node browser_test_real_world_value.js`, Chrome + Vite + FastAPI,
+DeepSeek `deepseek-flash` verified live at 0.8–1.1 s latency).
+
+### 10.1 What the browser run measured
+
+Every check is an observable outcome read back from the API/session, not a page-text match:
+
+| Use case | Input | Metric (round 1) | Export parity | Result |
+|---|---|---|---|---|
+| B2B support ticket routing (4 queues) | `support_tickets.csv`, 600 rows | **87.0 %** accuracy (chance 25 %) | 3.0e-07 | PASS |
+| SaaS renewal save-play selection | `saas_renewal_risk.csv`, 500 rows | **95.4 %** accuracy | 2.4e-07 | PASS |
+| Insurance claim handling path | `insurance_claims.csv`, 520 rows | **81.2 %** accuracy | 5.1e-07 | PASS |
+| Peak-season inventory replenishment (control) | none (LLM-synthesized sim) | **100 %** success | 1.8e-07 | PASS (see §10.4 — unstable across runs) |
+
+Each use case also verified: dataset ingestion, `arena_preview` status, arena HTML rendered inside the
+sandboxed iframe, environment **not** a placeholder, observation features derived from real columns
+with the label excluded, training queued, rounds recorded, metric above chance, live `/interact`
+scoring, and ONNX parity < 1e-5 on export. Screenshots: `test_screenshots/real_world/`,
+machine-readable report: `test_screenshots/real_world/report.json`.
+
+### 10.2 Defects this exposed (all fixed)
+
+Before the fixes, the first use case trained for five rounds to **62–66 %** while the environment was
+effectively blind — see F34–F36 in §7 of the audit document:
+
+1. **Observations ignored the dataset.** The synthesized env copied LLM-invented feature names against
+   the real CSV, so 23/24 dimensions were permanently `0.0`; categorical values were encoded with
+   process-salted `hash()`; string targets produced zero demonstrations, which forced an LLM rewrite
+   of the whole module. Fixed by `synthesizer/feature_engineering.py` (numeric min-max, one-hot
+   categoricals, deterministic label→action mapping, runtime-fitted bounds) — the supervised path now
+   verifies on attempt 0 with **no LLM call**.
+2. **Label inference picked continuous floats** (a DOCX table got `sentiment_score` as its target),
+   forcing document tasks down the supervised path. Fixed in `ingest/profiler.py`: non-integral floats
+   are rejected and columns whose values name the declared actions win.
+3. **Unreachable success was invisible.** The reachability probe only stepped 25 random actions, so a
+   terminal-only success on a 30-step horizon could never be observed, and the warning was discarded —
+   one run trained two rounds and reported 0 % forever. The probe now runs complete, horizon-aware
+   episodes (using `get_critical_actions()` when available) and the warning is surfaced in the chat reply.
+   Short-horizon envs also stopped tripping a false "static arena_state" failure.
+4. **Arena labels were cut to four characters.** The generic renderer treated any array whose length
+   equalled the action count as a board (rendering "Retention Specialist" as `Rete` in a 40 px square),
+   and control buttons clipped long labels. Text arrays now render as full chips; buttons wrap.
+5. **The user's action list was not enforced.** One run returned only **two** actions
+   ("Approve / Safe", "Flag / Investigate") for a prompt naming four queues, then trained to 90 % on a
+   task nobody asked for — no error anywhere. The intake only ever parsed *quoted* lists, and only on
+   the deterministic path. Now every enumerated list in the prompt (quoted, colon-introduced, or
+   "to A, B, or C") is extracted and enforced on both the LLM and deterministic blueprints, and a
+   declared label column that explains fewer actions than the dataset's real target is replaced by
+   the column that explains all of them.
+
+### 10.3 Verification
+
+```text
+$ pytest -q
+90 passed, 5 warnings in 663.34s (0:11:03)
+```
+
+| New/changed test file | Purpose |
+|---|---|
+| `tests/test_dataset_feature_engineering.py` | **New** (12 tests) — real-column observations, deterministic encoding, demonstrations from string labels, no-LLM verification, dead-observation rejection, label inference, terminal-success probing |
+| `tests/test_arena_rendering.py` | **New** (2 tests) — evaluates the arena script in node: text arrays render readable labels, numeric boards still render clickable cells |
+| `tests/test_intake_action_contract.py` | **New** (4 tests) — prompt enumerations are extracted, an LLM blueprint that ignores them is overridden, intake keeps all declared actions, and a label column covering fewer actions is replaced |
+| `tests/test_v4_0b.py` | Data-driven fixture grown to 12 labelled rows (the supervised builder requires ≥ 8) |
+| `tests/test_phase_hardening.py` | Reward-shaping fixture grown to 40 rows for the same reason |
+| `tests/test_v4_2_commercial_suite.py` | Cross-conversation switching ignores historical runs whose synthesis failed and requires at least one restorable conversation |
+
+### 10.4 Residual risks from this round
+
+- **LLM-authored control environments are not reliably learnable.** Four runs of the same inventory
+  prompt produced 100 %, 62 %, 18 % and 0 % success in two rounds of 150 episodes: the synthesized
+  success criteria (fill rate ≥ 95 % **and** holding cost ≤ budget **and** zero peak stockouts) are
+  re-generated on every synthesis and are sometimes knife-edge — one sampled environment was
+  miscalibrated enough that even a hand-written "order 50 every day" heuristic only succeeded 2 times
+  in 6 episodes. Detection is reliable now (F36 surfaces an unreachable KPI to the user), but the
+  criteria are not rewritten automatically. Dataset-driven tasks, which carry the label contract of the
+  CSV, were stable across every run.
+- **Synthesis latency is 2–3 minutes** per environment on `deepseek-flash`; the browser suite allows
+  up to 10 minutes per chat turn.
+- Datasets are synthetic but structurally realistic (conditional feature generation with label overlap);
+  they are fixtures for the harness, not customer data.

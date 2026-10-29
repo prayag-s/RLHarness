@@ -1,0 +1,521 @@
+claim_amount,policy_age_months,prior_claims_12m,incident_type,police_report_filed,injuries_reported,third_party_involved,documentation_score,handling_path
+4240.01,31,5,collision,1,0,0,1,Special Investigations Unit
+6498.9,100,3,theft,0,1,1,3,Special Investigations Unit
+1465.06,70,1,property,0,1,0,2,Manual Adjuster Review
+947.43,183,1,property,0,0,0,2,Request Additional Documentation
+873.72,134,3,property,0,0,1,1,Request Additional Documentation
+2813.22,198,2,weather,1,0,1,3,Manual Adjuster Review
+943.07,45,0,theft,0,0,1,2,Request Additional Documentation
+1029.21,94,0,property,0,0,1,2,Request Additional Documentation
+2139.39,112,2,theft,1,1,1,3,Manual Adjuster Review
+1253.06,179,1,collision,1,0,1,5,Straight-Through Auto-Approve
+209.73,222,0,weather,1,0,0,5,Straight-Through Auto-Approve
+1843.06,160,0,collision,1,0,1,3,Manual Adjuster Review
+914.8,77,0,weather,1,0,0,4,Straight-Through Auto-Approve
+2652.11,215,3,collision,1,0,1,3,Special Investigations Unit
+2110.78,198,4,weather,0,0,1,2,Special Investigations Unit
+309.53,217,0,collision,1,0,0,4,Straight-Through Auto-Approve
+1060.84,217,1,collision,1,0,1,4,Straight-Through Auto-Approve
+1507.35,139,1,collision,1,1,1,4,Manual Adjuster Review
+3297.78,2,0,property,0,0,0,4,Manual Adjuster Review
+214.95,150,0,property,1,1,0,5,Straight-Through Auto-Approve
+218.49,168,1,collision,1,0,1,5,Straight-Through Auto-Approve
+658.46,228,1,collision,1,0,0,4,Straight-Through Auto-Approve
+4775.04,122,2,property,0,0,1,1,Special Investigations Unit
+185.3,56,1,collision,1,0,1,5,Straight-Through Auto-Approve
+621.95,67,0,theft,1,0,0,5,Straight-Through Auto-Approve
+2366.6,35,0,collision,0,0,1,4,Manual Adjuster Review
+363.11,224,0,property,1,0,0,4,Manual Adjuster Review
+434.01,96,0,theft,1,0,0,5,Straight-Through Auto-Approve
+326.81,132,0,medical,1,0,1,4,Straight-Through Auto-Approve
+190.77,128,0,weather,0,0,1,5,Straight-Through Auto-Approve
+288.27,169,1,theft,1,0,1,2,Request Additional Documentation
+7420.7,61,2,collision,0,0,0,3,Special Investigations Unit
+3319.71,204,2,weather,1,0,0,2,Manual Adjuster Review
+1373.03,127,1,collision,1,0,1,4,Manual Adjuster Review
+2039.43,190,1,property,1,0,0,2,Manual Adjuster Review
+1261.18,232,1,property,0,0,0,2,Request Additional Documentation
+451.75,112,0,collision,1,1,0,1,Request Additional Documentation
+1094.14,112,3,medical,1,0,1,2,Request Additional Documentation
+844.5,21,2,collision,1,0,1,2,Manual Adjuster Review
+279.03,99,1,weather,1,0,0,5,Straight-Through Auto-Approve
+6513.51,131,4,property,0,0,0,1,Special Investigations Unit
+2803.18,129,3,collision,0,0,0,2,Special Investigations Unit
+652.22,97,1,collision,1,0,0,5,Straight-Through Auto-Approve
+268.11,225,1,weather,1,1,0,5,Straight-Through Auto-Approve
+261.59,149,0,property,0,0,0,5,Straight-Through Auto-Approve
+9267.49,63,0,weather,1,0,1,4,Manual Adjuster Review
+724.6,128,5,theft,1,1,1,2,Special Investigations Unit
+4744.59,129,4,weather,0,0,0,3,Special Investigations Unit
+1349.71,98,1,property,0,0,0,4,Manual Adjuster Review
+4226.86,137,4,theft,0,0,1,2,Special Investigations Unit
+1154.24,86,0,weather,1,0,1,2,Manual Adjuster Review
+2778.59,128,3,property,0,0,0,1,Request Additional Documentation
+1041.45,62,0,collision,1,0,1,3,Manual Adjuster Review
+2099.81,182,1,weather,1,1,0,4,Manual Adjuster Review
+501.93,234,0,collision,1,1,1,5,Straight-Through Auto-Approve
+3156.68,118,3,collision,0,0,1,2,Special Investigations Unit
+664.26,171,0,collision,1,0,0,5,Straight-Through Auto-Approve
+5507.95,58,4,theft,0,0,0,2,Special Investigations Unit
+618.28,42,0,weather,0,0,0,2,Request Additional Documentation
+1391.45,17,1,collision,1,0,0,4,Straight-Through Auto-Approve
+937.41,195,2,medical,1,0,0,2,Manual Adjuster Review
+877.1,37,0,weather,0,0,0,2,Request Additional Documentation
+379.39,30,1,collision,1,0,0,5,Straight-Through Auto-Approve
+1012.9,181,0,collision,1,0,0,4,Straight-Through Auto-Approve
+177.07,51,1,weather,1,0,1,5,Straight-Through Auto-Approve
+926.32,79,0,weather,0,0,0,2,Manual Adjuster Review
+311.04,219,0,collision,1,0,0,5,Straight-Through Auto-Approve
+1451.78,134,2,weather,1,0,0,4,Manual Adjuster Review
+543.97,27,0,collision,0,1,0,1,Request Additional Documentation
+2276.48,187,2,theft,1,1,0,1,Special Investigations Unit
+349.75,94,1,collision,1,0,1,4,Straight-Through Auto-Approve
+1412.73,213,0,collision,0,0,0,1,Request Additional Documentation
+1665.05,14,2,collision,0,1,0,1,Request Additional Documentation
+1401.6,179,0,collision,0,0,1,4,Manual Adjuster Review
+453.51,204,0,weather,1,0,1,4,Straight-Through Auto-Approve
+4681.26,228,1,property,0,0,1,2,Manual Adjuster Review
+1317.65,34,1,property,1,0,1,2,Manual Adjuster Review
+445.51,114,0,weather,1,1,1,4,Straight-Through Auto-Approve
+1454.36,118,2,weather,1,0,1,2,Manual Adjuster Review
+581.29,44,1,property,1,0,0,5,Straight-Through Auto-Approve
+551.71,50,0,weather,1,0,0,5,Straight-Through Auto-Approve
+498.63,205,2,weather,1,0,0,2,Request Additional Documentation
+787.95,45,2,theft,1,0,1,1,Request Additional Documentation
+4242.78,188,2,theft,1,1,1,3,Manual Adjuster Review
+374.68,193,1,collision,1,0,0,4,Straight-Through Auto-Approve
+268.34,43,1,collision,1,0,1,5,Straight-Through Auto-Approve
+3123.93,36,2,theft,0,0,0,1,Special Investigations Unit
+1051.44,18,0,collision,0,1,1,2,Manual Adjuster Review
+4393.91,53,1,collision,0,0,0,2,Manual Adjuster Review
+13048.53,238,3,theft,0,0,0,3,Special Investigations Unit
+3016.39,60,2,collision,1,0,0,4,Manual Adjuster Review
+1266.1,164,1,weather,1,0,0,2,Manual Adjuster Review
+716.65,116,0,medical,1,1,1,2,Request Additional Documentation
+408.59,136,0,collision,1,0,0,4,Straight-Through Auto-Approve
+1634.81,134,0,weather,0,0,0,1,Request Additional Documentation
+371.16,234,1,collision,0,0,0,5,Straight-Through Auto-Approve
+1318.96,83,3,theft,0,0,0,2,Request Additional Documentation
+1904.19,55,1,weather,1,0,0,1,Request Additional Documentation
+1856.42,15,0,collision,1,1,1,3,Manual Adjuster Review
+2236.2,155,0,weather,0,0,1,4,Manual Adjuster Review
+3711.6,71,4,collision,1,1,1,2,Special Investigations Unit
+673.58,153,1,property,0,0,1,5,Straight-Through Auto-Approve
+1104.65,33,1,collision,1,1,0,5,Straight-Through Auto-Approve
+381.96,163,0,weather,1,0,1,4,Straight-Through Auto-Approve
+1291.2,184,1,collision,0,0,1,2,Manual Adjuster Review
+372.71,124,1,collision,1,0,1,4,Straight-Through Auto-Approve
+144.55,79,0,theft,1,0,0,5,Straight-Through Auto-Approve
+4050.31,186,3,theft,0,0,1,1,Special Investigations Unit
+1489.36,118,1,collision,1,1,1,4,Manual Adjuster Review
+5566.73,78,3,collision,0,0,0,3,Special Investigations Unit
+5279.73,124,4,weather,1,0,1,2,Special Investigations Unit
+1262.5,178,2,weather,1,1,0,2,Manual Adjuster Review
+2216.35,165,2,property,0,0,1,2,Request Additional Documentation
+629.32,30,1,property,1,0,0,5,Straight-Through Auto-Approve
+220.08,27,1,weather,1,0,0,4,Straight-Through Auto-Approve
+269.81,5,0,collision,1,0,1,4,Straight-Through Auto-Approve
+9580.81,30,4,property,0,0,1,2,Special Investigations Unit
+636.75,144,0,theft,1,0,1,2,Manual Adjuster Review
+4212.27,117,2,medical,0,1,0,2,Special Investigations Unit
+555.41,56,1,weather,1,0,0,4,Straight-Through Auto-Approve
+321.4,63,1,property,1,0,0,4,Straight-Through Auto-Approve
+2150.68,231,3,property,1,0,1,3,Special Investigations Unit
+9292.15,189,2,theft,0,0,1,3,Special Investigations Unit
+698.37,87,0,weather,1,0,1,5,Straight-Through Auto-Approve
+273.49,155,0,collision,1,0,1,4,Straight-Through Auto-Approve
+441.57,135,2,property,0,0,0,2,Request Additional Documentation
+7554.23,68,3,property,0,0,1,2,Special Investigations Unit
+222.7,184,1,collision,1,0,0,5,Straight-Through Auto-Approve
+841.94,66,0,collision,1,0,0,4,Straight-Through Auto-Approve
+1640.31,59,2,weather,0,1,1,2,Manual Adjuster Review
+102.15,180,0,theft,1,0,0,5,Straight-Through Auto-Approve
+794.54,62,0,collision,1,0,0,4,Straight-Through Auto-Approve
+953.53,41,3,property,0,0,0,2,Request Additional Documentation
+5294.22,228,5,property,1,0,1,3,Special Investigations Unit
+202.37,23,0,collision,1,0,0,5,Straight-Through Auto-Approve
+321.7,98,0,weather,1,0,0,5,Straight-Through Auto-Approve
+423.82,36,0,weather,1,0,0,5,Straight-Through Auto-Approve
+137.92,100,1,collision,1,0,1,4,Straight-Through Auto-Approve
+3363.16,151,4,property,0,0,1,1,Special Investigations Unit
+1206.69,69,0,collision,1,0,1,4,Straight-Through Auto-Approve
+3099.34,195,2,collision,1,0,1,3,Special Investigations Unit
+503.31,216,1,weather,1,0,0,5,Straight-Through Auto-Approve
+3965.47,161,3,property,0,0,1,2,Special Investigations Unit
+521.7,95,3,property,1,0,1,2,Special Investigations Unit
+1319.04,83,2,medical,1,0,0,3,Manual Adjuster Review
+877.57,91,1,weather,1,0,0,4,Straight-Through Auto-Approve
+5863.4,120,3,collision,0,0,0,1,Special Investigations Unit
+2255.03,200,1,collision,1,0,1,3,Manual Adjuster Review
+1716.54,86,2,collision,0,0,1,4,Manual Adjuster Review
+549.05,38,1,collision,1,0,0,5,Straight-Through Auto-Approve
+11872.47,12,3,collision,0,0,0,3,Special Investigations Unit
+296.25,3,0,theft,1,0,0,4,Straight-Through Auto-Approve
+5025.09,131,5,theft,1,0,1,2,Special Investigations Unit
+936.22,18,1,collision,0,0,1,2,Request Additional Documentation
+3918.62,190,3,weather,0,0,1,1,Special Investigations Unit
+2131.11,37,4,collision,0,0,1,3,Special Investigations Unit
+146.56,180,1,collision,0,0,0,4,Straight-Through Auto-Approve
+9077.12,39,3,theft,1,1,1,3,Special Investigations Unit
+2042.18,199,1,collision,0,0,1,3,Manual Adjuster Review
+6066.98,189,2,theft,0,1,1,1,Special Investigations Unit
+313.41,94,0,theft,0,0,0,1,Request Additional Documentation
+4175.86,56,4,medical,0,0,1,1,Special Investigations Unit
+304.29,226,1,collision,1,0,0,5,Straight-Through Auto-Approve
+935.25,32,0,property,0,0,0,2,Request Additional Documentation
+1844.32,170,4,collision,0,0,1,3,Special Investigations Unit
+2697.91,199,3,weather,0,0,1,3,Special Investigations Unit
+487.56,149,0,collision,1,0,0,4,Straight-Through Auto-Approve
+1412.28,24,1,property,0,0,0,1,Request Additional Documentation
+1304.93,138,1,collision,0,0,1,2,Request Additional Documentation
+2155.93,40,2,collision,0,0,0,3,Special Investigations Unit
+392.88,216,0,collision,0,0,0,5,Straight-Through Auto-Approve
+417.52,42,0,weather,1,0,1,4,Straight-Through Auto-Approve
+5790.01,185,4,property,0,0,1,2,Special Investigations Unit
+13738.4,159,3,theft,0,0,0,2,Special Investigations Unit
+1543.6,160,1,theft,0,0,1,2,Request Additional Documentation
+3406.82,235,2,collision,0,0,1,2,Special Investigations Unit
+792.5,102,0,collision,0,0,0,1,Request Additional Documentation
+446.26,11,1,weather,1,0,1,5,Straight-Through Auto-Approve
+1420.28,88,2,medical,1,0,1,4,Manual Adjuster Review
+2533.74,86,4,collision,0,0,0,2,Special Investigations Unit
+1616.7,222,1,property,0,0,1,2,Request Additional Documentation
+1458.14,75,2,property,0,0,1,2,Request Additional Documentation
+246.1,20,1,weather,1,0,0,4,Straight-Through Auto-Approve
+189.8,191,0,medical,1,0,1,5,Straight-Through Auto-Approve
+485.79,122,0,collision,1,0,0,4,Straight-Through Auto-Approve
+116.16,119,1,collision,1,0,0,4,Straight-Through Auto-Approve
+331.57,148,1,collision,1,1,0,5,Straight-Through Auto-Approve
+1754.07,76,2,weather,0,0,0,3,Manual Adjuster Review
+328.09,113,0,collision,1,0,1,4,Straight-Through Auto-Approve
+13301.98,176,2,collision,0,0,1,1,Special Investigations Unit
+2993.5,95,1,property,1,0,1,2,Manual Adjuster Review
+4342.18,105,2,property,1,0,0,2,Manual Adjuster Review
+1613.73,140,0,weather,1,0,1,2,Manual Adjuster Review
+5910.42,234,5,collision,0,0,0,2,Special Investigations Unit
+2660.68,141,1,collision,0,0,0,3,Manual Adjuster Review
+2150.08,14,2,weather,1,0,1,3,Special Investigations Unit
+497.34,51,1,collision,1,0,0,4,Straight-Through Auto-Approve
+2631.8,196,1,medical,1,0,0,2,Manual Adjuster Review
+1054.14,34,1,property,0,0,1,1,Request Additional Documentation
+498.15,38,1,collision,0,0,1,1,Request Additional Documentation
+3052.24,114,4,collision,0,0,1,3,Special Investigations Unit
+3551.99,226,2,collision,1,0,0,4,Manual Adjuster Review
+165.61,100,1,collision,1,0,0,4,Straight-Through Auto-Approve
+305.64,101,0,collision,1,0,1,5,Straight-Through Auto-Approve
+3175.63,183,1,weather,1,1,1,2,Manual Adjuster Review
+619.24,48,2,weather,1,0,1,1,Request Additional Documentation
+1196.89,84,3,property,1,0,0,2,Request Additional Documentation
+1470.19,205,5,collision,0,0,0,2,Special Investigations Unit
+279.86,121,1,collision,1,0,1,4,Straight-Through Auto-Approve
+1242.01,86,1,property,0,0,1,1,Request Additional Documentation
+588.9,216,1,collision,1,0,1,4,Straight-Through Auto-Approve
+344.18,208,0,collision,1,1,1,5,Straight-Through Auto-Approve
+3527.1,108,1,weather,0,0,0,2,Manual Adjuster Review
+134.6,100,0,weather,1,0,0,4,Straight-Through Auto-Approve
+1925.91,171,0,medical,0,0,1,2,Manual Adjuster Review
+787.67,62,0,collision,0,0,0,4,Straight-Through Auto-Approve
+1682.32,171,0,collision,0,0,1,4,Manual Adjuster Review
+2710.1,6,4,theft,0,0,1,2,Special Investigations Unit
+786.34,11,3,collision,1,0,1,1,Request Additional Documentation
+699.32,55,1,theft,0,0,1,1,Request Additional Documentation
+4393.51,5,3,theft,0,0,0,1,Special Investigations Unit
+2780.85,104,0,collision,1,0,0,4,Manual Adjuster Review
+282.2,149,1,collision,1,0,0,5,Straight-Through Auto-Approve
+199.76,150,1,weather,0,0,0,5,Straight-Through Auto-Approve
+1106.54,135,2,theft,1,0,1,1,Request Additional Documentation
+2668.07,108,7,property,0,1,1,1,Special Investigations Unit
+2523.09,165,1,medical,1,0,0,3,Manual Adjuster Review
+3348.12,125,2,collision,0,1,1,4,Manual Adjuster Review
+15065.8,190,4,collision,0,0,1,1,Special Investigations Unit
+948.94,34,1,theft,0,0,0,2,Request Additional Documentation
+1715.36,131,1,weather,1,0,1,4,Manual Adjuster Review
+6925.26,63,4,collision,0,0,1,2,Special Investigations Unit
+2254.69,145,2,weather,1,0,0,2,Special Investigations Unit
+524.64,59,0,property,0,0,1,2,Request Additional Documentation
+334.44,22,1,weather,1,0,0,5,Straight-Through Auto-Approve
+411.74,93,2,weather,1,0,0,2,Request Additional Documentation
+360.79,115,2,collision,1,0,1,1,Request Additional Documentation
+1187.91,130,4,theft,0,0,1,3,Special Investigations Unit
+860.62,59,2,collision,1,0,0,2,Manual Adjuster Review
+4407.95,183,1,weather,0,0,0,2,Manual Adjuster Review
+2878.56,215,2,collision,1,0,0,1,Request Additional Documentation
+707.25,204,1,collision,0,1,1,2,Request Additional Documentation
+2290.68,153,2,theft,1,0,0,2,Request Additional Documentation
+441.79,12,1,collision,1,0,0,4,Straight-Through Auto-Approve
+6033.71,235,4,medical,0,0,1,2,Special Investigations Unit
+734.13,100,2,property,1,0,0,3,Manual Adjuster Review
+307.74,83,1,collision,1,0,1,5,Straight-Through Auto-Approve
+1807.35,228,6,property,1,0,1,3,Special Investigations Unit
+595.44,107,0,collision,0,0,0,2,Request Additional Documentation
+4184.25,151,1,medical,1,0,1,1,Request Additional Documentation
+283.36,124,0,weather,1,0,0,4,Straight-Through Auto-Approve
+84.27,226,1,weather,1,0,0,4,Straight-Through Auto-Approve
+1524.1,34,3,collision,0,0,1,2,Request Additional Documentation
+2241.11,218,0,collision,0,0,1,3,Manual Adjuster Review
+1643.55,60,1,property,0,0,1,2,Request Additional Documentation
+2321.2,208,3,collision,1,0,0,1,Special Investigations Unit
+1091.53,76,0,medical,0,0,1,1,Request Additional Documentation
+2708.62,17,2,weather,1,0,1,4,Manual Adjuster Review
+277.29,118,1,weather,1,0,1,4,Straight-Through Auto-Approve
+2215.83,61,2,property,0,0,1,1,Request Additional Documentation
+2667.93,65,4,property,0,0,1,2,Special Investigations Unit
+1367.5,108,0,collision,0,0,1,4,Manual Adjuster Review
+156.97,211,0,collision,0,0,0,5,Straight-Through Auto-Approve
+687.6,12,0,weather,0,0,1,4,Straight-Through Auto-Approve
+190.74,69,0,collision,1,0,1,5,Straight-Through Auto-Approve
+3202.16,107,4,theft,0,0,1,1,Special Investigations Unit
+2037.92,54,2,collision,1,0,0,1,Request Additional Documentation
+1019.05,35,0,property,1,0,0,5,Straight-Through Auto-Approve
+3434.65,173,4,theft,0,0,0,1,Special Investigations Unit
+204.03,169,0,property,0,0,1,2,Request Additional Documentation
+233.66,6,2,property,1,1,1,1,Request Additional Documentation
+520.13,13,3,property,0,0,1,1,Request Additional Documentation
+1660.25,185,0,property,0,0,0,4,Manual Adjuster Review
+127.97,151,0,collision,1,0,0,5,Straight-Through Auto-Approve
+554.26,204,1,property,1,0,0,4,Straight-Through Auto-Approve
+909.81,175,1,collision,1,0,0,4,Straight-Through Auto-Approve
+2824.09,89,2,property,0,0,1,3,Manual Adjuster Review
+985.58,205,0,collision,0,1,0,1,Request Additional Documentation
+472.55,167,1,collision,1,0,0,4,Straight-Through Auto-Approve
+2842.29,40,2,collision,0,0,1,1,Special Investigations Unit
+5858.4,111,2,collision,0,0,0,2,Manual Adjuster Review
+4826.91,68,2,weather,0,0,1,4,Manual Adjuster Review
+3546.12,27,0,theft,0,0,0,2,Request Additional Documentation
+794.14,196,3,collision,0,0,1,3,Special Investigations Unit
+3753.43,147,1,property,0,1,0,2,Manual Adjuster Review
+548.92,130,0,collision,0,0,0,4,Straight-Through Auto-Approve
+2063.13,120,1,collision,0,0,1,2,Manual Adjuster Review
+266.57,24,0,collision,1,0,0,5,Straight-Through Auto-Approve
+2116.07,92,1,medical,1,0,1,1,Request Additional Documentation
+2473.98,117,2,weather,1,0,0,3,Manual Adjuster Review
+300.37,77,0,collision,1,0,0,4,Straight-Through Auto-Approve
+2797.86,216,2,theft,1,0,1,4,Manual Adjuster Review
+459.95,217,1,collision,0,0,0,5,Straight-Through Auto-Approve
+1753.31,140,0,property,0,0,1,2,Request Additional Documentation
+479.65,62,0,collision,0,0,1,4,Straight-Through Auto-Approve
+1011.21,101,0,collision,0,1,0,2,Request Additional Documentation
+1849.06,217,0,property,0,0,0,2,Request Additional Documentation
+875.49,35,4,medical,0,0,1,1,Special Investigations Unit
+4217.46,40,2,theft,0,0,0,2,Manual Adjuster Review
+1981.25,176,0,property,1,0,0,2,Manual Adjuster Review
+5214.0,202,4,collision,0,0,1,2,Special Investigations Unit
+2081.92,72,0,weather,1,0,0,3,Manual Adjuster Review
+386.57,216,2,weather,0,0,0,2,Request Additional Documentation
+2557.72,107,2,weather,0,0,1,4,Manual Adjuster Review
+1703.53,11,0,collision,1,0,0,2,Manual Adjuster Review
+1196.14,134,1,collision,0,0,0,2,Request Additional Documentation
+825.37,17,1,weather,1,0,0,2,Request Additional Documentation
+1531.13,5,1,medical,1,1,1,4,Manual Adjuster Review
+786.9,206,1,property,1,0,0,2,Request Additional Documentation
+347.89,51,0,weather,1,0,1,5,Straight-Through Auto-Approve
+3246.71,203,1,property,1,0,0,3,Manual Adjuster Review
+2051.18,87,1,collision,1,1,0,2,Manual Adjuster Review
+157.5,19,1,collision,1,0,1,4,Straight-Through Auto-Approve
+763.9,56,3,collision,0,0,0,1,Special Investigations Unit
+698.3,37,0,weather,1,0,0,1,Request Additional Documentation
+653.38,72,1,collision,1,0,1,5,Straight-Through Auto-Approve
+1665.97,64,2,weather,0,0,1,2,Manual Adjuster Review
+248.94,192,0,collision,1,0,0,4,Straight-Through Auto-Approve
+8494.54,79,4,property,0,0,1,1,Special Investigations Unit
+2826.79,65,1,weather,0,0,1,3,Manual Adjuster Review
+3438.78,85,4,collision,0,0,1,1,Special Investigations Unit
+1213.06,131,1,collision,1,1,1,3,Manual Adjuster Review
+618.88,232,0,collision,0,0,1,1,Request Additional Documentation
+829.96,186,0,collision,1,0,1,4,Straight-Through Auto-Approve
+252.75,49,0,weather,1,0,0,5,Straight-Through Auto-Approve
+834.93,164,1,collision,0,0,1,2,Manual Adjuster Review
+4262.53,91,2,theft,0,0,1,3,Special Investigations Unit
+393.9,148,0,property,1,0,0,1,Request Additional Documentation
+1864.0,111,3,weather,0,0,0,1,Request Additional Documentation
+6390.16,154,4,collision,0,0,0,3,Special Investigations Unit
+417.06,46,1,collision,1,0,0,4,Straight-Through Auto-Approve
+773.04,106,2,weather,1,0,1,2,Request Additional Documentation
+1015.31,161,2,property,0,0,1,1,Request Additional Documentation
+2065.6,213,3,property,1,0,1,1,Special Investigations Unit
+512.95,174,0,weather,0,1,1,1,Request Additional Documentation
+2197.78,192,2,weather,1,0,1,1,Request Additional Documentation
+17202.98,108,3,theft,1,0,1,1,Special Investigations Unit
+230.83,238,0,collision,1,0,1,4,Straight-Through Auto-Approve
+1328.77,121,2,medical,0,0,1,1,Request Additional Documentation
+4767.3,194,1,theft,0,0,1,3,Manual Adjuster Review
+2285.53,58,4,theft,0,0,1,2,Special Investigations Unit
+1704.64,213,1,theft,1,0,0,1,Request Additional Documentation
+2419.23,239,1,collision,0,1,0,2,Request Additional Documentation
+3161.34,232,4,weather,1,0,1,2,Special Investigations Unit
+347.79,223,0,collision,1,0,0,4,Straight-Through Auto-Approve
+1670.56,98,4,collision,0,0,1,3,Special Investigations Unit
+1323.37,166,2,weather,0,1,1,3,Manual Adjuster Review
+2707.43,160,4,collision,1,0,1,1,Special Investigations Unit
+1031.05,49,0,collision,1,0,1,2,Request Additional Documentation
+3887.63,225,3,property,0,0,1,1,Special Investigations Unit
+2787.52,142,3,theft,0,1,1,2,Special Investigations Unit
+680.22,203,0,weather,1,0,1,4,Straight-Through Auto-Approve
+727.09,136,2,weather,0,0,0,1,Request Additional Documentation
+375.17,230,1,property,1,0,0,2,Manual Adjuster Review
+1974.97,218,1,collision,0,0,1,3,Manual Adjuster Review
+5509.0,224,3,collision,1,0,0,1,Special Investigations Unit
+314.35,47,0,weather,1,0,1,5,Straight-Through Auto-Approve
+2490.65,102,1,collision,1,1,1,4,Manual Adjuster Review
+3626.66,128,4,medical,0,0,1,3,Special Investigations Unit
+6824.32,52,4,theft,0,0,1,1,Special Investigations Unit
+1300.85,209,0,property,1,0,0,4,Manual Adjuster Review
+1860.58,220,2,collision,0,0,1,4,Manual Adjuster Review
+1189.77,105,4,theft,0,0,1,2,Special Investigations Unit
+1186.67,38,2,property,0,0,0,1,Request Additional Documentation
+547.23,127,0,collision,1,0,1,2,Request Additional Documentation
+2224.85,93,4,collision,1,0,1,2,Special Investigations Unit
+1952.52,135,0,weather,0,0,1,2,Manual Adjuster Review
+317.55,183,0,collision,1,0,0,4,Straight-Through Auto-Approve
+514.57,198,0,collision,1,0,0,5,Straight-Through Auto-Approve
+4236.79,90,4,collision,1,0,1,2,Special Investigations Unit
+2154.51,213,1,medical,1,1,1,3,Manual Adjuster Review
+716.15,145,1,weather,1,0,1,4,Straight-Through Auto-Approve
+1667.58,221,2,medical,0,1,1,3,Manual Adjuster Review
+294.04,91,1,collision,0,1,0,5,Straight-Through Auto-Approve
+1829.9,216,3,collision,1,0,0,1,Request Additional Documentation
+1339.17,97,4,weather,0,0,1,1,Special Investigations Unit
+215.07,89,0,weather,1,0,0,4,Straight-Through Auto-Approve
+28261.85,119,2,theft,1,0,0,2,Special Investigations Unit
+551.5,74,2,weather,1,0,1,2,Request Additional Documentation
+881.89,102,2,medical,1,0,0,4,Manual Adjuster Review
+2501.81,119,0,weather,1,0,1,4,Manual Adjuster Review
+1140.6,38,2,property,1,0,1,4,Manual Adjuster Review
+1505.82,60,3,theft,1,0,1,1,Special Investigations Unit
+474.57,31,1,theft,0,0,0,1,Request Additional Documentation
+3922.56,220,0,weather,0,0,1,3,Manual Adjuster Review
+1970.25,180,1,property,0,0,1,2,Request Additional Documentation
+2220.64,121,1,weather,1,0,1,2,Request Additional Documentation
+802.39,172,0,collision,1,0,0,4,Straight-Through Auto-Approve
+272.94,60,0,weather,1,0,1,5,Straight-Through Auto-Approve
+935.27,224,0,weather,1,0,0,4,Straight-Through Auto-Approve
+518.7,155,0,collision,1,0,0,5,Straight-Through Auto-Approve
+392.64,39,1,collision,1,0,0,4,Straight-Through Auto-Approve
+1656.81,154,1,collision,1,0,1,2,Manual Adjuster Review
+3279.8,229,1,collision,1,0,1,3,Manual Adjuster Review
+381.1,164,0,theft,0,0,1,4,Straight-Through Auto-Approve
+12826.85,204,2,collision,0,0,1,3,Special Investigations Unit
+2131.97,131,1,collision,1,0,0,3,Manual Adjuster Review
+2594.41,72,2,collision,0,1,1,3,Special Investigations Unit
+297.17,220,1,property,1,0,0,4,Straight-Through Auto-Approve
+571.87,217,2,theft,1,0,1,2,Request Additional Documentation
+1674.87,141,1,weather,1,0,1,3,Manual Adjuster Review
+1515.68,60,3,collision,1,0,1,2,Request Additional Documentation
+763.18,73,1,weather,0,0,0,1,Request Additional Documentation
+484.15,100,2,property,0,0,0,3,Manual Adjuster Review
+445.43,208,0,collision,1,0,0,4,Straight-Through Auto-Approve
+2472.87,38,4,theft,1,0,1,3,Special Investigations Unit
+394.83,22,0,collision,1,0,0,5,Straight-Through Auto-Approve
+3364.21,215,5,theft,0,0,1,1,Special Investigations Unit
+215.99,112,1,weather,1,0,1,4,Straight-Through Auto-Approve
+643.8,132,0,weather,1,0,0,5,Straight-Through Auto-Approve
+3239.73,165,2,theft,1,0,1,2,Manual Adjuster Review
+6415.53,22,4,collision,0,0,1,1,Special Investigations Unit
+778.39,11,1,collision,0,1,1,2,Request Additional Documentation
+443.36,130,0,weather,1,0,1,5,Straight-Through Auto-Approve
+488.7,187,0,property,0,0,1,2,Request Additional Documentation
+1059.54,103,2,weather,1,0,1,3,Manual Adjuster Review
+8337.93,154,3,weather,1,0,1,3,Special Investigations Unit
+558.68,29,2,collision,0,0,1,2,Request Additional Documentation
+1112.0,95,0,weather,1,1,0,3,Manual Adjuster Review
+4438.06,140,2,theft,0,0,0,1,Special Investigations Unit
+2705.03,135,0,collision,1,0,0,4,Manual Adjuster Review
+2859.96,89,4,collision,1,0,0,3,Special Investigations Unit
+544.14,129,0,theft,1,0,1,4,Straight-Through Auto-Approve
+655.92,43,2,collision,0,1,0,2,Manual Adjuster Review
+6026.9,92,4,collision,0,0,0,1,Special Investigations Unit
+941.89,80,0,medical,1,0,0,4,Straight-Through Auto-Approve
+4931.14,49,0,property,1,0,1,3,Manual Adjuster Review
+4919.12,197,2,property,0,0,0,3,Special Investigations Unit
+223.41,171,2,medical,1,0,1,1,Request Additional Documentation
+689.87,106,1,collision,1,0,1,4,Straight-Through Auto-Approve
+2086.01,202,0,theft,1,0,1,4,Manual Adjuster Review
+556.71,134,0,theft,0,0,1,5,Straight-Through Auto-Approve
+1386.5,116,1,theft,1,0,1,2,Request Additional Documentation
+878.02,153,2,medical,1,1,0,2,Request Additional Documentation
+1605.77,35,0,collision,1,1,1,1,Request Additional Documentation
+5480.59,41,3,property,0,0,1,2,Special Investigations Unit
+1313.4,29,0,weather,1,0,1,3,Manual Adjuster Review
+367.77,203,0,collision,1,0,0,5,Straight-Through Auto-Approve
+487.3,151,2,weather,1,1,1,4,Manual Adjuster Review
+2522.72,170,3,collision,1,1,1,1,Special Investigations Unit
+2232.0,73,3,property,0,0,0,2,Special Investigations Unit
+489.28,29,0,collision,0,0,0,2,Request Additional Documentation
+1546.25,112,0,collision,1,0,1,4,Manual Adjuster Review
+1093.87,187,0,weather,0,1,1,2,Manual Adjuster Review
+277.03,79,0,property,1,0,0,4,Straight-Through Auto-Approve
+1195.93,111,1,collision,1,0,1,3,Manual Adjuster Review
+3568.19,130,0,theft,1,0,1,3,Manual Adjuster Review
+696.23,13,0,weather,1,0,0,5,Straight-Through Auto-Approve
+753.98,223,0,weather,1,0,0,5,Straight-Through Auto-Approve
+897.94,175,2,collision,0,0,1,3,Manual Adjuster Review
+1740.86,234,4,collision,0,0,1,3,Special Investigations Unit
+3970.62,42,1,collision,1,1,0,2,Manual Adjuster Review
+4926.97,16,0,weather,1,0,0,3,Manual Adjuster Review
+1611.38,201,2,weather,0,1,0,3,Manual Adjuster Review
+747.55,171,1,weather,0,1,1,2,Request Additional Documentation
+521.92,189,3,collision,0,0,0,1,Request Additional Documentation
+1315.78,227,2,collision,0,0,0,4,Manual Adjuster Review
+16191.58,55,2,property,0,1,1,1,Special Investigations Unit
+1477.84,235,5,weather,0,0,1,1,Special Investigations Unit
+3375.74,131,0,medical,1,0,1,4,Manual Adjuster Review
+1619.14,129,0,collision,1,0,1,3,Manual Adjuster Review
+87.07,184,1,theft,1,0,1,5,Straight-Through Auto-Approve
+440.26,166,1,collision,1,0,0,4,Straight-Through Auto-Approve
+3743.86,211,2,weather,0,0,1,2,Manual Adjuster Review
+3361.65,236,1,weather,1,0,0,3,Manual Adjuster Review
+249.2,206,2,theft,0,0,1,2,Request Additional Documentation
+5569.59,8,4,theft,0,1,1,2,Special Investigations Unit
+627.92,161,0,collision,1,0,0,5,Straight-Through Auto-Approve
+3053.0,181,2,property,1,0,1,2,Special Investigations Unit
+3554.42,2,2,theft,1,0,0,4,Manual Adjuster Review
+703.24,88,0,property,1,0,0,1,Request Additional Documentation
+657.11,49,1,collision,1,0,0,5,Straight-Through Auto-Approve
+4620.38,110,4,property,0,0,1,2,Special Investigations Unit
+2731.03,150,2,collision,1,0,0,4,Manual Adjuster Review
+7435.34,81,4,theft,0,0,0,2,Special Investigations Unit
+4643.63,150,4,weather,1,0,0,3,Special Investigations Unit
+4452.51,135,2,property,0,1,1,4,Manual Adjuster Review
+440.97,27,0,weather,0,0,1,2,Request Additional Documentation
+1718.82,39,2,weather,0,0,1,3,Manual Adjuster Review
+3293.1,143,2,weather,1,0,0,2,Manual Adjuster Review
+258.33,185,0,weather,1,0,1,5,Straight-Through Auto-Approve
+5417.68,201,4,collision,0,0,1,1,Special Investigations Unit
+2375.41,178,1,weather,1,0,1,3,Manual Adjuster Review
+569.6,62,2,collision,1,0,0,1,Request Additional Documentation
+1482.29,42,6,property,0,1,1,2,Special Investigations Unit
+167.85,61,0,weather,1,1,1,5,Straight-Through Auto-Approve
+491.91,176,1,collision,1,0,1,4,Straight-Through Auto-Approve
+2841.72,126,4,theft,0,1,1,2,Special Investigations Unit
+6547.66,25,5,collision,0,0,1,1,Special Investigations Unit
+606.63,200,1,collision,1,0,1,5,Straight-Through Auto-Approve
+1498.4,91,1,weather,1,0,0,4,Manual Adjuster Review
+1611.38,50,1,collision,1,0,1,4,Manual Adjuster Review
+469.48,179,0,collision,1,0,1,5,Straight-Through Auto-Approve
+424.52,51,1,collision,1,0,1,4,Straight-Through Auto-Approve
+12752.5,232,5,property,0,0,1,1,Special Investigations Unit
+677.1,52,1,collision,1,0,1,4,Straight-Through Auto-Approve
+8446.7,220,4,collision,0,0,1,2,Special Investigations Unit
+3081.92,10,2,theft,1,1,1,2,Special Investigations Unit
+511.78,212,1,weather,1,0,0,4,Straight-Through Auto-Approve
+31314.54,187,1,property,1,0,1,3,Manual Adjuster Review
+347.99,214,1,collision,0,0,0,4,Straight-Through Auto-Approve
+556.78,52,1,collision,1,0,0,5,Straight-Through Auto-Approve
+974.06,62,0,collision,0,0,0,4,Straight-Through Auto-Approve
+244.23,203,0,weather,1,0,1,5,Straight-Through Auto-Approve
+213.72,25,0,collision,1,0,1,5,Straight-Through Auto-Approve
+878.26,14,1,property,1,0,1,2,Request Additional Documentation
+3581.6,216,0,property,1,0,1,3,Manual Adjuster Review
+133.38,231,1,weather,1,0,0,5,Straight-Through Auto-Approve
+378.6,131,0,weather,0,0,1,5,Straight-Through Auto-Approve
+3291.04,42,2,theft,0,1,1,2,Special Investigations Unit
+298.83,224,1,weather,1,0,1,4,Straight-Through Auto-Approve
+2926.91,216,1,collision,0,0,0,4,Manual Adjuster Review
+588.66,131,1,collision,0,0,0,1,Request Additional Documentation
+362.56,52,1,theft,1,0,0,4,Straight-Through Auto-Approve
+1811.66,60,0,property,0,0,1,3,Manual Adjuster Review
+875.32,131,3,collision,0,0,0,1,Request Additional Documentation
+6409.5,191,3,property,1,0,1,1,Special Investigations Unit
+683.18,226,1,weather,1,0,0,4,Straight-Through Auto-Approve
+758.68,48,1,collision,1,0,1,5,Straight-Through Auto-Approve
+1727.8,93,5,theft,0,0,1,3,Special Investigations Unit

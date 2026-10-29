@@ -540,8 +540,14 @@ def test_cross_conversation_switching_audit(client: TestClient):
     assert len(convs) >= 4, "Must have at least 4 conversations persisted"
 
     target_prefixes = ["test_comm_uc1_", "test_comm_uc5_", "test_comm_uc8_", "test_comm_uc10_"]
+    checked = 0
     for prefix in target_prefixes:
-        matching = [c for c in convs if c["conversation_id"].startswith(prefix)]
+        # Only conversations that actually produced an arena can be restored; the store also holds
+        # historical runs whose synthesis failed for reasons outside this test's scope.
+        matching = [
+            c for c in convs
+            if c["conversation_id"].startswith(prefix) and c.get("status") != "synthesis_failed"
+        ]
         if matching:
             c = matching[0]
             get_resp = client.get(f"/api/v4/conversations/{c['conversation_id']}")
@@ -557,3 +563,5 @@ def test_cross_conversation_switching_audit(client: TestClient):
             if loaded.get("rounds_history"):
                 model = global_store.get_model(c["conversation_id"])
                 assert model is not None
+            checked += 1
+    assert checked >= 1, "No restorable commercial conversation was found to switch back to"

@@ -1,0 +1,401 @@
+{
+  "generated_at": "2026-10-29T22:51:59.688Z",
+  "results": [
+    {
+      "id": "uc1",
+      "title": "B2B Support Ticket Routing (classification, CSV)",
+      "checks": {
+        "dataset_ingested": {
+          "ok": true,
+          "detail": "support_tickets rows=600"
+        },
+        "chat_http_200": {
+          "ok": true,
+          "detail": "status=200"
+        },
+        "arena_preview": {
+          "ok": true,
+          "detail": "status=arena_preview msg=✨ Generated a live Arena preview for **SLA-Safe B2B Support Triage** bound to the environment's real state. Ask me in ch"
+        },
+        "arena_html_rendered": {
+          "ok": true,
+          "detail": "chars=18165"
+        },
+        "env_synthesized": {
+          "ok": true,
+          "detail": "chars=45516"
+        },
+        "env_not_placeholder": {
+          "ok": true,
+          "detail": "placeholder env would prove synthesis failed"
+        },
+        "task_title": {
+          "ok": true,
+          "detail": "SLA-Safe B2B Support Triage"
+        },
+        "action_count": {
+          "ok": true,
+          "detail": "4 actions"
+        },
+        "label_detected": {
+          "ok": true,
+          "detail": "resolution_queue"
+        },
+        "observations_derived_from_columns": {
+          "ok": true,
+          "detail": "15 features, label excluded"
+        },
+        "arena_iframe_alive": {
+          "ok": true,
+          "detail": "srcdoc:18165"
+        },
+        "training_queued": {
+          "ok": true,
+          "detail": "[\"run_training\"]"
+        },
+        "training_finished": {
+          "ok": true,
+          "detail": "target_achieved"
+        },
+        "rounds_recorded": {
+          "ok": true,
+          "detail": "1 rounds"
+        },
+        "metric_improved": {
+          "ok": true,
+          "detail": "stopped after round 1 at 87.04% (target reached)"
+        },
+        "metric_above_chance": {
+          "ok": true,
+          "detail": "87.04% (floor 45%)"
+        },
+        "live_interaction": {
+          "ok": true,
+          "detail": "status=200 action=Senior Support"
+        },
+        "export_parity": {
+          "ok": true,
+          "detail": "diff=2.980232238769531e-7"
+        }
+      },
+      "failures": [],
+      "warnings": [],
+      "dataset_id": "ds_22cdb104a4",
+      "conversation_id": "conv_1793313734813_kpm97",
+      "session": {
+        "status": "target_achieved",
+        "rounds": 1,
+        "metrics": [
+          {
+            "round": 1,
+            "metric": 87.04
+          }
+        ],
+        "final_metric": 87.04,
+        "model_artifacts": {
+          "has_model": true,
+          "latest_model_zip_path": "runs/conv_1793313734813_kpm97/model.zip"
+        }
+      },
+      "export": {
+        "parity": 2.980232238769531e-7,
+        "bundle": "/home/devuser/projects/RLHarness/backend/exported_bundles/conv_1793313734813_kpm97.runbundle"
+      },
+      "passed": true
+    },
+    {
+      "id": "uc2",
+      "title": "SaaS Renewal Save-Play Selection (classification, CSV)",
+      "checks": {
+        "dataset_ingested": {
+          "ok": true,
+          "detail": "saas_renewal_risk rows=500"
+        },
+        "chat_http_200": {
+          "ok": true,
+          "detail": "status=200"
+        },
+        "arena_preview": {
+          "ok": true,
+          "detail": "status=arena_preview msg=✨ Generated a live Arena preview for **ARR Renewal Play Triage Deck** bound to the environment's real state. Ask me in c"
+        },
+        "arena_html_rendered": {
+          "ok": true,
+          "detail": "chars=17646"
+        },
+        "env_synthesized": {
+          "ok": true,
+          "detail": "chars=40906"
+        },
+        "env_not_placeholder": {
+          "ok": true,
+          "detail": "placeholder env would prove synthesis failed"
+        },
+        "task_title": {
+          "ok": true,
+          "detail": "ARR Renewal Play Triage Deck"
+        },
+        "action_count": {
+          "ok": true,
+          "detail": "4 actions"
+        },
+        "label_detected": {
+          "ok": true,
+          "detail": "renewal_play"
+        },
+        "observations_derived_from_columns": {
+          "ok": true,
+          "detail": "9 features, label excluded"
+        },
+        "arena_iframe_alive": {
+          "ok": true,
+          "detail": "srcdoc:17646"
+        },
+        "training_queued": {
+          "ok": true,
+          "detail": "[\"run_training\"]"
+        },
+        "training_finished": {
+          "ok": true,
+          "detail": "target_achieved"
+        },
+        "rounds_recorded": {
+          "ok": true,
+          "detail": "1 rounds"
+        },
+        "metric_improved": {
+          "ok": true,
+          "detail": "stopped after round 1 at 95.36% (target reached)"
+        },
+        "metric_above_chance": {
+          "ok": true,
+          "detail": "95.36% (floor 45%)"
+        },
+        "live_interaction": {
+          "ok": true,
+          "detail": "status=200 action=Standard Renewal"
+        },
+        "export_parity": {
+          "ok": true,
+          "detail": "diff=2.384185791015625e-7"
+        }
+      },
+      "failures": [],
+      "warnings": [],
+      "dataset_id": "ds_ce47f896c6",
+      "conversation_id": "conv_1793313869997_2uj78",
+      "session": {
+        "status": "target_achieved",
+        "rounds": 1,
+        "metrics": [
+          {
+            "round": 1,
+            "metric": 95.36
+          }
+        ],
+        "final_metric": 95.36,
+        "model_artifacts": {
+          "has_model": true,
+          "latest_model_zip_path": "runs/conv_1793313869997_2uj78/model.zip"
+        }
+      },
+      "export": {
+        "parity": 2.384185791015625e-7,
+        "bundle": "/home/devuser/projects/RLHarness/backend/exported_bundles/conv_1793313869997_2uj78.runbundle"
+      },
+      "passed": true
+    },
+    {
+      "id": "uc3",
+      "title": "Insurance Claim Handling Path (classification, CSV)",
+      "checks": {
+        "dataset_ingested": {
+          "ok": true,
+          "detail": "insurance_claims rows=520"
+        },
+        "chat_http_200": {
+          "ok": true,
+          "detail": "status=200"
+        },
+        "arena_preview": {
+          "ok": true,
+          "detail": "status=arena_preview msg=✨ Generated a live Arena preview for **Claims Leakage Comes From Sending Agent** bound to the environment's real state. "
+        },
+        "arena_html_rendered": {
+          "ok": true,
+          "detail": "chars=17198"
+        },
+        "env_synthesized": {
+          "ok": true,
+          "detail": "chars=41492"
+        },
+        "env_not_placeholder": {
+          "ok": true,
+          "detail": "placeholder env would prove synthesis failed"
+        },
+        "task_title": {
+          "ok": true,
+          "detail": "Claims Leakage Comes From Sending Agent"
+        },
+        "action_count": {
+          "ok": true,
+          "detail": "4 actions"
+        },
+        "label_detected": {
+          "ok": true,
+          "detail": "handling_path"
+        },
+        "observations_derived_from_columns": {
+          "ok": true,
+          "detail": "12 features, label excluded"
+        },
+        "arena_iframe_alive": {
+          "ok": true,
+          "detail": "srcdoc:17198"
+        },
+        "training_queued": {
+          "ok": true,
+          "detail": "[\"run_training\"]"
+        },
+        "training_finished": {
+          "ok": true,
+          "detail": "target_achieved"
+        },
+        "rounds_recorded": {
+          "ok": true,
+          "detail": "1 rounds"
+        },
+        "metric_improved": {
+          "ok": true,
+          "detail": "stopped after round 1 at 81.2% (target reached)"
+        },
+        "metric_above_chance": {
+          "ok": true,
+          "detail": "81.2% (floor 45%)"
+        },
+        "live_interaction": {
+          "ok": true,
+          "detail": "status=200 action=Special Investigations Unit"
+        },
+        "export_parity": {
+          "ok": true,
+          "detail": "diff=5.066394805908203e-7"
+        }
+      },
+      "failures": [],
+      "warnings": [],
+      "dataset_id": "ds_9006c143c5",
+      "conversation_id": "conv_1793313986216_rn4hf",
+      "session": {
+        "status": "target_achieved",
+        "rounds": 1,
+        "metrics": [
+          {
+            "round": 1,
+            "metric": 81.2
+          }
+        ],
+        "final_metric": 81.2,
+        "model_artifacts": {
+          "has_model": true,
+          "latest_model_zip_path": "runs/conv_1793313986216_rn4hf/model.zip"
+        }
+      },
+      "export": {
+        "parity": 5.066394805908203e-7,
+        "bundle": "/home/devuser/projects/RLHarness/backend/exported_bundles/conv_1793313986216_rn4hf.runbundle"
+      },
+      "passed": true
+    },
+    {
+      "id": "uc4",
+      "title": "Peak-Season Inventory Replenishment (control, no dataset)",
+      "checks": {
+        "chat_http_200": {
+          "ok": true,
+          "detail": "status=200"
+        },
+        "arena_preview": {
+          "ok": true,
+          "detail": "status=arena_preview msg=✨ Generated a live Arena preview for **Peak-Season SKU Replenishment Triage Deck** bound to the environment's real state"
+        },
+        "arena_html_rendered": {
+          "ok": true,
+          "detail": "chars=19114"
+        },
+        "env_synthesized": {
+          "ok": true,
+          "detail": "chars=34958"
+        },
+        "env_not_placeholder": {
+          "ok": true,
+          "detail": "placeholder env would prove synthesis failed"
+        },
+        "task_title": {
+          "ok": true,
+          "detail": "Peak-Season SKU Replenishment Triage Deck"
+        },
+        "action_count": {
+          "ok": true,
+          "detail": "4 actions"
+        },
+        "arena_iframe_alive": {
+          "ok": true,
+          "detail": "srcdoc:19114"
+        },
+        "training_queued": {
+          "ok": true,
+          "detail": "[\"run_training\"]"
+        },
+        "training_finished": {
+          "ok": true,
+          "detail": "target_achieved"
+        },
+        "rounds_recorded": {
+          "ok": true,
+          "detail": "1 rounds"
+        },
+        "metric_improved": {
+          "ok": true,
+          "detail": "stopped after round 1 at 100% (target reached)"
+        },
+        "metric_above_chance": {
+          "ok": true,
+          "detail": "100% (floor 30%)"
+        },
+        "live_interaction": {
+          "ok": true,
+          "detail": "status=200 action=Order 150 Units"
+        },
+        "export_parity": {
+          "ok": true,
+          "detail": "diff=1.7881393432617188e-7"
+        }
+      },
+      "failures": [],
+      "warnings": [],
+      "conversation_id": "conv_1793314082313_4s91w",
+      "session": {
+        "status": "target_achieved",
+        "rounds": 1,
+        "metrics": [
+          {
+            "round": 1,
+            "metric": 100
+          }
+        ],
+        "final_metric": 100,
+        "model_artifacts": {
+          "has_model": true,
+          "latest_model_zip_path": "runs/conv_1793314082313_4s91w/model.zip"
+        }
+      },
+      "export": {
+        "parity": 1.7881393432617188e-7,
+        "bundle": "/home/devuser/projects/RLHarness/backend/exported_bundles/conv_1793314082313_4s91w.runbundle"
+      },
+      "passed": true
+    }
+  ],
+  "consoleErrors": []
+}

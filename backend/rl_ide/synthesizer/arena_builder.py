@@ -305,8 +305,14 @@ class JITArenaSynthesizer:
             </aside>
             """
 
+        longest_label = max([len(str(lbl)) for lbl in action_labels] or [0])
+        probs_cols = (
+            "grid-cols-2 sm:grid-cols-2 md:grid-cols-4" if longest_label > 10
+            else "grid-cols-3 sm:grid-cols-5 md:grid-cols-9"
+        )
+
         buttons_html = "".join([
-            f'<button onclick="sendInteractiveAction({idx})" class="px-3 py-2 bg-slate-900 hover:bg-{accent_color}-600/30 active:scale-95 text-slate-200 hover:text-white border border-slate-700 hover:border-{accent_color}-500 rounded-lg text-xs font-mono font-medium transition-all shadow truncate" title="{html_lib.escape(str(lbl))}">{html_lib.escape(str(lbl))}</button>'
+            f'<button onclick="sendInteractiveAction({idx})" class="px-3 py-2 min-h-[42px] bg-slate-900 hover:bg-{accent_color}-600/30 active:scale-95 text-slate-200 hover:text-white border border-slate-700 hover:border-{accent_color}-500 rounded-lg text-[11px] leading-tight font-mono font-medium transition-all shadow whitespace-normal break-words text-center" title="{html_lib.escape(str(lbl))}">{html_lib.escape(str(lbl))}</button>'
             for idx, lbl in enumerate(action_labels)
         ])
 
@@ -396,7 +402,7 @@ class JITArenaSynthesizer:
       <span>Action Probabilities (π)</span>
       <span id="selected-action-tag" class="text-{accent_color}-400 font-bold font-mono"></span>
     </div>
-    <div id="action-probs-bar" class="grid grid-cols-3 sm:grid-cols-5 md:grid-cols-9 gap-1.5 text-[10px] font-mono"></div>
+    <div id="action-probs-bar" class="grid {probs_cols} gap-1.5 text-[10px] font-mono"></div>
   </footer>
 
   <script>
@@ -409,7 +415,7 @@ class JITArenaSynthesizer:
     if (probsBar && ACTION_LABELS.length > 0) {{
       probsBar.innerHTML = ACTION_LABELS.map((lbl, idx) => `
         <div class="bg-slate-900 border border-slate-800 p-1.5 rounded flex flex-col gap-1">
-          <div class="truncate text-slate-400" title="${{lbl}}">${{lbl}}</div>
+          <div class="break-words leading-tight text-[9px] text-slate-400" title="${{lbl}}">${{lbl}}</div>
           <div class="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden">
             <div id="prob-bar-${{idx}}" class="bg-{accent_color}-500 h-full transition-all duration-150" style="width: 0%"></div>
           </div>
@@ -458,7 +464,13 @@ class JITArenaSynthesizer:
         }}
       }}
 
-      if (arrayValue) {{
+      // Only numeric, board-shaped arrays are drawn as clickable cells; text arrays (e.g. action
+      // labels) are rendered as readable entries instead of label fragments in tiny squares.
+      const cellLike = Boolean(arrayValue) && arrayValue.flat.every(cell => cell === null
+        || cell === undefined
+        || (typeof cell === 'number' && Number.isFinite(cell))
+        || (typeof cell === 'string' && /^[\\d.+-]+$/.test(cell.trim())));
+      if (arrayValue && cellLike) {{
         const interactive = arrayValue.flat.length === ACTION_LABELS.length;
         grid.style.display = 'grid';
         grid.style.gridTemplateColumns = `repeat(${{arrayValue.cols}}, minmax(0, 1fr))`;
@@ -472,6 +484,12 @@ class JITArenaSynthesizer:
           const cursor = interactive ? ' cursor-pointer' : '';
           return `<div${{click}} class="w-10 h-10 sm:w-12 sm:h-12 border rounded-lg flex items-center justify-center font-bold text-sm arena-cell${{cursor}} ${{style}}">${{label}}</div>`;
         }}).join('');
+      }} else if (arrayValue) {{
+        // Text/object arrays are labels, not board cells: show them in full as chips.
+        grid.style.display = 'flex';
+        grid.innerHTML = arrayValue.flat.slice(0, 12)
+          .map((cell) => `<div class="px-3 py-1.5 bg-slate-900 border border-slate-800 rounded-lg text-xs font-mono text-slate-200 whitespace-nowrap">${{String(cell)}}</div>`)
+          .join('');
       }} else {{
         grid.style.display = 'flex';
         grid.innerHTML = Object.entries(state)
