@@ -554,10 +554,30 @@ def get_conversation(conversation_id: str):
 
     # Reconstitute SessionState in global_store if not present
     existing_session = global_store.get_session(conversation_id)
-    if not existing_session and conv.get("blueprint_spec"):
+    if not existing_session:
         try:
-            bp = AgentBlueprintSpec.model_validate(conv["blueprint_spec"])
+            bp_dict = conv.get("blueprint_spec")
+            if bp_dict:
+                bp = AgentBlueprintSpec.model_validate(bp_dict)
+            else:
+                bp = AgentBlueprintSpec(
+                    task_title=conv.get("title") or "Synthesized Agent",
+                    observation_features=["f0", "f1"],
+                    action_labels=["Action 0", "Action 1"],
+                    target_metric_name="Success Rate",
+                    target_metric_threshold=85.0,
+                    max_auto_tune_rounds=5,
+                )
             t_params = conv.get("training_params", {}) or {}
+            env_code_val = conv.get("env_code") or conv.get("env_module_code") or ""
+            if not env_code_val and env_file.exists():
+                try:
+                    env_code_val = env_file.read_text(encoding="utf-8")
+                except Exception:
+                    env_code_val = ""
+            env_code_val = env_code_val or ""
+            arena_html_val = conv.get("arena_html") or ""
+
             session = SessionState(
                 session_id=conversation_id,
                 blueprint=bp,
@@ -569,8 +589,8 @@ def get_conversation(conversation_id: str):
                 target_threshold=t_params.get("target_metric_threshold", bp.target_metric_threshold or 90.0),
                 rounds_history=[RoundSnapshot.model_validate(r) for r in conv.get("rounds_history", [])],
                 episodes=conv.get("episodes", []),
-                env_module_code=conv.get("env_code", ""),
-                arena_html=conv.get("arena_html", ""),
+                env_module_code=env_code_val,
+                arena_html=arena_html_val,
                 latest_model_zip_path=conv.get("latest_model_zip_path"),
             )
             global_store.set_session(session)

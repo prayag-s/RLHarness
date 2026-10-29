@@ -752,6 +752,9 @@ class StudioOmniAgent:
             if verified:
                 current_env_code = healed_code
                 env_file.write_text(healed_code, encoding="utf-8")
+                session = self.session_store.get_session(conversation_id)
+                if session:
+                    session.env_module_code = healed_code
                 try:
                     updated_env_cls = load_synthesized_env_class(env_file)
                     active_env = instantiate_env(updated_env_cls)
@@ -781,6 +784,9 @@ class StudioOmniAgent:
             if verified:
                 current_env_code = healed_code
                 env_file.write_text(healed_code, encoding="utf-8")
+                session = self.session_store.get_session(conversation_id)
+                if session:
+                    session.env_module_code = healed_code
 
                 # Hot-swap env class in session store
                 try:
@@ -817,6 +823,9 @@ class StudioOmniAgent:
             if verified:
                 current_env_code = healed_code
                 env_file.write_text(healed_code, encoding="utf-8")
+                session = self.session_store.get_session(conversation_id)
+                if session:
+                    session.env_module_code = healed_code
 
                 try:
                     updated_env_cls = load_synthesized_env_class(env_file)
@@ -987,6 +996,7 @@ class StudioOmniAgent:
 
         effective_actions = list(intents)
         target_map = {
+            ExecutionTarget.ARENA_VISUAL_UI: StudioActionType.PREVIEW_OR_UPDATE_ARENA,
             ExecutionTarget.INFERENCE_STRATEGY: StudioActionType.PREVIEW_OR_UPDATE_ARENA,
             ExecutionTarget.REWARD_SHAPING: StudioActionType.UPDATE_AGENT_CHARACTERISTICS,
             ExecutionTarget.ENV_SIM_MECHANICS: StudioActionType.UPDATE_ENV_MECHANICS,
@@ -1044,42 +1054,49 @@ class StudioOmniAgent:
 
         # Check for specific reward tweaks
         additions = []
-        if "stalling" in fb or "quick" in fb or "faster" in fb:
-            additions.append('        # Quick win bonus & stalling penalty\n        steps = info.get("steps", 1)\n        reward_breakdown["quick_win_bonus"] = 2.0 / max(1, steps)\n        reward_breakdown["stalling_penalty"] = -0.05 * float(steps)\n')
+        additions.append(f"        # Behavior directive: {user_feedback}\n")
+        if "stalling" in fb or "quick" in fb or "bonus" in fb or "faster" in fb:
+            additions.append('        # Quick win bonus & stalling penalty\n        steps = info.get("step_count", info.get("steps", 1))\n        bd["quick_win_bonus"] = 2.0 / max(1, steps)\n        bd["stalling_penalty"] = -0.05 * float(steps)\n')
         if "aggressive" in fb or "fork" in fb:
-            additions.append('        # Tactical aggression & fork reward\n        reward_breakdown["tactical_aggression"] = 1.5\n')
+            additions.append('        # Tactical aggression & fork reward\n        bd["tactical_aggression"] = 1.5\n')
         if "center" in fb:
-            additions.append('        # Center control priority\n        reward_breakdown["center_control"] = 2.0\n')
+            additions.append('        # Center control priority\n        bd["center_control"] = 2.0\n')
         if "corner" in fb:
-            additions.append('        # Corner opening strategic bonus\n        if action in [0, 2, 6, 8]:\n            reward_breakdown["corner_opening_bonus"] = 2.0\n')
+            additions.append('        # Corner opening strategic bonus\n        if action in [0, 2, 6, 8]:\n            bd["corner_opening_bonus"] = 2.0\n')
         if "mistake" in fb or "penalize" in fb:
-            additions.append('        # Mistake avoidance penalty\n        reward_breakdown["mistake_penalty"] = -2.5\n')
+            additions.append('        # Mistake avoidance penalty\n        bd["mistake_penalty"] = -2.5\n')
         if "cardiac" in fb:
-            additions.append('        # Cardiac symptom safety: never deny cardiac cases, route to urgent review\n        if info.get("has_cardiac_symptoms", 0) and action == 3:\n            reward_breakdown["cardiac_denial_penalty"] = -10.0\n        elif info.get("has_cardiac_symptoms", 0) and action == 2:\n            reward_breakdown["cardiac_urgent_route_bonus"] = 5.0\n')
+            additions.append('        # Cardiac symptom safety: never deny cardiac cases, route to urgent review\n        if info.get("has_cardiac_symptoms", 0) and action == 3:\n            bd["cardiac_denial_penalty"] = -10.0\n        elif info.get("has_cardiac_symptoms", 0) and action == 2:\n            bd["cardiac_urgent_route_bonus"] = 5.0\n')
         if "verified" in fb or "payroll" in fb or "false positive" in fb:
-            additions.append('        # Reduce false positives on verified corporate payroll accounts\n        if info.get("is_verified_corporate", 0) and action != 0:\n            reward_breakdown["false_freeze_penalty"] = -5.0\n')
+            additions.append('        # Reduce false positives on verified corporate payroll accounts\n        if info.get("is_verified_corporate", 0) and action != 0:\n            bd["false_freeze_penalty"] = -5.0\n')
         if "clearance" in fb or "7 days" in fb or "forbid" in fb:
-            additions.append('        # Forbid clearance when > 7 days remaining\n        if info.get("day_of_sale", 0) <= 7 and action == 3:\n            reward_breakdown["premature_clearance_penalty"] = -8.0\n')
+            additions.append('        # Forbid clearance when > 7 days remaining\n        if info.get("day_of_sale", 0) <= 7 and action == 3:\n            bd["premature_clearance_penalty"] = -8.0\n')
         if "liability" in fb or "100,000" in fb or "100000" in fb:
-            additions.append('        # Strict liability cap verification over $100,000\n        if info.get("max_dollar_value", 0) >= 100000 and action != 1:\n            reward_breakdown["unlimited_liability_penalty"] = -6.0\n')
+            additions.append('        # Strict liability cap verification over $100,000\n        if info.get("max_dollar_value", 0) >= 100000 and action != 1:\n            bd["unlimited_liability_penalty"] = -6.0\n')
         if "obstacle" in fb or "safety" in fb:
-            additions.append('        # Increased obstacle safety clearance reward\n        reward_breakdown["obstacle_safety_clearance"] = 2.0\n')
+            additions.append('        # Increased obstacle safety clearance reward\n        bd["obstacle_safety_clearance"] = 2.0\n')
         if "login_drop" in fb or "discount" in fb or "vip" in fb:
-            additions.append('        # Penalize offering discount when login_drop_pct < 20%\n        if info.get("login_drop_pct", 0) < 20.0 and action == 2:\n            reward_breakdown["premature_discount_penalty"] = -5.0\n')
+            additions.append('        # Penalize offering discount when login_drop_pct < 20%\n        if info.get("login_drop_pct", 0) < 20.0 and action == 2:\n            bd["premature_discount_penalty"] = -5.0\n')
 
         if additions and "def compute_reward" in code:
             injection = "".join(additions)
             # Inject right before the return statement of compute_reward
-            ret_match = re.search(r"(def compute_reward[\s\S]*?)(return\s+.*?,.*?breakdown.*?\n)", code)
+            ret_match = re.search(r"(def compute_reward[\s\S]*?)(^[ \t]*return\s+[^\n]+\n)", code, re.MULTILINE)
             if ret_match:
-                prefix = ret_match.group(1)
-                ret_stmt = ret_match.group(2)
-                # Ensure terms are summed into total
-                sum_code = "        total_reward = float(sum(reward_breakdown.values()))\n        "
-                code = code.replace(ret_match.group(0), prefix + injection + sum_code + ret_stmt)
+                prefix = ret_match.group(1).rstrip() + "\n"
+                setup_dict = (
+                    "        if 'bd' not in locals():\n"
+                    "            bd = info.get('reward_breakdown', {})\n"
+                    "        reward_breakdown = bd\n"
+                )
+                sum_code = (
+                    "        total = float(sum(bd.values()))\n"
+                    "        total_reward = total\n"
+                )
+                code = code.replace(ret_match.group(0), prefix + setup_dict + injection + sum_code + "        return total, bd\n")
             else:
                 # Add comment and breakdown keys
-                code = code.replace("def compute_reward", "# Behavior directive: " + user_feedback[:40] + "\n    def compute_reward")
+                code = code.replace("def compute_reward", f"# Behavior directive: {user_feedback}\n    def compute_reward")
 
         return code
 

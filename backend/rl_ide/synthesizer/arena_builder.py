@@ -260,6 +260,11 @@ class JITArenaSynthesizer:
         sample_json = json.dumps(sample_state)
         action_labels_json = json.dumps(action_labels)
 
+        is_spatial_canvas = any(kw in style_query or kw in (blueprint.task_title or "").lower() or kw in (blueprint.domain_summary or "").lower() for kw in [
+            "rover", "robot", "amr", "warehouse robot", "loading dock", "obstacle", "spatial"
+        ])
+        canvas_html = '<canvas id="sim-canvas" width="480" height="280" class="rounded-xl border border-slate-800 bg-slate-950/80 shadow-inner max-w-full block"></canvas>' if is_spatial_canvas else ""
+
         # Dynamic scoreboard widget if requested
         scoreboard_html = ""
         if has_scoreboard:
@@ -271,6 +276,30 @@ class JITArenaSynthesizer:
               <div class="flex justify-between items-center"><span class="text-slate-400">Streak:</span><span id="score-streak" class="font-bold text-emerald-400">0</span></div>
             </aside>
             """
+
+        # Dynamic custom UI overlays / badges / meters requested by user
+        overlays = []
+        if "hipaa" in style_query or "boundary" in style_query or "vital" in style_query:
+            overlays.append(
+                '<div id="badge-hipaa" class="flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-950/80 border border-emerald-500/60 text-emerald-300 text-xs font-mono shadow-md">'
+                '<span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>'
+                '<span class="font-bold">HIPAA Boundary Verified</span>'
+                '</div>'
+            )
+        if "burn-rate" in style_query or "burn rate" in style_query or "$/hour" in style_query or "cloud burn" in style_query:
+            overlays.append(
+                '<div id="meter-burn-rate" class="flex items-center gap-2 px-3 py-1 rounded-lg bg-slate-900 border border-amber-500/50 text-xs font-mono shadow-md">'
+                '<span class="text-slate-400">Burn-Rate:</span>'
+                '<span id="val-burn-rate" class="font-bold text-amber-400">$12.50/hr</span>'
+                '</div>'
+            )
+        if has_arcade or "arcade" in style_query:
+            overlays.append(
+                '<div id="badge-arcade" class="px-2.5 py-1 rounded bg-fuchsia-950/80 border border-fuchsia-500/60 text-fuchsia-300 text-xs font-mono uppercase tracking-wider font-bold shadow-md">'
+                '🕹️ NEON ARCADE THEME'
+                '</div>'
+            )
+        custom_overlays_html = f'<div id="custom-restyle-overlays" class="flex flex-wrap items-center gap-2 my-1">{"".join(overlays)}</div>' if overlays else ""
 
         # Action control buttons
         buttons_html = "".join([
@@ -295,7 +324,7 @@ class JITArenaSynthesizer:
     .arena-cell:hover {{ transform: scale(1.04); }}
   </style>
 </head>
-<body class="p-3 bg-slate-950 text-slate-100 min-h-screen flex flex-col justify-between select-none {theme_class}">
+<body class="p-3 bg-slate-950 text-slate-100 min-h-screen flex flex-col justify-between select-none {theme_class} {'arcade-theme' if has_arcade else ''}">
 
   <!-- Live Mock Preview Banner -->
   <div id="mock-preview-banner" class="flex items-center justify-between px-3 py-1.5 rounded-lg bg-amber-950/70 border border-amber-600/60 text-amber-200 text-xs shadow-md mb-2">
@@ -330,6 +359,8 @@ class JITArenaSynthesizer:
     </div>
   </header>
 
+  {custom_overlays_html}
+
   <!-- Live Reward Breakdown Bar Strip -->
   <section class="py-1.5">
     <div class="text-[10px] font-semibold uppercase tracking-wider text-slate-500 mb-1">Live Reward Breakdown</div>
@@ -346,7 +377,10 @@ class JITArenaSynthesizer:
       <!-- Reactive State Display Canvas/Grid -->
       <div id="visual-stage-container" class="w-full flex-1 flex flex-col items-center justify-center gap-3">
         <div id="visual-metaphor-header" class="text-xs font-mono text-slate-400 uppercase tracking-widest">{task_title}</div>
+        {canvas_html}
         <div id="dynamic-state-grid" class="flex flex-wrap items-center justify-center gap-2 max-w-lg w-full"></div>
+        <div id="status-badge" class="px-3 py-1 bg-slate-800 border border-slate-700 rounded-full text-xs font-mono text-slate-300">Ready</div>
+      </div>
         <div id="status-badge" class="px-3 py-1 bg-slate-800 border border-slate-700 rounded-full text-xs font-mono text-slate-300">Ready</div>
       </div>
 

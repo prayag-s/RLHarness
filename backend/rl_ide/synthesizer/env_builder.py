@@ -148,14 +148,17 @@ class SynthesizedGymEnv(gym.Env):
         )
         self.action_space = spaces.Discrete(self.n_actions)
 
-        self.state_vars = {{}}
+        self.state_vars = {{f: 0.0 for f in self.observation_features}}
         self.step_count = 0
         self.done = False
         self.last_move = None
         has_board_schema = "board" in {state_schema} or self.n_actions == 9
         self.board = [0] * (self.n_actions if self.n_actions > 0 else 9) if has_board_schema else None
+        self.reset()
 
     def _get_obs(self) -> np.ndarray:
+        if not self.state_vars:
+            self.reset()
         obs = np.zeros({obs_dim}, dtype=np.float32)
         for i, f in enumerate(self.observation_features):
             obs[i] = float(self.state_vars.get(f, 0.0))
@@ -179,13 +182,16 @@ class SynthesizedGymEnv(gym.Env):
         }}
 
     def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
+        if not self.state_vars:
+            self.reset()
         self.step_count += 1
         act = min(max(0, int(action)), self.n_actions - 1)
         self.last_move = act
 
         for idx, f in enumerate(self.observation_features):
             delta = 0.5 if act == idx % self.n_actions else -0.1
-            self.state_vars[f] = float(np.clip(self.state_vars[f] + delta + random.uniform(-0.05, 0.05), -10.0, 10.0))
+            curr_val = self.state_vars.get(f, 0.0)
+            self.state_vars[f] = float(np.clip(curr_val + delta + random.uniform(-0.05, 0.05), -10.0, 10.0))
 
         terminated = (self.step_count >= 25)
         obs = self._get_obs()
@@ -198,12 +204,16 @@ class SynthesizedGymEnv(gym.Env):
         return obs, float(reward), terminated, False, info
 
     def compute_reward(self, obs, action, next_obs, info) -> tuple[float, dict[str, float]]:
+        if not self.state_vars:
+            self.reset()
         total = 0.0
         bd = info.get("reward_breakdown", {{}})
         total = float(sum(bd.values()))
         return total, bd
 
     def get_render_state(self) -> dict[str, Any]:
+        if not self.state_vars:
+            self.reset()
         res = {{f: float(self.state_vars.get(f, 0.0)) for f in self.observation_features}}
         schema = {state_schema}
         for k in schema:
@@ -219,6 +229,8 @@ class SynthesizedGymEnv(gym.Env):
         return self.get_render_state()
 
     def interactive_step(self, payload: dict[str, Any], policy_predict_fn: Callable = None, mode: str = "agent_vs_env") -> dict[str, Any]:
+        if not self.state_vars:
+            self.reset()
         if isinstance(payload, dict) and payload.get("reset"):
             self.reset()
             human_first = payload.get("human_first", True)
@@ -242,7 +254,17 @@ class SynthesizedGymEnv(gym.Env):
                 "status_text": "System reset to initial state.",
             }}
 
-        user_action = payload.get("user_action", 0) if isinstance(payload, dict) else payload
+        user_action = 0
+        if isinstance(payload, dict):
+            if "user_action" in payload:
+                user_action = payload["user_action"]
+            elif "cell" in payload:
+                user_action = payload["cell"]
+            elif "action" in payload and isinstance(payload["action"], (int, float)):
+                user_action = int(payload["action"])
+        elif isinstance(payload, (int, float)):
+            user_action = int(payload)
+
         if hasattr(self, "board") and self.board is not None:
             act_int = int(user_action)
             if act_int < len(self.board):

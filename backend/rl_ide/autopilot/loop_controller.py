@@ -20,7 +20,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from stable_baselines3 import PPO
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from rl_ide.architect.models import AgentBlueprintSpec
 from rl_ide.autopilot.auto_tuner import AutoTunerAgent, TuningResult
@@ -87,6 +87,13 @@ class SessionState(BaseModel):
     latest_model_zip_path: str | None = None
     error_message: str | None = None
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+    @field_validator("env_module_code", "arena_html", mode="before")
+    @classmethod
+    def _coerce_none_to_str(cls, v: Any) -> str:
+        if v is None:
+            return ""
+        return str(v)
 
 
 class SessionStateStore:
@@ -387,7 +394,7 @@ class AutonomousLoopController:
             # Stage 3.1: Warm-Start Behavioral Cloning (Round 1 ONLY, never when resuming past rounds)
             if r == 1 and not has_prior_rounds:
                 emit({"event": "warmstart_started", "round": 1, "message": "Running Warm-Start Behavioral Cloning on domain heuristics..."})
-                loss, acc = self._warmstart_from_demonstrations(model, env, epochs=40, lr=3e-3, num_samples=500)
+                loss, acc = self._warmstart_from_demonstrations(model, env, epochs=15, lr=3e-3, num_samples=150)
                 emit({
                     "event": "warmstart_completed",
                     "round": 1,
@@ -397,17 +404,17 @@ class AutonomousLoopController:
                 })
                 # Critic Pre-Calibration pass
                 emit({"event": "critic_warmup_started", "round": 1, "message": "Pre-calibrating Critic value network on warm-start baseline..."})
-                self._critic_pre_calibration(model, env, gamma=effective_gamma, epochs=10)
+                self._critic_pre_calibration(model, env, gamma=effective_gamma, epochs=5)
                 emit({"event": "critic_warmup_completed", "round": 1, "message": "Critic value network pre-calibrated."})
 
             # Stage 3.2: Critic Warmup (Round > 1)
             if r > 1 and replay_buffer:
                 emit({"event": "critic_warmup_started", "round": r, "message": "Calibrating value network on updated reward function..."})
-                self._critic_warmup(model, replay_buffer, gamma=effective_gamma, epochs=15)
+                self._critic_warmup(model, replay_buffer, gamma=effective_gamma, epochs=8)
                 emit({"event": "critic_warmup_completed", "round": r, "message": "Value network calibrated."})
 
-            # Stage 3.3: PPO Training Burst (512 timesteps for fast burst, up to 2048)
-            train_timesteps = 512 if episodes_per_burst <= 50 else min(2048, episodes_per_burst * 40)
+            # Stage 3.3: PPO Training Burst (fast burst, up to 1024)
+            train_timesteps = 256 if episodes_per_burst <= 50 else min(1024, episodes_per_burst * 25)
             try:
                 model.learn(total_timesteps=train_timesteps, reset_num_timesteps=False)
             except Exception:
