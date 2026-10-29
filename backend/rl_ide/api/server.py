@@ -54,7 +54,7 @@ from rl_ide.llm.client import (
     is_llm_ready,
     init_llm_state,
 )
-from rl_ide.synthesizer.env_builder import JITEnvironmentSynthesizer, load_synthesized_env_class
+from rl_ide.synthesizer.env_builder import JITEnvironmentSynthesizer, load_synthesized_env_class, instantiate_env
 from rl_ide.synthesizer.verifier import SandboxSmokeTester
 from rl_ide.synthesizer.arena_builder import JITArenaSynthesizer
 
@@ -816,7 +816,20 @@ def session_interact(session_id: str, req: InteractRequest):
     env = global_store.get_env(session_id)
     model = global_store.get_model(session_id)
     if not env:
-        ws_env_file = global_store.base_dir / session_id / "env_module.py"
+        ws_dir = global_store.base_dir / session_id
+        ws_env_file = ws_dir / "env_module.py"
+        if not ws_env_file.exists():
+            conv = get_conversation_store().get_conversation(session_id)
+            if conv:
+                if conv.get("env_code"):
+                    ws_dir.mkdir(parents=True, exist_ok=True)
+                    ws_env_file.write_text(conv["env_code"], encoding="utf-8")
+                elif conv.get("blueprint_spec"):
+                    bp = AgentBlueprintSpec.model_validate(conv["blueprint_spec"])
+                    code_str, _, _ = global_omni_agent.env_synthesizer.synthesize(blueprint=bp, workspace_dir=ws_dir)
+                    ws_dir.mkdir(parents=True, exist_ok=True)
+                    ws_env_file.write_text(code_str, encoding="utf-8")
+
         if ws_env_file.exists():
             try:
                 env_cls = load_synthesized_env_class(ws_env_file)

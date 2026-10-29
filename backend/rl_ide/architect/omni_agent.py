@@ -19,7 +19,7 @@ from typing import Any, Callable
 from pydantic import BaseModel, Field
 
 from rl_ide.architect.models import AgentBlueprintSpec, ClarifyingQuestion
-from rl_ide.architect.intake import IntakeArchitectAgent, is_tictactoe_intent
+from rl_ide.architect.intake import IntakeArchitectAgent, is_tictactoe_intent, is_tictactoe_spec
 from rl_ide.synthesizer.arena_builder import JITArenaSynthesizer
 from rl_ide.synthesizer.env_builder import JITEnvironmentSynthesizer, load_synthesized_env_class, instantiate_env
 from rl_ide.synthesizer.verifier import SandboxSmokeTester
@@ -36,7 +36,7 @@ from rl_ide.autopilot.loop_controller import (
     parse_nudge_meta_command,
 )
 from rl_ide.autopilot.auto_tuner import AutoTunerAgent
-from rl_ide.llm.client import BaseLLMClient, get_active_llm_client, FallbackCodeSynthesizer
+from rl_ide.llm.client import BaseLLMClient, get_active_llm_client, FallbackCodeSynthesizer, UnconfiguredLLMClient
 
 
 class StudioActionType(str, Enum):
@@ -134,13 +134,16 @@ class StudioOmniAgent:
         if not has_arena or not has_blueprint:
             return [StudioActionType.PREVIEW_OR_UPDATE_ARENA]
 
-        # 2. Arena Look / Restyling intent keywords
+        # 2. Arena Look / Restyling / UI / Interaction intent keywords
         arena_kws = [
-            "look", "theme", "color", "cell", "cells", "canvas",
+            "arena", "area", "arnea", "stage", "look", "theme", "color", "cell", "cells", "canvas",
             "scoreboard", "victory badge", "badge", "badges", "banner", "gold", "arcade", "hud", "radar",
             "display", "visual", "larger", "restyle", "redesign", "bigger", "retro",
             "meter", "arrow", "arrows", "highlight", "highlights", "hipaa", "power-flow", "flow",
-            "ui", "chart", "gauge", "burn-rate"
+            "ui", "chart", "gauge", "burn-rate", "play", "player", "play as", "play both",
+            "x and o", "x or o", "switch", "toggle", "first turn", "who goes first", "side", "sides",
+            "human", "symbol", "grid", "board", "controls", "button", "buttons", "interactive",
+            "interface", "layout", "click", "clickable"
         ]
         has_arena_intent = any(kw in text for kw in arena_kws) and not any(
             kw in text for kw in ["lock arena", "lock & start", "lock and start", "confirm and start", "start training"]
@@ -181,7 +184,7 @@ class StudioOmniAgent:
         has_diag_intent = any(kw in text for kw in diag_kws) or ("?" in text and not has_train_intent)
         is_pure_question = has_diag_intent and (
             text.startswith(("why", "what", "how", "explain", "tell me", "can you", "is there", "why did"))
-            or ("?" in text and not any(text.startswith(cmd) for cmd in ["change", "make", "update", "set", "train", "add", "penalize", "prioritize"]))
+            or ("?" in text and not any(text.startswith(cmd) for cmd in ["change", "make", "update", "set", "train", "add", "penalize", "prioritize", "chnge"]))
         )
 
         # Assemble composable actions
@@ -197,6 +200,16 @@ class StudioOmniAgent:
             actions.append(StudioActionType.PREVIEW_OR_UPDATE_ARENA)
         if has_train_intent:
             actions.append(StudioActionType.RUN_OR_CONTINUE_TRAINING)
+
+        # LLM intent classification fallback if keywords were ambiguous
+        if not actions and not is_pure_question and not isinstance(self.client, (FallbackCodeSynthesizer, UnconfiguredLLMClient)):
+            try:
+                llm_actions = self._classify_with_llm(user_message)
+                if llm_actions:
+                    return llm_actions
+            except Exception:
+                pass
+
         if not actions and has_diag_intent:
             actions.append(StudioActionType.CLARIFY_OR_DISCUSS)
 
@@ -204,6 +217,26 @@ class StudioOmniAgent:
             actions.append(StudioActionType.CLARIFY_OR_DISCUSS)
 
         return actions
+
+    def _classify_with_llm(self, user_message: str) -> list[StudioActionType]:
+        """Classifies intent using active LLM when static keywords do not trigger."""
+        prompt = (
+            f"Classify this user request for an autonomous RL studio into one of these actions:\n"
+            f"User message: \"{user_message}\"\n\n"
+            f"Valid actions:\n"
+            f"- PREVIEW_OR_UPDATE_ARENA: changing arena layout, UI, visual theme, canvas, board, player controls, or interactive play\n"
+            f"- UPDATE_AGENT_CHARACTERISTICS: changing reward terms, penalties, aggression, or strategy\n"
+            f"- UPDATE_ENV_MECHANICS: changing environment physics, rules, grid size, or action space\n"
+            f"- RUN_OR_CONTINUE_TRAINING: training for more rounds, episodes, or locking arena\n"
+            f"- CLARIFY_OR_DISCUSS: asking an informational question or discussing\n\n"
+            f"Respond with JSON format: {{\"action\": \"PREVIEW_OR_UPDATE_ARENA\"}}"
+        )
+        raw = self.client.generate_json(prompt, system_prompt="You are an intent classification agent.")
+        action_name = raw.get("action")
+        for act in StudioActionType:
+            if act.value == action_name or act.name == action_name:
+                return [act]
+        return []
 
     def process_message(
         self,
@@ -480,7 +513,34 @@ class StudioOmniAgent:
                 workspace_dir=ws_dir,
             )
             current_arena_html = new_arena_html
-            assistant_reply += "🎨 Visual Arena updated and hot-reloaded live. Neural network weights remain 100% intact!\n"
+
+            is_play_feature = any(kw in user_message.lower() for kw in ["x and o", "x or o", "play as", "switch", "both", "who goes first", "player side", "symbol"])
+            if is_play_feature and blueprint and is_tictactoe_spec(blueprint):
+                env_file = ws_dir / "env_module.py"
+                if env_file.exists():
+                    env_code_txt = env_file.read_text(encoding="utf-8")
+                    if "human_symbol" not in env_code_txt:
+                        code_str, _, env_cls = self.env_synthesizer.synthesize(blueprint=blueprint, workspace_dir=ws_dir)
+                        verified, healed_code, _ = self.smoke_tester.verify_and_heal(
+                            code_str=code_str,
+                            blueprint=blueprint,
+                            workspace_dir=ws_dir,
+                        )
+                        if verified:
+                            current_env_code = healed_code
+                            env_file.write_text(healed_code, encoding="utf-8")
+                            try:
+                                updated_env_cls = load_synthesized_env_class(env_file)
+                                active_env = instantiate_env(updated_env_cls)
+                                self.session_store.set_env(conversation_id, active_env)
+                            except Exception:
+                                pass
+
+            if is_play_feature:
+                assistant_reply += "🎮 Arena updated! Added interactive controls to play as either **X** (First Move) or **O** (Agent First), with live side switching. Neural network weights remain 100% intact!\n"
+            else:
+                assistant_reply += "🎨 Visual Arena updated and hot-reloaded live. Neural network weights remain 100% intact!\n"
+
             if broadcast_callback:
                 broadcast_callback({"event": "arena_updated", "arena_html": current_arena_html})
 
@@ -680,11 +740,28 @@ class StudioOmniAgent:
         return code
 
     def _generate_diagnostic_explanation(self, conv: dict[str, Any], query: str) -> str:
-        """Generates conversational diagnosis of agent telemetry and performance."""
+        """Generates conversational diagnosis or answers questions using LLM or smart telemetry."""
         best_metric = conv.get("best_metric", 0.0)
         curr_round = conv.get("current_round", 1)
         r_hist = conv.get("rounds_history", [])
         title = conv.get("title", "Agent")
+
+        if not isinstance(self.client, (FallbackCodeSynthesizer, UnconfiguredLLMClient)):
+            try:
+                prompt = (
+                    f"You are the AI Studio Assistant for an Autonomous Reinforcement Learning Platform.\n"
+                    f"Current Project: '{title}'.\n"
+                    f"Current Round: {curr_round}, Best Success Metric: {best_metric}%.\n"
+                    f"Rounds History: {r_hist}\n\n"
+                    f"The user says: \"{query}\"\n\n"
+                    f"Provide a helpful, precise, conversational response to the user. "
+                    f"If the user is asking to modify the arena, agent, or environment, explain clearly what actions you can take."
+                )
+                res = self.client.generate(prompt, timeout=15.0)
+                if res and res.strip():
+                    return res.strip()
+            except Exception:
+                pass
 
         rounds_summary = ""
         if r_hist:

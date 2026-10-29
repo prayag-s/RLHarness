@@ -128,20 +128,20 @@ class JITArenaSynthesizer:
         sample_arena_state: dict[str, Any] | None = None,
         workspace_dir: str | Path | None = None,
     ) -> str:
-        """Restyles arena.html according to user's visual request while preserving live mock animation and bi-directional bridges."""
+        """Updates and restyles arena.html according to user's request while preserving live mock animation and bi-directional bridges."""
         if not isinstance(self.client, FallbackCodeSynthesizer):
             try:
                 prompt = (
-                    f"You are restyling this self-contained `arena.html` according to the user's visual request:\n"
-                    f"User Visual Request: \"{user_visual_request}\"\n\n"
+                    f"You are updating and restyling this self-contained `arena.html` according to the user's request:\n"
+                    f"User Request: \"{user_visual_request}\"\n\n"
                     f"Current Arena HTML:\n{current_arena_html[:6000] if current_arena_html else ''}\n\n"
                     f"Blueprint: {blueprint.model_dump_json(indent=2)}\n\n"
                     f"REQUIREMENTS:\n"
-                    f"1. Apply the user's visual styling (e.g. colors, scoreboard, badges, layouts, sizing, themes).\n"
+                    f"1. Apply the user's visual styling (e.g. colors, scoreboard, badges, layouts, sizing, themes) and interactive features (e.g. controls to play both X and O, side selector buttons, reset).\n"
                     f"2. PRESERVE `startMockAnimationLoop()`, `SET_ARENA_MODE`, `ARENA_UPDATE`, and `ARENA_INTERACT` functionality.\n"
                     f"3. Return ONLY valid HTML inside ```html ... ```."
                 )
-                raw = self.client.generate(prompt, system_prompt=ARENA_SYNTHESIZER_SYSTEM_PROMPT, timeout=25.0)
+                raw = self.client.generate(prompt, system_prompt=ARENA_SYNTHESIZER_SYSTEM_PROMPT, timeout=30.0)
                 extracted = extract_html_code(raw)
                 if extracted and "ARENA_UPDATE" in extracted and "startMockAnimationLoop" in extracted:
                     healed = heal_arena_html_scripts(extracted)
@@ -298,9 +298,26 @@ class JITArenaSynthesizer:
             domain_html = f"""
             {victory_badge_html}
             {scoreboard_html}
-            <!-- Tic-Tac-Toe 3x3 Grid -->
+            <!-- Tic-Tac-Toe 3x3 Grid Stage -->
             <div class="flex flex-col items-center justify-center py-4">
-              <div class="text-sm font-medium text-slate-400 mb-3" id="game-status-label">Turn: Agent (X)</div>
+              <!-- Player Side / First Turn Controls -->
+              <div class="mb-3 flex flex-wrap items-center justify-center gap-2 bg-slate-900/90 border border-slate-700/80 p-2 rounded-xl shadow-lg">
+                <span class="text-xs font-bold text-slate-400 px-1">Play As:</span>
+                <button id="btn-play-x" onclick="setPlayerSide('X')" class="px-3 py-1.5 text-xs font-bold rounded-lg transition-all border border-cyan-500/80 bg-cyan-950 text-cyan-300 shadow-cyan-500/30 shadow-md flex items-center gap-1.5 cursor-pointer">
+                  <span>❌</span>
+                  <span>User as X (1st)</span>
+                </button>
+                <button id="btn-play-o" onclick="setPlayerSide('O')" class="px-3 py-1.5 text-xs font-bold rounded-lg transition-all border border-slate-700 bg-slate-800 text-slate-400 hover:text-slate-200 flex items-center gap-1.5 cursor-pointer">
+                  <span>⭕</span>
+                  <span>User as O (Agent 1st)</span>
+                </button>
+                <button onclick="resetBoard()" class="ml-1 px-3 py-1.5 text-xs font-semibold rounded-lg bg-indigo-600/80 hover:bg-indigo-500 text-white transition-all shadow flex items-center gap-1 cursor-pointer">
+                  <span>🔄</span>
+                  <span>Reset</span>
+                </button>
+              </div>
+
+              <div class="text-sm font-medium text-slate-400 mb-3" id="game-status-label">Turn: User (X)</div>
               <div class="grid grid-cols-3 gap-3 bg-slate-900/80 p-4 rounded-2xl border {border_accent}">
                 <button onclick="cellClick(0)" id="cell-0" class="{cell_dim} bg-slate-800 hover:bg-slate-700/80 rounded-xl font-black transition-all flex items-center justify-center text-slate-600 cursor-pointer"></button>
                 <button onclick="cellClick(1)" id="cell-1" class="{cell_dim} bg-slate-800 hover:bg-slate-700/80 rounded-xl font-black transition-all flex items-center justify-center text-slate-600 cursor-pointer"></button>
@@ -312,17 +329,36 @@ class JITArenaSynthesizer:
                 <button onclick="cellClick(7)" id="cell-7" class="{cell_dim} bg-slate-800 hover:bg-slate-700/80 rounded-xl font-black transition-all flex items-center justify-center text-slate-600 cursor-pointer"></button>
                 <button onclick="cellClick(8)" id="cell-8" class="{cell_dim} bg-slate-800 hover:bg-slate-700/80 rounded-xl font-black transition-all flex items-center justify-center text-slate-600 cursor-pointer"></button>
               </div>
-              <div class="mt-4 flex gap-3">
-                <button onclick="resetBoard()" class="px-4 py-1.5 bg-indigo-600/80 hover:bg-indigo-500 rounded-lg text-xs font-semibold text-white transition-all shadow">
-                  🔄 Reset / Play as O
-                </button>
-              </div>
             </div>
             """
             domain_js = f"""
             const HAS_GOLD = {'true' if has_gold else 'false'};
             const HAS_WIN_PROBS = {'true' if has_win_probs else 'false'};
             const CELL_DIM = "{cell_dim}";
+
+            let currentHumanSymbol = 'X';
+            let humanFirst = true;
+
+            function setPlayerSide(sym) {{
+              currentHumanSymbol = sym;
+              humanFirst = (sym === 'X');
+              const btnX = document.getElementById('btn-play-x');
+              const btnO = document.getElementById('btn-play-o');
+              if (btnX && btnO) {{
+                if (sym === 'X') {{
+                  btnX.className = 'px-3 py-1.5 text-xs font-bold rounded-lg transition-all border border-cyan-500/80 bg-cyan-950 text-cyan-300 shadow-cyan-500/30 shadow-md flex items-center gap-1.5 cursor-pointer';
+                  btnO.className = 'px-3 py-1.5 text-xs font-bold rounded-lg transition-all border border-slate-700 bg-slate-800 text-slate-400 hover:text-slate-200 flex items-center gap-1.5 cursor-pointer';
+                }} else {{
+                  btnO.className = 'px-3 py-1.5 text-xs font-bold rounded-lg transition-all border border-rose-500/80 bg-rose-950 text-rose-300 shadow-rose-500/30 shadow-md flex items-center gap-1.5 cursor-pointer';
+                  btnX.className = 'px-3 py-1.5 text-xs font-bold rounded-lg transition-all border border-slate-700 bg-slate-800 text-slate-400 hover:text-slate-200 flex items-center gap-1.5 cursor-pointer';
+                }}
+              }}
+              const status = document.getElementById('game-status-label');
+              if (status) {{
+                status.innerText = sym === 'X' ? 'Turn: User (X) — Click an empty cell' : 'Turn: Agent (X) — Thinking...';
+              }}
+              resetBoard();
+            }}
 
             function renderDomainState(state) {{
               if (!state || !state.board) return;
@@ -351,17 +387,35 @@ class JITArenaSynthesizer:
                 }}
               }}
               const status = document.getElementById('game-status-label');
-              if (status && state.game_status) {{
-                status.innerText = 'Status: ' + state.game_status + (state.winner !== null ? ' (Winner: ' + state.winner + ')' : '');
+              if (status) {{
+                if (state.winner !== null && state.winner !== undefined) {{
+                  if (state.winner === 1) {{
+                    status.innerText = currentHumanSymbol === 'X' ? '🎉 Victory! You won as X!' : '🤖 Agent won as X!';
+                  }} else if (state.winner === -1) {{
+                    status.innerText = currentHumanSymbol === 'O' ? '🎉 Victory! You won as O!' : '🤖 Agent won as O!';
+                  }} else if (state.winner === 0) {{
+                    status.innerText = '🤝 Match Drawn! Flawless defense.';
+                  }}
+                }} else if (state.game_status) {{
+                  status.innerText = 'Status: ' + state.game_status;
+                }}
               }}
             }}
 
             function cellClick(idx) {{
-              sendInteraction({{ user_action: idx }});
+              sendInteraction({{
+                user_action: idx,
+                human_symbol: currentHumanSymbol,
+                human_first: humanFirst
+              }});
             }}
 
             function resetBoard() {{
-              sendInteraction({{ reset: true }});
+              sendInteraction({{
+                reset: true,
+                human_symbol: currentHumanSymbol,
+                human_first: humanFirst
+              }});
             }}
 
             // --- Mock Animation Engine for Tic-Tac-Toe ---

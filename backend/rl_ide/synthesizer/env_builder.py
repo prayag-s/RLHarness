@@ -708,69 +708,116 @@ class SynthesizedGymEnv(gym.Env):
         }}
 
     def interactive_step(self, payload: dict[str, Any], policy_predict_fn: Callable) -> dict[str, Any]:
-        """Handles human play from arena.html."""
+        """Handles human play from arena.html for both X and O, and first-turn selection."""
+        human_sym = str(payload.get("human_symbol", "O")).upper()
+        if human_sym not in ("X", "O"):
+            human_sym = "O"
+
+        human_first = payload.get("human_first")
+        if human_first is None:
+            human_first = (human_sym == "X")
+        else:
+            human_first = bool(human_first)
+
+        # Board representation: 1 = X, -1 = O
+        human_val = 1 if human_sym == "X" else -1
+        agent_val = -human_val
+        agent_sym = "X" if agent_val == 1 else "O"
+
         if payload.get("reset"):
             self.board.fill(0)
             self.step_count = 0
             self.game_status = "in_progress"
             self.winner = None
             self.last_move = None
-            human_first = bool(payload.get("human_first", True))
             self.agent_plays_first = not human_first
+
             if not human_first:
-                # Agent makes first move immediately
-                obs = self._get_obs()
-                action_idx, probs = policy_predict_fn(obs)
+                # Agent makes opening move
+                agent_obs = np.zeros(10, dtype=np.float32)
+                agent_obs[:9] = (self.board * agent_val).astype(np.float32)
+                agent_obs[9] = 1.0  # Agent moved first
+
+                action_idx, probs = policy_predict_fn(agent_obs)
                 action_idx = int(action_idx)
                 valid_actions = self.get_valid_actions()
                 if valid_actions and action_idx not in valid_actions:
                     action_idx = int(valid_actions[0])
-                self.board[action_idx] = 1
+
+                self.board[action_idx] = agent_val
                 self.last_move = action_idx
                 agent_label = self.action_labels[action_idx]
                 return {{
                     "arena_state": self.render_arena_state(),
                     "agent_action_label": agent_label,
-                    "action_probs": [float(p) for p in probs],
-                    "status_text": f"Agent opened with {{agent_label}}. Your turn to play as O!",
+                    "action_probs": [float(p) for p in probs] if probs else [0.0] * 9,
+                    "status_text": f"Agent opened with {{agent_label}} as {{agent_sym}}. Your turn to play as {{human_sym}}!",
                 }}
             return {{
                 "arena_state": self.render_arena_state(),
                 "agent_action_label": "None",
                 "action_probs": [1.0 / 9] * 9,
-                "status_text": "Board reset. Your turn to play as O!",
+                "status_text": f"Board reset. You are playing as {{human_sym}} (First Move). Click any cell!",
             }}
 
         human_cell = payload.get("user_action")
         if human_cell is not None:
             human_cell = int(human_cell)
             if 0 <= human_cell < 9 and self.board[human_cell] == 0:
-                self.board[human_cell] = -1
-                if self._check_winner() is not None:
-                    res = self._check_winner()
+                self.board[human_cell] = human_val
+                res = self._check_winner()
+                if res is not None:
                     self.winner = res
-                    self.game_status = "human_won" if res == -1 else "draw"
+                    self.game_status = "human_won" if res == human_val else ("draw" if res == 0 else "agent_won")
+                    msg = f"🎉 Victory! You won as {{human_sym}}!" if res == human_val else ("🤝 Match Drawn!" if res == 0 else f"🤖 Agent won as {{agent_sym}}!")
                     return {{
                         "arena_state": self.render_arena_state(),
                         "agent_action_label": "Game Over",
                         "action_probs": [0.0] * 9,
-                        "status_text": f"Game Over: {{self.game_status}}",
+                        "status_text": msg,
                     }}
 
         # Agent responds
-        obs = self._get_obs()
-        action_idx, probs = policy_predict_fn(obs)
+        valid_actions = self.get_valid_actions()
+        if not valid_actions:
+            self.winner = 0
+            self.game_status = "draw"
+            return {{
+                "arena_state": self.render_arena_state(),
+                "agent_action_label": "Draw",
+                "action_probs": [0.0] * 9,
+                "status_text": "🤝 Match Drawn!",
+            }}
+
+        # Observation for agent policy (internal coordinate frame: agent is +1, opponent is -1)
+        agent_obs = np.zeros(10, dtype=np.float32)
+        agent_obs[:9] = (self.board * agent_val).astype(np.float32)
+        agent_obs[9] = 1.0 if not human_first else -1.0
+
+        action_idx, probs = policy_predict_fn(agent_obs)
         action_idx = int(action_idx)
 
-        # Critical & Valid action masking
-        valid_actions = self.get_valid_actions()
-        critical_actions = self.get_critical_actions()
-        target_actions = critical_actions if (critical_actions and len(critical_actions) > 0) else valid_actions
+        # Tactical win/block checks for agent
+        win_moves = []
+        for cell in valid_actions:
+            self.board[cell] = agent_val
+            if self._check_winner() == agent_val:
+                win_moves.append(cell)
+            self.board[cell] = 0
+
+        block_moves = []
+        for cell in valid_actions:
+            self.board[cell] = human_val
+            if self._check_winner() == human_val:
+                block_moves.append(cell)
+            self.board[cell] = 0
+
+        target_actions = win_moves if win_moves else (block_moves if block_moves else valid_actions)
 
         if target_actions:
             masked_probs = np.zeros(9, dtype=np.float32)
             for va in target_actions:
-                masked_probs[va] = probs[va] if va < len(probs) else 1.0
+                masked_probs[va] = probs[va] if (probs and va < len(probs)) else 1.0
             if masked_probs.sum() > 0:
                 masked_probs /= masked_probs.sum()
                 action_idx = int(np.argmax(masked_probs))
@@ -779,20 +826,22 @@ class SynthesizedGymEnv(gym.Env):
             probs = masked_probs.tolist()
 
         # Apply agent move
-        self.board[action_idx] = 1
+        self.board[action_idx] = agent_val
+        self.last_move = action_idx
         agent_label = self.action_labels[action_idx]
-        status_text = f"Agent played {{agent_label}}"
 
         res = self._check_winner()
         if res is not None:
             self.winner = res
-            self.game_status = "agent_won" if res == 1 else ("draw" if res == 0 else "human_won")
-            status_text = f"Game Over: {{self.game_status}}"
+            self.game_status = "agent_won" if res == agent_val else ("draw" if res == 0 else "human_won")
+            status_text = f"🤖 Agent played {{agent_label}} as {{agent_sym}} and won!" if res == agent_val else ("🤝 Match Drawn!" if res == 0 else f"🎉 Victory! You won as {{human_sym}}!")
+        else:
+            status_text = f"Agent placed {{agent_sym}} at {{agent_label}}. Your turn ({{human_sym}})!"
 
         return {{
             "arena_state": self.render_arena_state(),
             "agent_action_label": agent_label,
-            "action_probs": [float(p) for p in probs],
+            "action_probs": [float(p) for p in probs] if probs else [0.0] * 9,
             "status_text": status_text,
         }}
 
