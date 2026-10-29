@@ -607,6 +607,14 @@ def update_conversation_params(conversation_id: str, req: UpdateConversationPara
     return updated
 
 
+@app.delete("/api/v4/conversations")
+def clear_all_conversations():
+    """Deletes all conversations and cleans up all associated workspace files."""
+    conv_store = get_conversation_store()
+    deleted_count = conv_store.clear_all()
+    return {"success": True, "deleted_count": deleted_count}
+
+
 @app.delete("/api/v4/conversations/{conversation_id}")
 def delete_conversation(conversation_id: str):
     """Deletes a conversation and its workspace files."""

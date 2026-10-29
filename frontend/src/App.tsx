@@ -44,6 +44,7 @@ import {
   fetchConversations,
   fetchConversation,
   deleteConversation,
+  clearAllConversations,
 } from './services/api'
 
 export const App: React.FC = () => {
@@ -328,6 +329,18 @@ export const App: React.FC = () => {
       addTimelineItem('Conversation Deleted', `Session ${cid} removed.`, 'info', 'info')
     } catch (err: any) {
       console.error('Failed to delete conversation', err)
+    }
+  }
+
+  const handleClearAllConversations = async () => {
+    try {
+      await clearAllConversations()
+      handleNewAgent()
+      await loadConversationsList()
+      addTimelineItem('History Cleared', 'All saved past conversations have been deleted.', 'info', 'info')
+    } catch (err: any) {
+      console.error('Failed to clear conversations', err)
+      addTimelineItem('Error', 'Failed to clear conversations history.', 'error', 'warning')
     }
   }
 
@@ -990,6 +1003,7 @@ export const App: React.FC = () => {
         onSelectConversation={handleSelectConversation}
         onNewAgent={handleNewAgent}
         onDeleteConversation={handleDeleteConversation}
+        onClearAll={handleClearAllConversations}
         isLoading={isLoadingConversations}
       />
 

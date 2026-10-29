@@ -22,6 +22,7 @@ interface ConversationSidebarProps {
   onSelectConversation: (conversationId: string) => void
   onNewAgent: () => void
   onDeleteConversation: (conversationId: string) => void
+  onClearAll?: () => void
   isLoading?: boolean
 }
 
@@ -33,6 +34,7 @@ export const ConversationSidebar: React.FC<ConversationSidebarProps> = ({
   onSelectConversation,
   onNewAgent,
   onDeleteConversation,
+  onClearAll,
   isLoading = false,
 }) => {
   if (!isOpen) return null
@@ -125,18 +127,33 @@ export const ConversationSidebar: React.FC<ConversationSidebarProps> = ({
           </button>
         </div>
 
-        {/* [+ New Agent] Action Button */}
-        <div className="p-3 border-b border-gray-800/80 bg-gray-950/90">
+        {/* [+ New Agent] & Clear Actions */}
+        <div className="p-3 border-b border-gray-800/80 bg-gray-950/90 flex items-center gap-2">
           <button
             onClick={() => {
               onNewAgent()
               onClose()
             }}
-            className="w-full py-2 px-3 rounded-lg bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white text-xs font-bold flex items-center justify-center space-x-2 shadow-md transition active:scale-[0.99]"
+            className="flex-1 py-2 px-3 rounded-lg bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white text-xs font-bold flex items-center justify-center space-x-2 shadow-md transition active:scale-[0.99]"
           >
             <Plus className="h-4 w-4" />
             <span>+ New Agent Synthesis</span>
           </button>
+          {onClearAll && conversations.length > 0 && (
+            <button
+              type="button"
+              onClick={() => {
+                if (window.confirm(`Delete all ${conversations.length} saved past conversations? This cannot be undone.`)) {
+                  onClearAll()
+                }
+              }}
+              className="py-2 px-2.5 rounded-lg border border-rose-900/60 bg-rose-950/30 hover:bg-rose-950/80 hover:border-rose-700 text-rose-300 text-xs font-semibold flex items-center justify-center space-x-1.5 transition active:scale-[0.99]"
+              title="Delete all past conversations"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              <span>Clear All</span>
+            </button>
+          )}
         </div>
 
         {/* Conversations List */}

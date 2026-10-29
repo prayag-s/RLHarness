@@ -251,6 +251,16 @@ export async function updateConversationParams(
   return res.json()
 }
 
+export async function clearAllConversations(): Promise<{ success: boolean; deleted_count: number }> {
+  const res = await fetch(`${API_V4}/conversations`, {
+    method: 'DELETE',
+  })
+  if (!res.ok) {
+    throw new Error('Failed to clear conversations')
+  }
+  return res.json()
+}
+
 export async function deleteConversation(conversationId: string): Promise<any> {
   const res = await fetch(`${API_V4}/conversations/${conversationId}`, {
     method: 'DELETE',

@@ -419,6 +419,35 @@ class ConversationStore:
 
         return True
 
+    def clear_all(self) -> int:
+        """Deletes all conversation records and cleans up all workspace & run session folders."""
+        with self._get_connection() as conn:
+            cur = conn.execute("SELECT conversation_id FROM conversations;")
+            cids = [r["conversation_id"] for r in cur.fetchall()]
+            conn.execute("DELETE FROM conversations;")
+            conn.commit()
+
+        # Remove all workspace directories
+        if self.workspaces_dir.exists():
+            for item in self.workspaces_dir.iterdir():
+                if item.is_dir():
+                    try:
+                        shutil.rmtree(item, ignore_errors=True)
+                    except Exception:
+                        pass
+
+        # Remove conversation runs subdirectories (keep conversations.db and runs dir itself)
+        runs_path = Path("runs")
+        if runs_path.exists():
+            for item in runs_path.iterdir():
+                if item.is_dir():
+                    try:
+                        shutil.rmtree(item, ignore_errors=True)
+                    except Exception:
+                        pass
+
+        return len(cids)
+
 
 # Global Singleton Store
 _global_conversation_store: ConversationStore | None = None
