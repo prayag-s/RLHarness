@@ -1,9 +1,9 @@
 # RL-Native Agent IDE — Progress & Session Handoff Log
 
-**Project:** RL-Native Agent Studio v4.2 (Continuous Conversational Studio & Mock-Animated Arena)  
+**Project:** RL-Native Agent Studio v4.3 (Agentic Chat Planner & Multi-Layer Code Executor)  
 **Last Updated:** 2026-10-29  
-**Current Status:** v4.2 Upgrade Complete — Continuous Conversational Studio, Instant Mock-Animated Arenas, 10 Commercial Use Cases End-to-End Audited and Verified across Live Browser and Backend.  
-- **Backend Tests:** 40 / 40 Tests Passing (100% Green across all test suites, including `test_v4_2_commercial_suite.py`).
+**Current Status:** v4.3 Agentic Chat Planner & Multi-Layer Code Executor Implemented & Verified. Replaces rigid intent routing with context-aware ChatActionPlan, AST-validated inference patching, multi-target execution chaining, and strict zero-mutation honesty guardrails.  
+- **Backend Tests:** 43 / 43 Core Tests Passing (100% Green across all suites, including `test_agentic_chat_planner.py`).
 - **Live Browser Audit:** 11 / 11 Scenarios Passing (0 browser console errors, 0 duplicate key warnings, 0 unhandled promise rejections).
 - **Frontend Build:** `npm run build` clean (0 TypeScript / Vite errors, 1599 modules transformed).
 - **Git Commit:** `f3ed087` (`feat(conversations): add clear all conversations endpoint and UI action, purge stale test runs`) & `26813d2` (`feat(v4.2): complete 10-domain commercial e2e audit with onnx parity and full browser verification`).
@@ -429,5 +429,65 @@ During the end-to-end execution of the 10 Commercial Use Cases across backend an
   - Screenshots: `test_screenshots/commercial_suite/` (11 high-resolution verification PNGs).
   - Browser Test Script: `browser_test_10_commercial_usecases.js`.
   - Regression Test File: `backend/tests/test_v4_2_commercial_suite.py`.
+
+---
+
+## 6. Agentic Chat Planner & Multi-Layer Code Executor (v4.3 Milestone)
+
+### 6.1 Architectural Overview
+The conversational layer has been upgraded from rigid keyword/intent enum matching to a **Code-Aware Agentic Chat Planner & Multi-Layer Code Executor**. The planner inspects both the user prompt and the existing `env_module.py` implementation to decompose complex requests into targeted execution layers.
+
+```
+                                  +---------------------------------------+
+                                  |            User Chat Prompt           |
+                                  +---------------------------------------+
+                                                      │
+                                                      ▼
+                                  +---------------------------------------+
+                                  |        _plan_chat_action()            |
+                                  | (LLM Planner + Fallback Classifier)   |
+                                  +---------------------------------------+
+                                                      │
+                       ┌──────────────────────────────┴──────────────────────────────┐
+                       │                                                             │
+            [supported == False]                                            [supported == True]
+                       │                                                             │
+                       ▼                                                             ▼
+     +-----------------------------------+                         +-----------------------------------+
+     |        Honesty Guardrail          |                         |     Multi-Target Executor Loop    |
+     | - Zero code mutations             |                         | 1. ENV_SIM_MECHANICS              |
+     | - Preserves env_module.py bitwise |                         | 2. REWARD_SHAPING                 |
+     | - Status: "unsupported"           |                         | 3. INFERENCE_STRATEGY             |
+     | - "I do not know how to do that"  |                         |    (AST-validated surgical patch) |
+     +-----------------------------------+                         +-----------------------------------+
+```
+
+### 6.2 Key Capabilities Implemented
+1. **ChatActionPlan Schema (`models.py`)**:
+   - `ExecutionTarget` enum: `REWARD_SHAPING`, `INFERENCE_STRATEGY`, `ENV_SIM_MECHANICS`, `TRAINING_HYPERPARAMS`, `UNSUPPORTED_CAPABILITY`.
+   - `ChatActionPlan` Pydantic model with fields: `supported`, `unsupported_reason`, `scope_classification`, `targets`, `requires_retrain`, `surgical_plan`, `user_facing_summary`.
+   - Integrated into `StudioChatResponse` as `action_plan`.
+
+2. **Inference Strategy Surgical Patching (`omni_agent.py`)**:
+   - Implemented `_patch_interactive_inference()` to modify `interactive_step()` without triggering retraining when only inference/arena behavior is altered.
+   - For opening move randomization (e.g. Tic-Tac-Toe): injects a turn-1 candidate stochastic selection block (`np.random.choice(good_moves)`) over viable openings `{0, 2, 4, 6, 8}` instead of deterministic argmax.
+   - Sanitized numpy array conditionals to prevent `ValueError: The truth value of an array with more than one element is ambiguous`.
+   - Validated code changes using `ast.parse()` prior to writing back to `env_module.py`.
+
+3. **Multi-Target Chained Execution**:
+   - Complex compound prompts (e.g., modifying both reward functions for training and interactive inference behavior for human play) execute across multiple layers in a single chat turn.
+   - `ENV_SIM_MECHANICS` -> `REWARD_SHAPING` -> `INFERENCE_STRATEGY` sequentially applied and verified.
+
+4. **Honesty Guardrail**:
+   - Out-of-scope requests (multiplayer matchmaking, Discord bots, WebGL 3D, VR, real-time voice) are classified as `supported=False` with `UNSUPPORTED_CAPABILITY`.
+   - Guaranteed **zero code mutations** (file hash / content remains byte-for-byte identical).
+   - Generates honest rejection message: `"I do not know how to do that yet: {unsupported_reason}"`.
+
+### 6.3 Test Verification Metrics
+Automated verification suite `backend/tests/test_agentic_chat_planner.py` executes 3 comprehensive validation tests:
+- `test_first_move_randomization_inference_patch`: Verifies opening move randomization in Tic-Tac-Toe across 30 games with zero retraining.
+- `test_multi_layer_arena_and_training_patch`: Verifies chained reward shaping and inference strategy patching in a single invocation.
+- `test_unsupported_capability_honest_refusal`: Verifies zero code mutations and honest rejection response.
+
 
 

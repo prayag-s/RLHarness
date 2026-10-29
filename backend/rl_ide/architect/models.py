@@ -104,3 +104,41 @@ class IntakeResponse(BaseModel):
                     "target_metric_threshold": 90.0,
                 }
         return data
+
+
+from enum import Enum
+from typing import List, Optional
+
+
+class ExecutionTarget(str, Enum):
+    REWARD_SHAPING = "reward_shaping"                 # Modifies RewardDSL / compute_reward (Training incentive)
+    INFERENCE_STRATEGY = "inference_strategy"         # Modifies action selection in interactive_step() / policy wrapper (Arena/Eval behavior)
+    ENV_SIM_MECHANICS = "env_sim_mechanics"           # Modifies reset() / step() / opponent logic in env_module.py (Training + Arena physics/rules)
+    TRAINING_HYPERPARAMS = "training_hyperparams"     # Modifies entropy coef, training burst length, or stochastic exploration
+    UNSUPPORTED_CAPABILITY = "unsupported_capability" # Capability not built or impossible in current runtime
+
+
+class ChatActionPlan(BaseModel):
+    supported: bool = Field(
+        description="True if the platform can execute this accurately; False if the capability is not built."
+    )
+    unsupported_reason: Optional[str] = Field(
+        default=None,
+        description="If supported=False, clear explanation of what capability is missing."
+    )
+    scope_classification: str = Field(
+        description="'arena_only' | 'training_only' | 'both' | 'unsupported'"
+    )
+    targets: List[ExecutionTarget] = Field(
+        description="One or more execution layers required to fulfill the user prompt completely."
+    )
+    requires_retrain: bool = Field(
+        description="True if reward/env/training changes require a PPO training burst; False if inference-only."
+    )
+    surgical_plan: str = Field(
+        description="Exact functions/lines in env_module.py, adapter, or trainer to modify."
+    )
+    user_facing_summary: str = Field(
+        description="Clear, concise response explaining the exact changes applied (or why it is unsupported)."
+    )
+

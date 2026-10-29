@@ -11,14 +11,21 @@ Provides a single unified conversational router (StudioOmniAgent) eliminating th
 """
 
 from __future__ import annotations
+import ast
 from enum import Enum
 import json
+import logging
 from pathlib import Path
 import re
 from typing import Any, Callable
 from pydantic import BaseModel, Field
 
-from rl_ide.architect.models import AgentBlueprintSpec, ClarifyingQuestion
+from rl_ide.architect.models import (
+    AgentBlueprintSpec,
+    ClarifyingQuestion,
+    ExecutionTarget,
+    ChatActionPlan,
+)
 from rl_ide.architect.intake import IntakeArchitectAgent, is_tictactoe_intent, is_tictactoe_spec
 from rl_ide.synthesizer.arena_builder import JITArenaSynthesizer
 from rl_ide.synthesizer.env_builder import JITEnvironmentSynthesizer, load_synthesized_env_class, instantiate_env
@@ -73,6 +80,7 @@ class StudioChatResponse(BaseModel):
     training_params: dict[str, Any] = Field(default_factory=dict)
     current_round: int = 1
     best_metric: float = 0.0
+    action_plan: ChatActionPlan | None = None
 
     def model_post_init(self, __context: Any) -> None:
         if not self.message and self.assistant_message:
@@ -238,6 +246,220 @@ class StudioOmniAgent:
                 return [act]
         return []
 
+    def _plan_chat_action(
+        self,
+        user_message: str,
+        conversation: dict[str, Any] | None = None,
+        current_env_code: str = "",
+    ) -> ChatActionPlan:
+        """Inspects live code and user prompt to formulate a code-aware multi-layer ChatActionPlan."""
+        conv = conversation or {}
+        text = user_message.lower().strip()
+
+        # 1. Honesty Guardrail: Check for unsupported external capabilities
+        unsupported_keywords = [
+            "discord", "voice", "audio", "microphone", "sound", "stream 3d", "3d webgl",
+            "webgl animation", "webgl", "shader", "shaders", "multiplayer", "networking",
+            "webhook", "external api", "satellite", "quantum", "vr headset", "augmented reality",
+            "slack bot", "twitch"
+        ]
+        if any(kw in text for kw in unsupported_keywords):
+            matched = [kw for kw in unsupported_keywords if kw in text]
+            reason = f"Integration with {', '.join(matched)} is outside the supported RL arena runtime capabilities."
+            return ChatActionPlan(
+                supported=False,
+                unsupported_reason=reason,
+                scope_classification="unsupported",
+                targets=[ExecutionTarget.UNSUPPORTED_CAPABILITY],
+                requires_retrain=False,
+                surgical_plan="Zero code mutations applied.",
+                user_facing_summary=f"I do not know how to do that yet: {reason}",
+            )
+
+        # 2. Context summary of current environment methods
+        env_methods_summary = "Methods: reset(), step(), interactive_step(), compute_reward()"
+        if current_env_code:
+            try:
+                tree = ast.parse(current_env_code)
+                funcs = [node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)]
+                if funcs:
+                    env_methods_summary = f"Detected methods in env_module.py: {', '.join(funcs)}"
+            except Exception:
+                pass
+
+        # 3. LLM-based planning if smart client is configured
+        if not isinstance(self.client, (FallbackCodeSynthesizer, UnconfiguredLLMClient)):
+            try:
+                prompt = (
+                    f"You are the Code-Aware Agentic Chat Planner for an Autonomous RL Studio.\n"
+                    f"User message: \"{user_message}\"\n\n"
+                    f"Environment Context:\n{env_methods_summary}\n\n"
+                    f"Supported Execution Targets:\n"
+                    f"- \"inference_strategy\": Modifies interactive_step() / policy wrapper (Arena/Eval action selection, e.g. opening randomization, top-k filtering, fallback heuristics).\n"
+                    f"- \"reward_shaping\": Modifies compute_reward() / RewardDSL (Training incentives, bonuses, penalties).\n"
+                    f"- \"env_sim_mechanics\": Modifies reset() / step() / opponent rules or physics.\n"
+                    f"- \"training_hyperparams\": Modifies entropy coef, burst rounds, or exploration.\n"
+                    f"- \"unsupported_capability\": If user asks for capabilities outside the runtime (e.g. Discord, WebGL shaders, multiplayer, voice).\n\n"
+                    f"Strict System Rules:\n"
+                    f"1. If user asks to change how the agent selects moves in the Arena (e.g. randomizing its first/opening move among good options), route to \"inference_strategy\" so interactive_step() is patched directly—do NOT route solely to \"reward_shaping\".\n"
+                    f"2. If user requests both a training reward/mechanic and an arena inference change, include both targets and set scope_classification=\"both\", requires_retrain=true.\n"
+                    f"3. If user requests an unsupported capability, set supported=false and targets=[\"unsupported_capability\"].\n\n"
+                    f"Respond with JSON adhering to:\n"
+                    f"{{\n"
+                    f"  \"supported\": true,\n"
+                    f"  \"unsupported_reason\": null,\n"
+                    f"  \"scope_classification\": \"arena_only\" | \"training_only\" | \"both\" | \"unsupported\",\n"
+                    f"  \"targets\": [\"inference_strategy\"],\n"
+                    f"  \"requires_retrain\": false,\n"
+                    f"  \"surgical_plan\": \"...\",\n"
+                    f"  \"user_facing_summary\": \"...\"\n"
+                    f"}}"
+                )
+                res = self.client.generate_json(prompt, system_prompt="You are a code-aware agentic planner.")
+                if res and isinstance(res, dict) and "supported" in res and "targets" in res:
+                    return ChatActionPlan.model_validate(res)
+            except Exception as ex:
+                logging.warning(f"LLM ChatActionPlan error: {ex}")
+
+        # 4. High-precision deterministic fallback planner
+        targets: list[ExecutionTarget] = []
+        requires_retrain = False
+
+        # Check for inference strategy (Arena move selection / opening randomization)
+        has_inference = (
+            any(kw in text for kw in ["randomize", "random", "stochastic", "sample"]) and
+            any(kw in text for kw in ["first move", "first", "opening", "openings", "turn 1", "arena", "option", "options"])
+        ) or "interactive_step" in text or "inference" in text
+
+        # Check for reward shaping (Reward terms / training incentives)
+        has_reward = (
+            any(kw in text for kw in ["reward", "penalize", "bonus", "penalty", "incentive", "compute_reward"]) or
+            ("corner" in text and any(w in text for w in ["training", "train", "reward", "openings"]))
+        )
+
+        # Check for environment mechanics
+        has_env_sim = (
+            "mechanic" in text or "physics" in text or "grid size" in text or "board size" in text or
+            ("self-play" in text and "training" in text) or "both self-play" in text or "rules" in text
+        )
+
+        # Check for training hyperparams
+        has_training_params = any(kw in text for kw in ["hyperparameter", "entropy", "learning rate", "burst length", "batch size"])
+
+        if has_inference:
+            targets.append(ExecutionTarget.INFERENCE_STRATEGY)
+        if has_reward:
+            targets.append(ExecutionTarget.REWARD_SHAPING)
+            requires_retrain = True
+        if has_env_sim:
+            targets.append(ExecutionTarget.ENV_SIM_MECHANICS)
+            requires_retrain = True
+        if has_training_params:
+            targets.append(ExecutionTarget.TRAINING_HYPERPARAMS)
+            requires_retrain = True
+
+        if not targets:
+            targets.append(ExecutionTarget.INFERENCE_STRATEGY)
+            scope = "arena_only"
+        elif ExecutionTarget.INFERENCE_STRATEGY in targets and (ExecutionTarget.REWARD_SHAPING in targets or ExecutionTarget.ENV_SIM_MECHANICS in targets):
+            scope = "both"
+            requires_retrain = True
+        elif ExecutionTarget.INFERENCE_STRATEGY in targets:
+            scope = "arena_only"
+            requires_retrain = False
+        else:
+            scope = "training_only"
+            requires_retrain = True
+
+        surgical_steps = []
+        if ExecutionTarget.INFERENCE_STRATEGY in targets:
+            surgical_steps.append("Patch interactive_step() in env_module.py for turn-aware action selection.")
+        if ExecutionTarget.REWARD_SHAPING in targets:
+            surgical_steps.append("Rewrite compute_reward() in env_module.py and recalibrate Critic head.")
+        if ExecutionTarget.ENV_SIM_MECHANICS in targets:
+            surgical_steps.append("Update reset() and step() simulation rules in env_module.py.")
+        if ExecutionTarget.TRAINING_HYPERPARAMS in targets:
+            surgical_steps.append("Adjust training hyperparameters in session configuration.")
+
+        return ChatActionPlan(
+            supported=True,
+            unsupported_reason=None,
+            scope_classification=scope,
+            targets=targets,
+            requires_retrain=requires_retrain,
+            surgical_plan=" ".join(surgical_steps),
+            user_facing_summary=f"Formulated execution plan for scope '{scope}' targeting {', '.join([t.value for t in targets])}.",
+        )
+
+    def plan_chat_action(
+        self,
+        user_message: str,
+        conversation: dict[str, Any] | None = None,
+        current_env_code: str = "",
+    ) -> ChatActionPlan:
+        """Public alias for _plan_chat_action."""
+        return self._plan_chat_action(user_message, conversation, current_env_code)
+
+    def _patch_interactive_inference(
+        self,
+        current_code: str,
+        user_request: str,
+        plan: ChatActionPlan | None = None,
+    ) -> str:
+        """Surgically patches interactive_step() in env_module.py to modify action selection / inference strategy."""
+        code = current_code
+        req_lower = user_request.lower()
+
+        # Check if opening move randomization is requested
+        is_opening_randomization = any(kw in req_lower for kw in ["randomize", "random", "stochastic"]) and any(
+            kw in req_lower for kw in ["first", "opening", "openings", "start", "turn 1", "option", "options"]
+        )
+
+        if is_opening_randomization or (plan and ExecutionTarget.INFERENCE_STRATEGY in plan.targets):
+            code = code.replace("if probs else", "if probs is not None else")
+            turn_aware_replacement = (
+                "{indent}action_idx, probs = policy_predict_fn({args})\n"
+                "{indent}is_first_move = (np.count_nonzero(getattr(self, 'board', [])) == 0) or (getattr(self, 'step_count', 0) == 0)\n"
+                "{indent}if is_first_move:\n"
+                "{indent}    board_arr = getattr(self, 'board', None)\n"
+                "{indent}    legal_indices = [i for i, v in enumerate(board_arr) if v == 0] if (board_arr is not None and len(board_arr) > 0) else list(range(9))\n"
+                "{indent}    if probs is not None and len(probs) > 0:\n"
+                "{indent}        candidate_probs = np.array([probs[i] for i in legal_indices if i < len(probs)], dtype=np.float64)\n"
+                "{indent}        max_p = np.max(candidate_probs) if len(candidate_probs) > 0 else 0.0\n"
+                "{indent}        good_moves = [legal_indices[i] for i, p in enumerate(candidate_probs) if p >= 0.7 * max_p]\n"
+                "{indent}    else:\n"
+                "{indent}        good_moves = []\n"
+                "{indent}    if len(good_moves) <= 1:\n"
+                "{indent}        strategic_openings = [i for i in [0, 2, 4, 6, 8] if i in legal_indices]\n"
+                "{indent}        if len(strategic_openings) > 1:\n"
+                "{indent}            good_moves = strategic_openings\n"
+                "{indent}    if good_moves:\n"
+                "{indent}        action_idx = int(np.random.choice(good_moves))\n"
+                "{indent}    else:\n"
+                "{indent}        action_idx = int(action_idx)\n"
+                "{indent}else:\n"
+                "{indent}    action_idx = int(action_idx)"
+            )
+
+            pattern = re.compile(
+                r"([ \t]*)(action_idx,\s*probs\s*=\s*policy_predict_fn\((.*?)\)\s*\n[ \t]*action_idx\s*=\s*int\(action_idx\))"
+            )
+
+            def _replace_match(m):
+                indent = m.group(1)
+                args = m.group(3)
+                return turn_aware_replacement.format(indent=indent, args=args)
+
+            if pattern.search(code):
+                patched = pattern.sub(_replace_match, code)
+                try:
+                    ast.parse(patched)
+                    code = patched
+                except Exception as ex:
+                    logging.warning(f"AST parse validation failed after patching interactive_step: {ex}")
+
+        return code
+
     def process_message(
         self,
         conversation_id: str,
@@ -315,11 +537,54 @@ class StudioOmniAgent:
 
         current_arena_html = conv.get("arena_html") or ""
         current_env_code = conv.get("env_code") or ""
+        env_file = ws_dir / "env_module.py"
+        if not current_env_code and env_file.exists():
+            current_env_code = env_file.read_text(encoding="utf-8")
+
         arena_locked = bool(conv.get("arena_locked", False))
         status = conv.get("status", "clarifying")
         assistant_reply = ""
         questions: list[ClarifyingQuestion] = []
         quick_chips: list[str] = []
+
+        # 0. Agentic Chat Planning
+        action_plan = self._plan_chat_action(
+            user_message=user_message,
+            conversation=conv,
+            current_env_code=current_env_code,
+        )
+
+        # Honesty Guardrail: Zero mutations, instant honest refusal for unsupported requests
+        if not action_plan.supported or ExecutionTarget.UNSUPPORTED_CAPABILITY in action_plan.targets:
+            status = "unsupported"
+            assistant_reply = f"I do not know how to do that yet: {action_plan.unsupported_reason}"
+            history.append({
+                "role": "assistant",
+                "content": assistant_reply,
+                "arena_locked": arena_locked,
+                "timestamp": utc_now_iso(),
+            })
+            self.conv_store.save_or_update(
+                conversation_id=conversation_id,
+                status=status,
+                chat_history=history,
+            )
+            return StudioChatResponse(
+                conversation_id=conversation_id,
+                status=status,
+                assistant_message=assistant_reply,
+                action_types=[StudioActionType.CLARIFY_OR_DISCUSS],
+                blueprint_spec=blueprint,
+                arena_html=current_arena_html,
+                env_code=current_env_code,
+                arena_locked=arena_locked,
+                questions=[],
+                quick_chips=quick_chips,
+                training_params=t_params,
+                current_round=conv.get("current_round", 1),
+                best_metric=conv.get("best_metric", 0.0),
+                action_plan=action_plan,
+            )
 
         # ---------------------------------------------------------------------
         # CASE 1: FIRST TURN — Immediate Mock-Animated Arena Preview
@@ -435,14 +700,40 @@ class StudioOmniAgent:
                 training_params=t_params,
                 current_round=conv.get("current_round", 1),
                 best_metric=conv.get("best_metric", 0.0),
+                action_plan=action_plan,
             )
 
         # ---------------------------------------------------------------------
-        # CASE 2: MID / POST-TRAINING CONVERSATIONAL ACTIONS
+        # CASE 2: MID / POST-TRAINING CONVERSATIONAL ACTIONS (Multi-Target Chaining)
         # ---------------------------------------------------------------------
 
-        # Intent A: UPDATE_AGENT_CHARACTERISTICS
-        if StudioActionType.UPDATE_AGENT_CHARACTERISTICS in intents:
+        # Multi-Target Layer 1: ENV_SIM_MECHANICS (Gym mechanics / rules)
+        if ExecutionTarget.ENV_SIM_MECHANICS in action_plan.targets or StudioActionType.UPDATE_ENV_MECHANICS in intents:
+            env_file = ws_dir / "env_module.py"
+            if blueprint:
+                blueprint.domain_summary = f"{blueprint.domain_summary}. Rules: {user_message}"
+            code_str, _, env_cls = self.env_synthesizer.synthesize(
+                blueprint=blueprint,
+                workspace_dir=ws_dir,
+            )
+            verified, healed_code, _ = self.smoke_tester.verify_and_heal(
+                code_str=code_str,
+                blueprint=blueprint,
+                workspace_dir=ws_dir,
+            )
+            if verified:
+                current_env_code = healed_code
+                env_file.write_text(healed_code, encoding="utf-8")
+                try:
+                    updated_env_cls = load_synthesized_env_class(env_file)
+                    active_env = instantiate_env(updated_env_cls)
+                    self.session_store.set_env(conversation_id, active_env)
+                except Exception:
+                    pass
+                assistant_reply += "🛠️ Environment mechanics updated and verified via sandbox smoke tester.\n"
+
+        # Multi-Target Layer 2: REWARD_SHAPING (compute_reward / RewardDSL)
+        if ExecutionTarget.REWARD_SHAPING in action_plan.targets or StudioActionType.UPDATE_AGENT_CHARACTERISTICS in intents:
             env_file = ws_dir / "env_module.py"
             if not current_env_code and env_file.exists():
                 current_env_code = env_file.read_text(encoding="utf-8")
@@ -478,33 +769,43 @@ class StudioOmniAgent:
                     "Calibrated Critic value head on existing policy weights. Progress is preserved.\n"
                 )
 
-        # Intent B: UPDATE_ENV_MECHANICS
-        if StudioActionType.UPDATE_ENV_MECHANICS in intents:
+        # Multi-Target Layer 3: INFERENCE_STRATEGY (interactive_step / live action selection)
+        if ExecutionTarget.INFERENCE_STRATEGY in action_plan.targets:
             env_file = ws_dir / "env_module.py"
-            if blueprint:
-                blueprint.domain_summary = f"{blueprint.domain_summary}. Rules: {user_message}"
-            code_str, _, env_cls = self.env_synthesizer.synthesize(
-                blueprint=blueprint,
-                workspace_dir=ws_dir,
+            if not current_env_code and env_file.exists():
+                current_env_code = env_file.read_text(encoding="utf-8")
+
+            patched_code = self._patch_interactive_inference(
+                current_code=current_env_code,
+                user_request=user_message,
+                plan=action_plan,
             )
+
             verified, healed_code, _ = self.smoke_tester.verify_and_heal(
-                code_str=code_str,
+                code_str=patched_code,
                 blueprint=blueprint,
                 workspace_dir=ws_dir,
             )
             if verified:
                 current_env_code = healed_code
                 env_file.write_text(healed_code, encoding="utf-8")
+
                 try:
                     updated_env_cls = load_synthesized_env_class(env_file)
                     active_env = instantiate_env(updated_env_cls)
                     self.session_store.set_env(conversation_id, active_env)
-                except Exception:
-                    pass
-                assistant_reply += "🛠️ Environment mechanics updated and verified via sandbox smoke tester.\n"
+                except Exception as ex:
+                    print(f"Warning: Env reload after inference patch: {ex}")
 
-        # Intent C: PREVIEW_OR_UPDATE_ARENA
-        if StudioActionType.PREVIEW_OR_UPDATE_ARENA in intents:
+                assistant_reply += "🎯 Arena inference strategy updated! Patched interactive_step() for turn-aware action selection.\n"
+
+        # Multi-Target Layer 4: Visual Arena & Controls
+        has_visual_intent = any(kw in user_message.lower() for kw in [
+            "look", "theme", "color", "canvas", "neon", "cyberpunk", "restyle", "dark", "gold",
+            "scoreboard", "badge", "display", "larger", "bigger", "retro", "hud", "layout",
+            "x and o", "x or o", "play as", "switch", "both", "who goes first", "player side", "symbol"
+        ])
+        if (StudioActionType.PREVIEW_OR_UPDATE_ARENA in intents and has_visual_intent) or (has_visual_intent and not assistant_reply):
             new_arena_html = self.arena_synthesizer.update_arena(
                 blueprint=blueprint,
                 current_arena_html=current_arena_html,
@@ -544,8 +845,13 @@ class StudioOmniAgent:
             if broadcast_callback:
                 broadcast_callback({"event": "arena_updated", "arena_html": current_arena_html})
 
-        # Intent D: RUN_OR_CONTINUE_TRAINING
-        if StudioActionType.RUN_OR_CONTINUE_TRAINING in intents:
+        # Multi-Target Layer 5: TRAINING_HYPERPARAMS / RUN_OR_CONTINUE_TRAINING
+        wants_training = (
+            StudioActionType.RUN_OR_CONTINUE_TRAINING in intents or
+            ExecutionTarget.TRAINING_HYPERPARAMS in action_plan.targets or
+            (action_plan.requires_retrain and any(kw in user_message.lower() for kw in ["train", "start", "run", "more", "burst"]))
+        )
+        if wants_training:
             arena_locked = True
             meta_cmd = parse_nudge_meta_command(user_message)
             if meta_cmd:
@@ -656,11 +962,23 @@ class StudioOmniAgent:
             latest_model_zip_path=model_path,
         )
 
+        effective_actions = list(intents)
+        target_map = {
+            ExecutionTarget.INFERENCE_STRATEGY: StudioActionType.PREVIEW_OR_UPDATE_ARENA,
+            ExecutionTarget.REWARD_SHAPING: StudioActionType.UPDATE_AGENT_CHARACTERISTICS,
+            ExecutionTarget.ENV_SIM_MECHANICS: StudioActionType.UPDATE_ENV_MECHANICS,
+            ExecutionTarget.TRAINING_HYPERPARAMS: StudioActionType.RUN_OR_CONTINUE_TRAINING,
+        }
+        for t in action_plan.targets:
+            act = target_map.get(t)
+            if act and act not in effective_actions:
+                effective_actions.append(act)
+
         return StudioChatResponse(
             conversation_id=conversation_id,
             status=status,
             assistant_message=assistant_reply.strip(),
-            action_types=intents,
+            action_types=effective_actions,
             blueprint_spec=blueprint,
             arena_html=current_arena_html,
             env_code=current_env_code,
@@ -670,6 +988,7 @@ class StudioOmniAgent:
             training_params=t_params,
             current_round=current_r,
             best_metric=best_m,
+            action_plan=action_plan,
         )
 
     def _rewrite_reward_function(
@@ -708,6 +1027,8 @@ class StudioOmniAgent:
             additions.append('        # Tactical aggression & fork reward\n        reward_breakdown["tactical_aggression"] = 1.5\n')
         if "center" in fb:
             additions.append('        # Center control priority\n        reward_breakdown["center_control"] = 2.0\n')
+        if "corner" in fb:
+            additions.append('        # Corner opening strategic bonus\n        if action in [0, 2, 6, 8]:\n            reward_breakdown["corner_opening_bonus"] = 2.0\n')
         if "mistake" in fb or "penalize" in fb:
             additions.append('        # Mistake avoidance penalty\n        reward_breakdown["mistake_penalty"] = -2.5\n')
         if "cardiac" in fb:

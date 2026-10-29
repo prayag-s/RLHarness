@@ -715,7 +715,7 @@ class SynthesizedGymEnv(gym.Env):
 
         human_first = payload.get("human_first")
         if human_first is None:
-            human_first = (human_sym == "X")
+            human_first = True
         else:
             human_first = bool(human_first)
 
@@ -750,7 +750,7 @@ class SynthesizedGymEnv(gym.Env):
                 return {{
                     "arena_state": self.render_arena_state(),
                     "agent_action_label": agent_label,
-                    "action_probs": [float(p) for p in probs] if probs else [0.0] * 9,
+                    "action_probs": [float(p) for p in probs] if probs is not None else [0.0] * 9,
                     "status_text": f"Agent opened with {{agent_label}} as {{agent_sym}}. Your turn to play as {{human_sym}}!",
                 }}
             return {{
@@ -841,7 +841,7 @@ class SynthesizedGymEnv(gym.Env):
         return {{
             "arena_state": self.render_arena_state(),
             "agent_action_label": agent_label,
-            "action_probs": [float(p) for p in probs] if probs else [0.0] * 9,
+            "action_probs": [float(p) for p in probs] if probs is not None else [0.0] * 9,
             "status_text": status_text,
         }}
 
