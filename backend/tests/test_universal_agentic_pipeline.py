@@ -10,6 +10,7 @@ Tests strictly verify the elimination of hardcoded domain templates and static k
 
 import ast
 import inspect
+import subprocess
 import uuid
 from pathlib import Path
 import numpy as np
@@ -84,7 +85,7 @@ def test_zero_hardcoding_novel_domain_synthesis(tmp_path):
     assert "sim-canvas" not in arena_html
     assert "ARENA_UPDATE" in arena_html
     assert "startMockAnimationLoop" in arena_html
-    assert ("c4-grid" in arena_html or "dropDisc" in arena_html or "Connect 4" in arena_html or "dynamic-telemetry-grid" in arena_html)
+    assert ("dynamic-state-grid" in arena_html or "dynamic-telemetry-grid" in arena_html or "c4-grid" in arena_html or "dropDisc" in arena_html or "Connect" in arena_html)
 
     # Test with arbitrary novel domain: Warehouse Elevator Dispatcher
     novel_prompt = "Train a warehouse elevator dispatcher agent managing 3 elevator cars across 10 floors"
@@ -274,3 +275,22 @@ def test_no_keyword_routing_lists_in_omni_agent():
     assert process_message_node is not None
     process_source = ast.get_source_segment(source_code, process_message_node)
     assert "is_blackjack_intent" not in process_source, "Hardcoded is_blackjack_intent found in process_message!"
+
+
+def test_zero_domain_hardcoding_in_codebase():
+    """Mechanical gate: Fail immediately if any hardcoded domain branches or builders exist in backend/rl_ide/."""
+    forbidden_pattern = (
+        r"is_blackjack|is_tictactoe|is_connect4|is_roulette|is_energy|is_rover|"
+        r"_build_blackjack|_build_connect4|_build_russian_roulette|_build_tictactoe|"
+        r"_build_cartpole|_build_energy_arbitrage|_build_general_sim|"
+        r"connect 4|connect-4|russian roulette|blackjack_bonus|roulette-badge"
+    )
+    result = subprocess.run(
+        ["grep", "-rnE", forbidden_pattern, "backend/rl_ide/"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0, (
+        f"HARDCODED DOMAIN BRANCHES FOUND IN backend/rl_ide/:\n{result.stdout}"
+    )
+

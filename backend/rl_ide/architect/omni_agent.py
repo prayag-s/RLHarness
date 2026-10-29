@@ -28,10 +28,6 @@ from rl_ide.architect.models import (
 )
 from rl_ide.architect.intake import (
     IntakeArchitectAgent,
-    is_tictactoe_intent,
-    is_tictactoe_spec,
-    is_blackjack_intent,
-    is_blackjack_spec,
 )
 from rl_ide.synthesizer.arena_builder import JITArenaSynthesizer
 from rl_ide.synthesizer.env_builder import JITEnvironmentSynthesizer, load_synthesized_env_class, instantiate_env
@@ -256,7 +252,7 @@ class StudioOmniAgent:
                     f"Strict System Rules:\n"
                     f"1. If user asks to change how the agent selects moves in the Arena (e.g. randomizing its first/opening move among good options), route to \"inference_strategy\" so interactive_step() is patched directly—do NOT route solely to \"reward_shaping\".\n"
                     f"2. If user requests both a training reward/mechanic and an arena inference change, include both targets and set scope_classification=\"both\", requires_retrain=true.\n"
-                    f"3. Arena visual styling & UI changes (e.g. changing arena look, tables, cards, felt, blackjack table, colors, themes, boards, HUD, controls) route to supported=true, scope_classification=\"arena_only\", targets=[\"arena_visual_ui\"], requires_retrain=false.\n"
+                    f"3. Arena visual styling & UI changes (e.g. changing arena look, tables, cards, felt, green cloth, colors, themes, boards, HUD, controls) route to supported=true, scope_classification=\"arena_only\", targets=[\"arena_visual_ui\"], requires_retrain=false.\n"
                     f"4. If user requests an unsupported capability (e.g. Discord, WebGL shaders, multiplayer matchmaking, voice, Bloomberg terminal), set supported=false and targets=[\"unsupported_capability\"].\n"
                     f"5. If user asks an informational, diagnostic, or explanatory question (e.g. 'Why did...', 'What are the current rules/rewards?', 'Explain how the agent works') without requesting code or training modifications, set scope_classification=\"discussion\", targets=[], requires_retrain=false.\n\n"
                     f"Respond with JSON adhering to:\n"
@@ -303,7 +299,7 @@ class StudioOmniAgent:
         requires_retrain = False
 
         # Check for domain re-anchoring
-        has_reanchor = any(kw in text for kw in ["reanchor", "switch domain", "change domain", "new domain", "pivot to", "switch to", "train a connect", "train a russian", "train a blackjack"])
+        has_reanchor = any(kw in text for kw in ["reanchor", "switch domain", "change domain", "new domain", "pivot to", "switch to", "different game", "new task"])
         if has_reanchor:
             targets.append(ExecutionTarget.REANCHOR_DOMAIN)
 
@@ -442,7 +438,8 @@ class StudioOmniAgent:
                 "{indent}    else:\n"
                 "{indent}        action_idx = int(action_idx)\n"
                 "{indent}else:\n"
-                "{indent}    action_idx = int(action_idx)"
+                "{indent}    action_idx = int(action_idx)\n"
+                "{indent}self.last_move = int(action_idx)"
             )
 
             pattern = re.compile(
@@ -842,7 +839,7 @@ class StudioOmniAgent:
             current_arena_html = new_arena_html
 
             is_play_feature = any(kw in user_message.lower() for kw in ["x and o", "x or o", "play as", "switch", "both", "who goes first", "player side", "symbol"])
-            if is_play_feature and blueprint and is_tictactoe_spec(blueprint):
+            if is_play_feature and blueprint:
                 env_file = ws_dir / "env_module.py"
                 if env_file.exists():
                     env_code_txt = env_file.read_text(encoding="utf-8")

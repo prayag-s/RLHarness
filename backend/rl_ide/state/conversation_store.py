@@ -24,11 +24,6 @@ def generate_title_from_prompt(prompt: str) -> str:
     """Auto-generates a clean title for a conversation from user prompt."""
     if not prompt or not prompt.strip():
         return "New Agent"
-    from rl_ide.architect.intake import is_tictactoe_intent, is_blackjack_intent
-    if is_tictactoe_intent(prompt):
-        return "Tic-Tac-Toe Self-Play Agent"
-    if is_blackjack_intent(prompt):
-        return "Blackjack 21 Card Agent"
 
     clean = re.sub(r"^(train|build|create|make|synthesize)\s+(an?\s+)?", "", prompt.strip(), flags=re.IGNORECASE)
     clean = clean.split("\n")[0].strip()

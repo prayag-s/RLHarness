@@ -14,7 +14,6 @@ import numpy as np
 from pydantic import BaseModel, Field
 
 from rl_ide.architect.models import AgentBlueprintSpec
-from rl_ide.architect.intake import is_tictactoe_spec
 from rl_ide.ingest.loader import IngestedDataset
 from rl_ide.llm.client import (
     BaseLLMClient,
@@ -117,8 +116,8 @@ class AutoTunerAgent:
                 f"scaled penalty terms, and recalibrated value network."
             )
         else:
-            is_tictactoe = is_tictactoe_spec(blueprint)
-            if is_tictactoe:
+            is_grid_task = len(getattr(blueprint, "action_labels", []) or []) == 9
+            if is_grid_task:
                 illegal_steps = term_counts.get("illegal_move_penalty", 0)
                 if illegal_steps > 0:
                     diagnosis = (

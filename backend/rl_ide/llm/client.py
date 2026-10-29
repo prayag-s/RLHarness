@@ -272,44 +272,12 @@ class FallbackCodeSynthesizer(BaseLLMClient):
 
         # Intake Architect Request
         if "intake" in sys_lower or "blueprint" in sys_lower or "pillar" in sys_lower or "intake" in prompt_lower:
-            from rl_ide.architect.intake import is_tictactoe_intent
-            is_ttt = is_tictactoe_intent(prompt_lower)
+            from rl_ide.architect.intake import synthesize_blueprint_from_prompt
+            dyn_bp = synthesize_blueprint_from_prompt(prompt_lower)
+            spec = dyn_bp.to_agent_blueprint_spec().model_dump()
 
             # Check if prompt answers questions or has smart defaults
             if any(kw in prompt_lower for kw in ["smart defaults", "defaults", "force_defaults", "answer:", "selected:", "ready"]):
-                if is_ttt:
-                    spec = {
-                        "task_title": "Tic-Tac-Toe Master Agent",
-                        "domain_summary": "Zero-sum competitive 3x3 board game agent learning optimal play against stochastic and min-max opponents.",
-                        "data_source_type": "pure_simulation",
-                        "dataset_id": None,
-                        "observation_features": [
-                            "cell_0_0", "cell_0_1", "cell_0_2",
-                            "cell_1_0", "cell_1_1", "cell_1_2",
-                            "cell_2_0", "cell_2_1", "cell_2_2",
-                            "current_turn"
-                        ],
-                        "action_labels": [
-                            "Place (0,0)", "Place (0,1)", "Place (0,2)",
-                            "Place (1,0)", "Place (1,1)", "Place (1,2)",
-                            "Place (2,0)", "Place (2,1)", "Place (2,2)"
-                        ],
-                        "arena_visual_description": "Modern 3x3 dark-mode grid with neon glow and winning lines",
-                        "interactive_mode_description": "Clickable 3x3 interactive board where the human plays as 'O' and the agent responds instantly as 'X'.",
-                        "success_metric_name": "Non-Loss Rate (%)",
-                        "target_metric_threshold": 85.0,
-                        "max_auto_tune_rounds": 4,
-                        "initial_reward_components": [
-                            {"name": "win_bonus", "weight": 10.0, "description": "Reward for winning the game"},
-                            {"name": "draw_bonus", "weight": 3.0, "description": "Reward for achieving a draw"},
-                            {"name": "loss_penalty", "weight": -10.0, "description": "Penalty for losing the game"},
-                            {"name": "illegal_move_penalty", "weight": -5.0, "description": "Penalty for selecting an occupied cell"}
-                        ]
-                    }
-                else:
-                    from rl_ide.architect.intake import synthesize_blueprint_from_prompt
-                    dyn_bp = synthesize_blueprint_from_prompt(prompt_lower)
-                    spec = dyn_bp.to_agent_blueprint_spec().model_dump()
                 return json.dumps({
                     "status": "ready_to_build",
                     "assistant_message": "Blueprint locked! All 5 pillars established. Ready to synthesize environment and arena.",
@@ -317,56 +285,31 @@ class FallbackCodeSynthesizer(BaseLLMClient):
                     "blueprint_spec": spec
                 })
             else:
-                if is_ttt:
-                    questions = [
-                        {
-                            "pillar": "arena_ui",
-                            "question": "How would you like to visualize the Tic-Tac-Toe arena in the center panel?",
-                            "suggested_options": [
-                                "Modern 3x3 dark-mode grid with neon glow and winning lines",
-                                "Minimalist wood-grain board with move history ledger",
-                                "Retro arcade 8-bit grid with animated action markers",
-                                "Compact numeric matrix with live value heatmaps"
-                            ],
-                            "default_option": "Modern 3x3 dark-mode grid with neon glow and winning lines"
-                        },
-                        {
-                            "pillar": "expectations",
-                            "question": "What target mastery win/draw rate and auto-tune round budget should we aim for?",
-                            "suggested_options": [
-                                "85% Win/Draw Rate (4 rounds)",
-                                "90% Win/Draw Rate (4 rounds)",
-                                "95% Near-Optimal Mastery (5 rounds)",
-                                "75% Fast Prototyping (2 rounds)"
-                            ],
-                            "default_option": "85% Win/Draw Rate (4 rounds)"
-                        }
-                    ]
-                else:
-                    questions = [
-                        {
-                            "pillar": "arena_ui",
-                            "question": "How would you like to visually see the agent's behavior and environment in the Arena center panel?",
-                            "suggested_options": [
-                                "Modern dark-mode 2D canvas with neon indicators",
-                                "Interactive game board with highlighted state cells",
-                                "Clean telemetry dashboard with real-time gauges",
-                                "Minimalist radar chart and timeline inspector"
-                            ],
-                            "default_option": "Modern dark-mode 2D canvas with neon indicators"
-                        },
-                        {
-                            "pillar": "expectations",
-                            "question": "What target success rate and auto-tuning round budget should we target?",
-                            "suggested_options": [
-                                "85% Success Rate (3 rounds)",
-                                "90% Success Rate (4 rounds)",
-                                "95% High Mastery (5 rounds)",
-                                "75% Fast Prototyping (2 rounds)"
-                            ],
-                            "default_option": "85% Success Rate (4 rounds)"
-                        }
-                    ]
+                title = dyn_bp.domain_title or "Agent"
+                questions = [
+                    {
+                        "pillar": "arena_ui",
+                        "question": f"How would you like to visualize the {title} arena in the center panel?",
+                        "suggested_options": [
+                            f"Modern dark-mode grid with neon glow and winning lines" if "tic" in title.lower() or "3x3" in title.lower() else f"Modern dark-mode reactive visual stage for {title}",
+                            "Minimalist clean board with move history ledger",
+                            "Retro arcade 8-bit styling with animated action markers",
+                            "Compact numeric matrix with live value heatmaps"
+                        ],
+                        "default_option": f"Modern dark-mode grid with neon glow and winning lines" if "tic" in title.lower() or "3x3" in title.lower() else f"Modern dark-mode reactive visual stage for {title}"
+                    },
+                    {
+                        "pillar": "expectations",
+                        "question": "What target mastery win/draw rate and auto-tune round budget should we aim for?",
+                        "suggested_options": [
+                            "85% Win/Draw Rate (4 rounds)",
+                            "90% Win/Draw Rate (4 rounds)",
+                            "95% Near-Optimal Mastery (5 rounds)",
+                            "75% Fast Prototyping (2 rounds)"
+                        ],
+                        "default_option": "85% Win/Draw Rate (4 rounds)"
+                    }
+                ]
                 return json.dumps({
                     "status": "needs_clarification",
                     "assistant_message": "I've analyzed your request across the 5 Pillars. To tailor your agent and arena UI perfectly, please clarify the following:",
