@@ -63,7 +63,7 @@ from rl_ide.llm.client import (
     is_test_mode,
 )
 from rl_ide.synthesizer.env_builder import JITEnvironmentSynthesizer, load_synthesized_env_class, instantiate_env
-from rl_ide.security import isolation_available
+from rl_ide.security import enforce_isolation_requirement, isolation_available
 from rl_ide.state.dataset_store import get_dataset_store
 from rl_ide.state.job_store import (
     CANCELLED,
@@ -126,6 +126,24 @@ global_omni_agent = StudioOmniAgent(
 
 # Initialize LLM state (from persistent storage or environment variables)
 init_llm_state()
+
+# A deployment that requires isolation must not start on a host that cannot provide it.
+enforce_isolation_requirement()
+
+
+def mount_frontend(dist_dir: str | Path | None = None) -> bool:
+    """Serves the built SPA from the API origin when one is shipped next to it (container image).
+
+    Mounted last so every `/api` and `/ws` route keeps precedence; a dev setup without a build
+    simply keeps the Vite server.
+    """
+    from fastapi.staticfiles import StaticFiles
+
+    candidate = Path(dist_dir or os.environ.get("RL_IDE_FRONTEND_DIST") or "frontend_dist")
+    if not (candidate / "index.html").exists():
+        return False
+    app.mount("/", StaticFiles(directory=str(candidate), html=True), name="ui")
+    return True
 
 
 def load_session_scorecard(session_id: str) -> dict[str, Any] | None:
@@ -1790,3 +1808,8 @@ async def websocket_telemetry(websocket: WebSocket, session_id: str):
                 pass
     except (WebSocketDisconnect, RuntimeError):
         manager.disconnect(session_id, websocket)
+
+
+# Mounted last on purpose: a mount at "/" catches every path registered after it, so it must come
+# after all /api and /ws routes or the API disappears behind the SPA.
+mount_frontend()

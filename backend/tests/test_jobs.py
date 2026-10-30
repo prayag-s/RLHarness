@@ -86,6 +86,7 @@ def test_runner_stops_at_a_stage_boundary_when_cancelled(job_store, monkeypatch)
     assert "Cancel" in finished["error"]
 
 
+@pytest.mark.slow  # runs a real (fallback-LLM) synthesis
 def test_async_chat_returns_a_job_quickly_and_reports_stages(job_store):
     client = TestClient(server.app)
     conv_id = f"job_async_{uuid.uuid4().hex[:8]}"
@@ -123,6 +124,7 @@ def test_async_chat_returns_a_job_quickly_and_reports_stages(job_store):
     assert finished["result"]["arena_html"]
 
 
+@pytest.mark.slow  # runs a real (fallback-LLM) synthesis
 def test_stage_events_stream_over_the_websocket(job_store):
     """The UI must be able to show progress live, not only by polling."""
     client = TestClient(server.app)

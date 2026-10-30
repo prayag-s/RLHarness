@@ -1,0 +1,126 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  schedule:
+    - cron: "0 3 * * *"   # nightly full suite (trains, exports, spawns sandbox workers)
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend-fast:
+    name: backend (fast suite)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.lock
+
+      # bubblewrap is the boundary generated code runs behind (G2). Without it the sandbox refuses
+      # to execute, which several tests assert.
+      - name: Install bubblewrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap
+          bwrap --version
+          cat /proc/sys/kernel/unprivileged_userns_clone || true
+
+      - name: Install pinned dependencies
+        working-directory: backend
+        run: pip install -r requirements-dev.lock
+
+      - name: Unit + contract suite (no training, no paid LLM)
+        working-directory: backend
+        run: python -m pytest -q -m "not slow and not live_llm"
+
+      - name: Boot smoke test (isolation required, as in the image)
+        working-directory: backend
+        env:
+          RL_IDE_REQUIRE_ISOLATION: "1"
+        run: |
+          python -m uvicorn rl_ide.api.server:app --host 127.0.0.1 --port 8000 --log-level warning &
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8000/api/v4/settings/llm > /dev/null; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8000/api/v4/settings/llm | tee /tmp/llm.json
+          curl -fsS http://127.0.0.1:8000/api/v4/usage > /dev/null
+          kill %1
+
+  backend-full:
+    name: backend (full suite)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.lock
+
+      - name: Install bubblewrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap
+
+      - name: Install pinned dependencies
+        working-directory: backend
+        run: pip install -r requirements-dev.lock
+
+      - name: Full suite (held-out scorecard, sandbox isolation, training, export)
+        working-directory: backend
+        run: python -m pytest -q
+
+  frontend:
+    name: frontend (types + build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm run build
+
+  image:
+    name: container image builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: rl-studio:ci
+          load: true
+      - name: Boot the image and hit the healthcheck
+        run: |
+          docker run -d --name rl-studio --security-opt seccomp=unconfined -p 8000:8000 rl-studio:ci
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8000/api/v4/settings/llm > /dev/null; then echo "up"; exit 0; fi
+            sleep 2
+          done
+          docker logs rl-studio
+          exit 1

@@ -20,9 +20,12 @@ from rl_ide.security import SandboxError, isolation_available, isolation_tool
 from rl_ide.security.sandbox import sandbox_env
 from rl_ide.autopilot.sandbox_runner import run_smoke_in_sandbox
 
-pytestmark = pytest.mark.skipif(
-    not isolation_available(), reason="no isolation mechanism (bwrap/unshare) on this host"
-)
+pytestmark = [
+    pytest.mark.slow,  # spawns bwrap workers and imports torch
+    pytest.mark.skipif(
+        not isolation_available(), reason="no isolation mechanism (bwrap/unshare) on this host"
+    ),
+]
 
 TENANT_DB = (Path(__file__).resolve().parents[1] / "runs" / "conversations.db").as_posix()
 

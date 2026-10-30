@@ -15,8 +15,8 @@ and the test history (covered by [progress.md](./progress.md), §10).
 > committed — **G3, G4 (scoping) and G9 are CLOSED**, with real authentication still outstanding
 > under G4 (`progress.md` §12). Phase **P0-B.2** is implemented and committed — **G2 is CLOSED**:
 > training, verification, export and interactive play all execute generated code only inside a
-> `bwrap` worker (`progress.md` §13). Phase **P1-C** is in progress: **G5, G6 and G7 are CLOSED**
-> (`progress.md` §15.1–§15.2); G8 remains open.
+> `bwrap` worker (`progress.md` §13). Phase **P1-C** is complete: **G5, G6, G7 and G8 are CLOSED**
+> (`progress.md` §15.1–§15.3).
 
 ---
 
@@ -244,6 +244,12 @@ no confidence interval, and no per-segment breakdown.
   ≈11 minutes and is run by hand.
 - **Why it blocks revenue:** there is no reproducible artefact to hand a customer or a security team,
   and no gate preventing a regression from shipping.
+- **Status: CLOSED (Phase P1-C.3).** `requirements.lock` / `requirements-dev.lock` pin the resolved
+  set (a clean venv built from the lock passes the fast suite); `Dockerfile` installs that set with
+  bubblewrap, serves the built SPA and sets `RL_IDE_REQUIRE_ISOLATION=1`, which now fails startup on a
+  host without a sandbox; `.github/workflows/ci.yml` runs the fast suite (`-m "not slow and not
+  live_llm"`, 67 passed in 1:08), boots the API, builds the frontend and builds+boots the image; the
+  full suite runs nightly (`progress.md` §15.3).
 - **Fix:** container image with pinned versions and a lockfile; CI running `pytest` (split the slow
   synthesis tests behind a marker so the fast suite stays under ~2 minutes), `tsc`/`vite build`, and a
   smoke test that boots the API.

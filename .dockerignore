@@ -1,0 +1,12 @@
+# Keep build context small; the image only needs backend/ and frontend/.
+.git
+.github
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+backend/runs
+backend/workspaces
+backend/exported_bundles
+frontend/node_modules
+frontend/dist
+.venv

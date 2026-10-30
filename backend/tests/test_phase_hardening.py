@@ -1,6 +1,7 @@
 """Hardening tests for transport, isolation, verification gating, durability and honesty."""
 
 import json
+import os
 import uuid
 from pathlib import Path
 
@@ -282,3 +283,63 @@ def test_dataset_reward_shaping_preserves_base_signal(tmp_path):
     # Base correctness signal (±1) must still be present alongside the shaped term.
     assert "accuracy_reward" in info["reward_breakdown"]
     assert reward != 0.0, "Reward shaping must not zero out the original training signal"
+
+
+def test_required_isolation_fails_fast_when_unavailable(monkeypatch):
+    """A hosted image must refuse to start without a sandbox rather than degrade silently (G8)."""
+    from rl_ide import security
+
+    monkeypatch.setenv("RL_IDE_REQUIRE_ISOLATION", "1")
+    monkeypatch.setattr(security, "isolation_tool", lambda: None)
+
+    with pytest.raises(RuntimeError, match="no isolation mechanism"):
+        security.enforce_isolation_requirement()
+
+
+def test_isolation_requirement_is_opt_in(monkeypatch):
+    """The local single-user studio keeps working on a host without bubblewrap."""
+    from rl_ide import security
+
+    monkeypatch.delenv("RL_IDE_REQUIRE_ISOLATION", raising=False)
+    monkeypatch.setattr(security, "isolation_tool", lambda: None)
+
+    security.enforce_isolation_requirement()
+
+
+def test_api_serves_a_shipped_spa_without_shadowing_the_api(tmp_path):
+    """The container ships the built UI; the API must keep every route it already had (G8)."""
+    import subprocess
+    import sys
+    import textwrap
+
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("<!doctype html><div id='root'></div>", encoding="utf-8")
+
+    script = textwrap.dedent(
+        """
+        import os, sys
+        from fastapi.testclient import TestClient
+        from rl_ide.api.server import app
+        client = TestClient(app)
+        assert client.get("/").status_code == 200
+        assert "<div id='root'>" in client.get("/").text
+        assert client.get("/api/v4/settings/llm").status_code == 200
+        assert client.get("/api/v4/usage").status_code == 200
+        print("SPA_MOUNTED_OK")
+        """
+    )
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "RL_IDE_FRONTEND_DIST": str(dist),
+        "PYTHONPATH": str(Path(__file__).resolve().parents[1]),
+    }
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(Path(__file__).resolve().parents[1]),
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert "SPA_MOUNTED_OK" in result.stdout

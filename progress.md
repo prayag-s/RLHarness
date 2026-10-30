@@ -1193,3 +1193,34 @@ per-process (`global_store`, `AutonomousLoopController`). Job *state* is durable
 queue-backed, but running two Uvicorn workers with shared training state, or resuming an in-flight
 training round after a restart, is still out of scope — the job fails cleanly instead. The legacy
 `POST /sessions/start` path still spawns its training in-process.
+
+### 15.3 G8 — pinned dependencies, a container, and a CI gate
+
+There was no `.github/`, no `Dockerfile` and no lockfile: nothing reproducible to hand a customer,
+and no gate that stops a regression.
+
+- **Lockfiles.** `backend/requirements.lock` (runtime) and `requirements-dev.lock` (+ pytest) are
+  `uv pip compile` resolutions from `pyproject.toml` on Python 3.12. Validated, not assumed: a clean
+  venv built *only* from the lock runs the fast suite green (**64 passed, 2 skipped**).
+- **`Dockerfile`.** python:3.12-slim + `bubblewrap`, installs the locked set, builds the SPA in a
+  node stage, runs as uid 10001, binds `/data` for workspaces, sets `RL_IDE_REQUIRE_ISOLATION=1` and
+  serves the built UI from the same origin (`RL_IDE_FRONTEND_DIST`), with a healthcheck.
+- **Isolation is now a startup gate.** `enforce_isolation_requirement()` raises when
+  `RL_IDE_REQUIRE_ISOLATION=1` and no sandbox exists, closing the B.2 residual "hosted deployments
+  must treat `isolation_available() == False` as a hard startup failure".
+- **SPA serving without shadowing.** `mount_frontend()` mounts at `/` but is called *after* every
+  route: mounted earlier it swallowed `/api/*` (the test caught it — `GET /api/v4/settings/llm`
+  returned 404).
+- **CI** (`.github/workflows/ci.yml`): fast suite on every push and PR (installs bubblewrap, asserts
+  the API boots with `RL_IDE_REQUIRE_ISOLATION=1`, hits `/settings/llm` and `/usage`), the full suite
+  nightly or on demand, `tsc --noEmit` + `vite build` for the frontend, and an image build that runs
+  the container and waits for the healthcheck. The image needs
+  `--security-opt seccomp=unconfined` for bubblewrap's user namespaces.
+- **Suite split.** Heavy modules are marked `slow` (training, export, sandbox workers):
+  `pytest -m "not slow and not live_llm"` is **67 passed, 2 skipped in 1:08**; the full run keeps
+  everything.
+
+**Residual:** Docker is not installed on this host, so the image is built and booted by CI only — the
+locked set, the SPA build and the API boot were each validated locally, but not the `docker build`
+itself. A virtualenv under `/tmp` cannot exec inside `bwrap` (`--tmpfs /tmp` shadows it) — the image
+is unaffected, but a dev venv must live outside `/tmp`.
