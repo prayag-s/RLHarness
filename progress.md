@@ -1549,3 +1549,58 @@ round in flight is redone, the completed ones are not.
 - Frontend: `tsc --noEmit` clean; `vite build` clean. One real bug found by reading the code rather
   than by any tool: wrapping all fetches in `apiFetch` made it call itself (infinite recursion), which
   type-checks and builds perfectly.
+
+---
+
+## 19. v5.4 — Phase P2-D: journeys, not 25 independent guesses (G10)
+
+Every dataset environment was a contextual bandit: twenty-five independent rows, each with its own
+immediate reward. That fits routing and triage. It does not fit a renewal play over a quarter, a claim
+journey or a multi-touch cadence — those are one case that unfolds over several decisions and is only
+judged at the end. The representation was missing, so those problems could not be modelled at all.
+
+### 19.1 What exists now
+
+- The blueprint declares `task_structuring` (`one_shot` | `sequential`) and `episode_length`, carried
+  across both directions of the `AgentBlueprintSpec` ⇄ `DynamicTaskBlueprint` conversion.
+- **`SEQUENTIAL_ENV_TEMPLATE`** models one case per episode:
+  - the case has a **plan** — the required action at each stage, derived from the case's own label and
+    offset by the stage, so *the same record needs a different action at stage 0 than at stage 2*. A
+    policy that maps record → action cannot solve it; it has to track where it is in the journey;
+  - the observation carries the journey state (stage progress, accuracy so far, previous action) on
+    top of the real feature columns;
+  - the reward is **delayed**: `0.0` for every intermediate stage and `±1.0` only when the journey
+    ends, and `is_success` is terminal-only (which is what the scorecard already measures).
+- **The intake decides** from the request: "renewal play", "6-step onboarding flow", "claim journey",
+  "multi-touch cadence" → sequential with the stage count if one is stated; "classify each ticket" or
+  "triage each alert" → one-shot even if the sentence mentions steps. Choice matters because the wrong
+  one is a modelling error the user discovers only after training.
+- The one-shot template and its 25-step horizon are **untouched**, with a regression test that asserts
+  it — a classifier must not silently become a journey.
+
+Measured directly on a generated environment (renewal play, 4 stages):
+
+```text
+obs_dim 6 (3 real features + stage, accuracy-so-far, previous action)   horizon 4
+plan for the case: [1, 0, 2, 1]     <- different action at every stage
+running the plan:  rewards [0.0, 0.0, 0.0, 1.0]   is_success only at the end
+one wrong stage:   final reward -1.0, is_success False
+```
+
+### 19.2 Scope, stated plainly
+
+This is the sequential *representation*: persistent state, delayed reward, a plan the policy must
+follow. It is not a new learning algorithm, and because the stage is in the observation the problem
+remains Markovian — it is a real sequence task, not a partially-observable one. A `transition` that
+mutates hidden state from one case to the next is still out of scope, so the original 3–4 day estimate
+was for something larger than what shipped here.
+
+### 19.3 Verification
+
+- `backend/tests/test_sequential_tasks.py` — 17 tests: the intake decision table (including the
+  "classify each ticket, following the 3 step checklist" trap), the blueprint round-trip, one episode
+  = one case, state carrying across steps, delayed reward, terminal-only success, one wrong stage
+  losing the journey, demonstrations covering every stage, the episode-length clamp, interactive play
+  advancing and restarting a journey, and the one-shot regression.
+- Gates: **`pytest -q` → 214 passed, 2 skipped, 0 failed in 27:02**; fast gate
+  (`-m "not slow and not live_llm"`) → **155 passed, 2 skipped**.

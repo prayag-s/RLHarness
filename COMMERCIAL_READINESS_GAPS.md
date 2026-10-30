@@ -310,6 +310,23 @@ no confidence interval, and no per-segment breakdown.
 - **Fix:** let the blueprint declare a `transition` (row → next row) and a delayed reward, and add a
   multi-step dataset template alongside the existing one-shot template.
 - **Effort:** ~3–4 days. Deliberately last.
+- **Status: CLOSED in Phase P2-D.** The blueprint declares `task_structuring` (`one_shot` |
+  `sequential`) and `episode_length`, and a second dataset template — `SEQUENTIAL_ENV_TEMPLATE` —
+  models one case per episode: the case has a *plan* (a required action per stage, derived from its own
+  label and offset by stage, so the same record needs a different action at stage 0 than at stage 2),
+  the observation carries the journey state (stage progress, accuracy so far, previous action) so a
+  policy can condition on history, and the reward is **delayed** — 0.0 for every intermediate stage and
+  ±1.0 only when the journey ends, with `is_success` terminal-only. The intake sets this automatically
+  for journey-shaped requests ("renewal play", "6-step onboarding flow", "claim journey") and refuses
+  to do so when the request is explicitly per-record ("classify each ticket"), because the wrong choice
+  here is a modelling error the user should not have to discover after training. The one-shot template
+  and its 25-step horizon are untouched, and a regression test asserts that.
+
+  **Scope, stated plainly:** this delivers the sequential *representation* — persistent state, delayed
+  reward, a plan the policy must track — not a new training algorithm. The observation includes the
+  stage, so the problem is Markovian; it is a genuine sequence task rather than a bandit, but it is not
+  a partially-observable one. A `transition` that *mutates hidden state* (row → next row across cases)
+  is still out of scope.
 
 #### G11. Drift detection is built but never wired
 - **Evidence:** `DriftDetector` is imported only by the exported bundle
@@ -506,6 +523,12 @@ Acceptance: a caller must prove which tenant it is, and the old `x-owner-id` hea
 answer; expired data disappears on a schedule that is off by default and inspectable before arming;
 Azure OpenAI and a self-hosted OpenAI-compatible endpoint both work; an interrupted training run
 continues from its saved rounds. All met.
+
+**Phase P2-D — "value, not just trust" (≈1 day of the original 3–4) — DONE (2026-10-30)**
+G10.
+Acceptance: a journey-shaped request produces an environment where one episode is one case, the state
+persists across steps, the reward arrives only at the end, success is terminal-only, and a
+per-record request still produces the one-shot template. All met; see the scope note in G10.
 
 Only after these does G10 (sequential tasks) make sense — it is a value upgrade, not a
 trust-building one.

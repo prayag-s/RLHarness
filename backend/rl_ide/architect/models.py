@@ -93,6 +93,11 @@ class AgentBlueprintSpec(BaseModel):
     actions: list[ActionSpec] = Field(default_factory=list)
     observation_feature_specs: list[ObservationFeatureSpec] = Field(default_factory=list)
     label_column: str | None = None  # Optional target column for dataset-backed tasks
+    # "one_shot" = each step is an independent decision (contextual bandit).
+    # "sequential" = an episode is one case that unfolds over `episode_length` decisions, the state
+    # carries across steps and the reward arrives only at the end (G10).
+    task_structuring: str = "one_shot"
+    episode_length: int = 1
     pending_directive: str | None = None  # Latest mechanics/rule instruction for the synthesizer
 
     def to_dynamic_task_blueprint(self) -> DynamicTaskBlueprint:
@@ -121,6 +126,8 @@ class DynamicTaskBlueprint(BaseModel):
     target_metric_threshold: float = 85.0
     max_auto_tune_rounds: int = 4
     episodes_per_round: int = 200
+    task_structuring: str = "one_shot"
+    episode_length: int = 1
 
     def to_agent_blueprint_spec(self) -> AgentBlueprintSpec:
         reward_list = []
@@ -145,6 +152,8 @@ class DynamicTaskBlueprint(BaseModel):
             actions=self.actions,
             observation_feature_specs=self.observation_features,
             label_column=self.label_column,
+            task_structuring=self.task_structuring,
+            episode_length=self.episode_length,
         )
 
     @classmethod
@@ -174,6 +183,8 @@ class DynamicTaskBlueprint(BaseModel):
             target_metric_threshold=spec.target_metric_threshold,
             max_auto_tune_rounds=spec.max_auto_tune_rounds,
             episodes_per_round=spec.episodes_per_round,
+            task_structuring=spec.task_structuring,
+            episode_length=spec.episode_length,
         )
 
 

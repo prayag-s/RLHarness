@@ -416,6 +416,55 @@ def synthesize_blueprint_from_prompt(
     )
 
 
+# Words that mean "this case unfolds over several decisions" rather than "classify this row".
+_SEQUENTIAL_CUES = (
+    "journey", "playbook", "lifecycle", "funnel", "over time", "over the quarter", "over a quarter",
+    "multi-step", "multistep", "multi step", "step by step", "sequence of", "sequential",
+    "onboarding flow", "nurture", "cadence", "follow-up plan", "retention play", "renewal play",
+    "multi-touch", "multitouch", "multi touch", "claim journey", "escalation path", "over several",
+)
+# Words that mean the opposite: a single decision we should not turn into a journey.
+_ONE_SHOT_CUES = ("classify", "triage each", "route each", "categorise each", "categorize each", "score each")
+_SEQUENTIAL_STAGE_RE = re.compile(
+    r"(\d{1,2})\s*[-\u2013]?\s*(?:step|stage|phase|touch|cycle)s?", re.IGNORECASE
+)
+
+
+def infer_task_structuring(prompt: str) -> tuple[str, int]:
+    """Decides whether a request describes a journey or a single decision.
+
+    A renewal play, a claim journey or a multi-touch cadence is one case that unfolds over several
+    decisions with an outcome at the end; treating it as N independent guesses is a modelling error
+    the user should not have to correct afterwards (G10). Explicit "one-shot" wording wins over a
+    stray mention of "steps".
+    """
+    text = (prompt or "").lower()
+    if any(cue in text for cue in _ONE_SHOT_CUES):
+        return "one_shot", 1
+    matched = [cue for cue in _SEQUENTIAL_CUES if cue in text]
+    if not matched:
+        return "one_shot", 1
+    stages = _SEQUENTIAL_STAGE_RE.search(text)
+    if stages:
+        length = max(1, min(int(stages.group(1)), 12))
+    else:
+        # Five stages is the shortest length at which "state across steps" matters.
+        length = 5
+    return "sequential", length
+
+
+def apply_task_structuring(blueprint: AgentBlueprintSpec, prompt: str) -> AgentBlueprintSpec:
+    """Sets `task_structuring`/`episode_length` from the request unless it was already chosen."""
+    structuring, length = infer_task_structuring(prompt)
+    if structuring == "one_shot":
+        return blueprint
+    blueprint.task_structuring = structuring
+    blueprint.episode_length = length
+    if "journey" not in (blueprint.success_metric_name or "").lower():
+        blueprint.success_metric_name = "Journey Completion Rate (%)"
+    return blueprint
+
+
 def apply_answers_to_blueprint(
     blueprint: AgentBlueprintSpec,
     answers: dict[str, Any] | None,
@@ -515,6 +564,8 @@ class IntakeArchitectAgent:
             dyn_blueprint, extract_action_labels_from_prompt(prompt)
         )
         blueprint = dyn_blueprint.to_agent_blueprint_spec()
+        # A journey-shaped request must not be modelled as N independent guesses (G10).
+        blueprint = apply_task_structuring(blueprint, prompt)
 
         # Incorporate custom training params if provided
         if training_params:
