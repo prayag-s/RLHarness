@@ -51,17 +51,39 @@ cannot operate or bill the service, **P2** = it limits depth of value or slows s
   file, in file order, with no shuffle and no split
   ([feature_engineering.py](./backend/rl_ide/synthesizer/feature_engineering.py) L190–L193).
   The same records are handed to the training env and to the 50-episode deterministic evaluation
-  ([loop_controller.py](./backend/rl_ide/autopilot/loop_controller.py) L537, L981). For LLM-authored
-  control tasks the evaluation loop first masks logits to `get_critical_actions()` — an oracle hint
-  ([loop_controller.py](./backend/rl_ide/autopilot/loop_controller.py) L1024–L1040). There is no
-  baseline comparison, no confidence interval, and no per-segment breakdown.
+  ([loop_controller.py](./backend/rl_ide/autopilot/loop_controller.py) L537, L981).
+- **Evidence — three different policies, all called "the policy":**
+
+| Stage | Action masking | Where |
+|---|---|---|
+| Training | none — plain SB3 `model.learn` | `loop_controller.py` L522 |
+| Critic calibration | `get_valid_actions()` | `loop_controller.py` L938–L941 |
+| Deterministic evaluation | `get_critical_actions()` **first**, else `get_valid_actions()` | `loop_controller.py` L1024–L1040 |
+| ONNX export / daemon | none — the graph takes `obs` only | `exporter.py` L109 |
+
+`get_critical_actions()` is a tactical oracle ("block the immediate threat"), so the evaluation number
+is produced by a policy the customer will never receive. The two functions are not even part of a
+validated contract: the env specification only *suggests* them to the LLM
+([env_builder.py](./backend/rl_ide/synthesizer/env_builder.py) L373), so whether an environment
+implements them, and with what semantics, varies per synthesis. There is also no baseline comparison,
+no confidence interval, and no per-segment breakdown.
+
 - **Why it blocks revenue:** the "87.0 % / 95.4 % / 81.2 %" run in `progress.md` §10 is a
-  training-set number with a favourable action mask. Any competent buyer or data scientist will ask
-  for a held-out figure, and when it is not available the whole tool reads as a demo.
-- **Fix:** deterministic 70/15/15 split by row hash (stable across runs); train on 70 %, select on
-  15 %, report on 15 %; evaluate with `action_masks=None` unless the mask is part of the deployed
-  policy; report human-label agreement (the CSV's own label) as the baseline the policy must beat;
-  add a Wilson 95 % CI to every success-rate figure; emit a per-class / per-segment table.
+  training-set number produced by an oracle-assisted policy that is neither the trained one nor the
+  exported one. Any competent buyer or data scientist will ask for a held-out figure, and when it is
+  not available the whole tool reads as a demo.
+- **Fix:**
+  1. **Split** deterministically 70/15/15 by row hash (stable across processes, independent of file
+     order); train on 70 %, select on 15 %, report on 15 %.
+  2. **Masking doctrine.** Remove `get_critical_actions()` from evaluation entirely — it is an
+     oracle, not semantics. Keep `get_valid_actions()` **only if all three hold**: it is a pure
+     legality predicate (environment physics, not a hint), the exported ONNX daemon applies the
+     identical mask at inference, and training sees the same mask. Today none of the three hold, so
+     the default must be: evaluate unmasked, and report the illegal-action rate as a separate
+     number. Anything else is a different policy from the one being shipped.
+  3. **Baseline and error bars.** Report human-label agreement (the CSV's own label) as the bar the
+     policy must clear, add a Wilson 95 % CI to every success-rate figure, and emit a per-class /
+     per-segment table.
 - **Effort:** ~1.5 days including tests.
 
 #### G2. LLM-generated Python executes inside the API process
@@ -76,11 +98,24 @@ cannot operate or bill the service, **P2** = it limits depth of value or slows s
   customers' data with the API process's privileges. A denylist is not a boundary; `open` is blocked
   but `numpy.fromfile`, `pandas.read_csv` and object-graph traversal are not. Security review of a
   hosted deployment will stop at this line.
-- **Fix:** run the env in a subprocess (`multiprocessing` spawn) or container with a wall-clock
-  timeout, no network, a read-only root, and only a whitelisted stdlib/numpy surface; communicate over
-  pipes. For the exported daemon, bind `127.0.0.1` by default, require a token, and document the flag
-  that opens it up.
-- **Effort:** ~2–3 days for the subprocess sandbox; ~2 hours for the daemon defaults.
+- **Evidence — `multiprocessing` alone is not a sandbox (measured):** a `spawn`-context worker runs
+  with the API's UID and filesystem, so it read the tenant database
+  (`read_ok`, uid 1000) exactly like the parent. The same read inside `bwrap` failed with
+  `FileNotFoundError`, and outbound sockets failed with `Network is unreachable`.
+- **Fix:** keep the pipe-based worker design (hard wall-clock timeout, crash isolation, no shared
+  memory with the API), and launch **that worker under `bwrap`**:
+  `bwrap --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /lib64 /lib64 \
+  --ro-bind <case-dir> /app --dev /dev --proc /proc --tmpfs /tmp \
+  --unshare-net --unshare-pid --die-with-parent <python> -m worker`.
+  Bind only the interpreter, the wheels, and the current case directory; no `/home`, no `/etc`, no
+  network, read-only root. `bwrap` is present at `/usr/bin/bwrap` on this host and the probe passed,
+  so it is testable today. Fall back to `unshare -rn` where `bwrap` is unavailable; if neither
+  exists, **fail closed in multi-tenant mode** rather than silently running generated code
+  in-process (single-user local mode may keep the current behaviour behind an explicit flag).
+  For the exported daemon: bind `127.0.0.1` by default, require a token, and document the flag that
+  opens it up.
+- **Effort:** ~2–3 days for the sandboxed worker plus the fallback matrix; ~2 hours for the daemon
+  defaults.
 
 #### G3. Customer rows are embedded in the workspace and the exported bundle
 - **Evidence:** `records_json = json.dumps(records_from_frame(usable), default=str)` is written into
@@ -228,10 +263,23 @@ cannot operate or bill the service, **P2** = it limits depth of value or slows s
 
 #### G15. The arena is a 30–155 s LLM call on the critical path
 - **Evidence:** commit `5e9ab72` raised the arena timeout to 240 s because live synthesis needs
-  111–155 s and the previous 35 s ceiling silently degraded to a generic fallback.
-- **Fix:** declare the deterministic arena first (instant), then upgrade to the bespoke LLM arena when
-  it arrives; never block "Lock Arena" on it.
-- **Effort:** ~1 day; mostly frontend sequencing.
+  111–155 s and the previous 35 s ceiling silently degraded to a generic fallback. When that fallback
+  did appear (the Submarine run), it was indistinguishable from a broken generator — the UI showed
+  generic telemetry cards with no indication that a bespoke canvas was still coming.
+- **Fix:** declare the deterministic arena first (instant), never block "Lock Arena" on the LLM, then
+  hot-swap when the bespoke arena arrives. The swap mechanism already exists — `arena_updated` events
+  replace the iframe HTML ([App.tsx](./frontend/src/App.tsx) L699–L701) and the `mock_preview` mode
+  plumbing is in place
+  ([SandboxedArenaIframe.tsx](./frontend/src/components/SandboxedArenaIframe.tsx) L67, L82) — so what
+  is missing is the *pending* state, not the swap:
+  - a persistent status pill in the arena header while the job is in flight, e.g.
+    `🎨 Synthesizing bespoke domain canvas (~90 s) — showing live telemetry preview`, driven by the
+    `arena` / stage event from G5 rather than a fixed timer;
+  - the pill must change to a clear failure state (with a retry affordance) if synthesis errors,
+    instead of silently leaving the generic arena on screen;
+  - the generic arena must be visibly labelled as a preview, so it can never be mistaken for the
+    final artefact in a screenshot or a demo.
+- **Effort:** ~1 day; mostly frontend sequencing plus the stage event from G5.
 
 #### G16. No evaluation of the *deployed* policy, only of the trained one
 - **Evidence:** metrics come from `evaluate_policy_deterministic` over the env instance
@@ -255,6 +303,11 @@ cannot operate or bill the service, **P2** = it limits depth of value or slows s
 | `backend/runs` size | 213 MB | `du -sh` |
 | Rows used from a 600-row upload | 120 | `MAX_ROWS`, `df.head(limit)` |
 | Dataset episode horizon | 25 steps | `self.episode_horizon` |
+| `multiprocessing` spawn child reads `runs/conversations.db` | **yes** (uid 1000, same as server) | spawn probe |
+| Same read inside `bwrap` (ro `/usr`,`/lib`,`/lib64`, no `/home`) | `FileNotFoundError` | bwrap probe |
+| Outbound socket inside `bwrap --unshare-net` | `Network is unreachable` | bwrap probe |
+| Unprivileged user namespaces | enabled (`unprivileged_userns_clone=1`, `max_user_namespaces=26377`) | `/proc/sys/...` |
+| Action masking by stage | train **none** / eval **critical→valid** / export **none** | read + grep |
 | Synthesis latency | 2–3 min/env | `progress.md` §10.4 |
 | Arena synthesis latency | 111–155 s | commit `5e9ab72` |
 | Backend suite runtime | ≈11 min, 90 tests | `pytest -q` |
@@ -272,13 +325,17 @@ G1 + G14 + G16.
 Acceptance: a run produces a `scorecard.json` containing held-out success rate, human-label baseline,
 Wilson CI, per-segment breakdown, sampled-row counts, and ONNX-vs-SB3 action agreement; the browser
 suite asserts the held-out number, not the training number; a test proves the split is stable across
-processes and that evaluation runs without oracle masking.
+processes, that evaluation never consults `get_critical_actions()`, and that the exported policy is
+scored under the same masking regime it will run under (today: none, with the illegal-action rate
+reported separately).
 
 **Phase P0-B — "safe to host" (≈3 days)**
 G2 + G3 + G4 + G9.
-Acceptance: env modules execute in a sandboxed subprocess with a timeout and no network; default
-bundles contain no raw rows; every conversation and dataset is owner-scoped and survives a restart;
-verification directories are created under `TemporaryDirectory` and the DB is compacted after deletes.
+Acceptance: env modules execute in a `bwrap` (or `unshare -rn`) worker with a wall-clock timeout, no
+network, a read-only root and only the case directory visible; the multi-tenant path fails closed when
+isolation is unavailable; default bundles contain no raw rows; every conversation and dataset is
+owner-scoped and survives a restart; verification directories are created under `TemporaryDirectory`
+and the DB is compacted after deletes.
 
 **Phase P1-C — "operable" (≈3 days)**
 G5 + G6 + G7 + G8.
@@ -314,3 +371,47 @@ the audit never covered:
 | G3 | F17 residual (sample rows in exported bundles) | accepted → **blocking** under a DPA |
 | G11 | F28 residual (drift "unmonitored") | accepted → **P2 product gap** |
 | G1, G4, G5, G6, G7, G9 | not previously registered | new |
+
+---
+
+## 7. External review (2026-10-30) — refinements folded into G1, G2, G15
+
+A frontier-model review of the first draft raised three refinements. All three were checked against
+the source and accepted; two changed the prescribed fix, one turned out to need less work than the
+reviewer assumed.
+
+| Refinement | Verdict | Effect on this document |
+|---|---|---|
+| R1 — separate `get_valid_actions()` (rules) from `get_critical_actions()` (oracle) | **Accepted, strengthened** | G1 evidence and fix rewritten |
+| R2 — `multiprocessing` is not a security boundary; use `bwrap`/`unshare` | **Accepted, verified empirically** | G2 fix rewritten, §3 rows added |
+| R3 — make the instant-preview → bespoke-arena swap explicit in the UI | **Accepted, scope reduced** | G15 expanded |
+
+**R1 — masking doctrine (accepted, and stronger than proposed).**
+The review is right that legality masking is legitimate where it models physics, and that
+`get_critical_actions()` is an oracle. Verified in code: evaluation prefers `critical_actions` and only
+falls back to `valid_actions` (`loop_controller.py` L1024–L1026), while the exported ONNX graph takes
+`obs` alone with no mask at all (`exporter.py` L109) and training runs plain `model.learn`
+(`loop_controller.py` L522) with no mask either. So the proposed condition — *allow legality masking
+only if the bundle applies it too* — is currently **false in every respect**, which makes the correct
+first move unambiguous: strip both masks from evaluation, report the illegal-action rate, and only
+reintroduce `get_valid_actions()` together with a masked export path and matching training. The deeper
+finding is train/serve skew, not just eval inflation: three stages, three policies
+(§3), one reported number.
+
+**R2 — sandbox (accepted, measured).**
+Confirmed rather than assumed: a `spawn` child has the server's UID and filesystem and read the tenant
+SQLite database (probe in §3). Under `bwrap` with only the interpreter, libraries and the case
+directory bound read-only, the same read fails with `FileNotFoundError` and sockets fail with
+`Network is unreachable`. Both probes ran on this host, so the fix is testable now. Two operational
+caveats recorded with the fix: `bwrap` needs unprivileged user namespaces (present here: 26 377
+available), and where namespaces are disabled — some CI and hardened container runtimes — the system
+must **fail closed** in multi-tenant mode rather than silently reverting to in-process execution.
+
+**R3 — arena swap (accepted, but smaller than it looks).**
+The behaviour the review describes already half exists: `arena_updated` events replace the iframe
+HTML (`App.tsx` L699–L701) and `mock_preview` mode is wired
+(`SandboxedArenaIframe.tsx` L67, L82). What is missing is the *pending* affordance and an honest
+failure state — so G15 is scoped to a stage-event-driven status pill, not to new transport. One
+correction to the proposed wording: the pill must be driven by real job events rather than a fixed
+"~90 s" estimate, since the measured range is 111–155 s and a countdown that overruns reads as another
+silent failure.
