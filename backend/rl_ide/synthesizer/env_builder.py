@@ -648,6 +648,7 @@ class JITEnvironmentSynthesizer:
 from __future__ import annotations
 import math
 import random
+import zlib
 from typing import Any, Callable
 import gymnasium as gym
 from gymnasium import spaces
@@ -677,7 +678,11 @@ class SynthesizedGymEnv(gym.Env):
 
         source = [dict(r) for r in dataset_records] if dataset_records else [dict(r) for r in self._records]
         self.records = source or [{{}}]
+        # Runtime records (all usable rows) may be larger than the embedded sample.
+        self.dataset_rows_total = {len(usable)}
+        self.label_column = {label_column!r}
         self._feature_ops = self._fit_bounds(self.records)
+        self.split_indices = self._compute_splits()
 
         self.current_idx = 0
         self.step_count = 0
@@ -686,7 +691,8 @@ class SynthesizedGymEnv(gym.Env):
         self.last_action = None
         self.last_feedback = ""
         self.last_reward_breakdown = {{}}
-        self.label_column = {label_column!r}
+        self.active_split = "train"
+        self.split_fallback = False
         self._declared_state_schema = {dict(blueprint.state_dict_schema or {})!r}
         self.is_placeholder = False
         self.task_class = "classification"
@@ -715,6 +721,47 @@ class SynthesizedGymEnv(gym.Env):
             else:
                 fitted.append((kind, column, low, high))
         return fitted
+
+    def _split_for(self, record):
+        """Content-hash split so a row lands in the same split on every process and restart."""
+        parts = []
+        for key in sorted(record):
+            if key == self.label_column:
+                continue
+            value = record.get(key)
+            if isinstance(value, float):
+                value = f"{{value:.6f}}"
+            parts.append(f"{{key}}={{value}}")
+        bucket = zlib.crc32("|".join(parts).encode("utf-8")) % 100
+        if bucket < 70:
+            return "train"
+        if bucket < 85:
+            return "val"
+        return "test"
+
+    def _compute_splits(self):
+        groups = {{"train": [], "val": [], "test": []}}
+        for index, record in enumerate(self.records):
+            groups[self._split_for(record)].append(index)
+        if not any(groups.values()):
+            groups["train"] = list(range(len(self.records)))
+        return groups
+
+    def split_counts(self):
+        """Number of records available in each split."""
+        return {{name: len(indices) for name, indices in self.split_indices.items()}}
+
+    def available_splits(self):
+        return [name for name, indices in self.split_indices.items() if indices]
+
+    def _resolve_split(self, requested):
+        """Returns (split, fell_back). Falls back rather than silently training on held-out rows."""
+        if requested and self.split_indices.get(requested):
+            return requested, False
+        for name in ("train", "val", "test"):
+            if self.split_indices.get(name):
+                return name, bool(requested) and requested != name
+        return "train", False
 
     def _extract_obs(self, record: dict[str, Any]) -> np.ndarray:
         obs = np.zeros(self.obs_dim, dtype=np.float32)
@@ -757,7 +804,13 @@ class SynthesizedGymEnv(gym.Env):
             random.seed(seed)
             np.random.seed(seed)
 
-        self.current_idx = random.randrange(len(self.records))
+        requested = None
+        if isinstance(options, dict):
+            requested = options.get("split")
+        self.active_split, self.split_fallback = self._resolve_split(requested)
+        order = self.split_indices[self.active_split]
+
+        self.current_idx = order[random.randrange(len(order))]
         self.step_count = 0
         self.correct_count = 0
         self.cumulative_score = 0.0
@@ -768,6 +821,9 @@ class SynthesizedGymEnv(gym.Env):
         obs = self._extract_obs(self.records[self.current_idx])
         info = {{
             "record_index": self.current_idx,
+            "split": self.active_split,
+            "split_fallback": self.split_fallback,
+            "split_counts": self.split_counts(),
             "is_success": False,
             "reward_breakdown": {{}},
             "arena_state": self.render_arena_state(),
@@ -795,13 +851,19 @@ class SynthesizedGymEnv(gym.Env):
         )
 
         previous_idx = self.current_idx
-        self.current_idx = (self.current_idx + 1) % len(self.records)
+        order = self.split_indices.get(self.active_split) or list(range(len(self.records)))
+        try:
+            position = order.index(self.current_idx)
+        except ValueError:
+            position = -1
+        self.current_idx = order[(position + 1) % len(order)]
         next_obs = self._extract_obs(self.records[self.current_idx])
         terminated = self.step_count >= self.episode_horizon
 
         info = {{
             "record_index": self.current_idx,
             "decision_record_index": previous_idx,
+            "split": self.active_split,
             "is_success": bool(is_correct),
             "is_correct": bool(is_correct),
             "correct_count": self.correct_count,
@@ -827,6 +889,8 @@ class SynthesizedGymEnv(gym.Env):
         state = {{
             "record_index": self.current_idx,
             "total_records": len(self.records),
+            "active_split": self.active_split,
+            "split_size": len(self.split_indices.get(self.active_split) or []),
             "step_count": self.step_count,
             "accuracy_pct": round(accuracy, 1),
             "last_action": self.last_action if self.last_action is not None else -1,
@@ -851,6 +915,11 @@ class SynthesizedGymEnv(gym.Env):
             obs = self._extract_obs(custom_record)
             self.records = self.records + [dict(custom_record)]
             self.current_idx = len(self.records) - 1
+            self.split_indices = self._compute_splits()
+            for _name, _idxs in self.split_indices.items():
+                if self.current_idx in _idxs:
+                    self.active_split = _name
+                    break
         else:
             index = int(payload.get("user_action", self.current_idx)) % len(self.records) if isinstance(payload, dict) else 0
             self.current_idx = index
@@ -871,12 +940,15 @@ class SynthesizedGymEnv(gym.Env):
             "status_text": f"Agent routed this record to: {{label}}",
         }}
 
-    def get_demonstrations(self, num_samples: int = 200) -> tuple[np.ndarray, np.ndarray]:
+    def get_demonstrations(self, num_samples: int = 200, split: str = "train") -> tuple[np.ndarray, np.ndarray]:
         features = np.zeros((num_samples, self.obs_dim), dtype=np.float32)
         targets = np.zeros(num_samples, dtype=np.int64)
+        indices = self.split_indices.get(split) if split else None
+        if not indices:
+            indices = list(range(len(self.records)))
         usable = 0
         for i in range(num_samples):
-            record = self.records[i % len(self.records)]
+            record = self.records[indices[i % len(indices)]]
             truth = self._truth_for(record)
             if truth is None:
                 continue

@@ -834,3 +834,89 @@ $ pytest -q
   up to 10 minutes per chat turn.
 - Datasets are synthetic but structurally realistic (conditional feature generation with label overlap);
   they are fixtures for the harness, not customer data.
+
+---
+
+## 11. v4.7 — Phase P0-A: the honest number (2026-10-30)
+
+Implements G1 + G14 + G16 from [COMMERCIAL_READINESS_GAPS.md](./COMMERCIAL_READINESS_GAPS.md): the
+reported metric must describe the policy the customer receives, measured on rows it never trained
+on, next to a baseline a buyer recognises.
+
+### 11.1 What changed
+
+| Gap | Change |
+|---|---|
+| **G1** | Deterministic 70/15/15 split by row-content hash (`zlib.crc32`, not `hash()`); training and round selection see only `train`/`val`; the scorecard evaluates the untouched `test` split once at the end of a run. `evaluate_policy_deterministic` no longer consults `get_critical_actions()` (a tactical oracle) or `get_valid_actions()` (a legality mask the ONNX export does not apply); illegal moves are counted and reported instead of hidden. |
+| **G1** | Baselines computed on the same held-out rows: uniform chance (1/k), majority class (most frequent *training* label), logistic regression on the same derived features (tabular), uniform-random policy over full episodes (control tasks). Wilson 95 % interval on the policy number. |
+| **G14** | `records_from_frame` shuffles with a fixed seed before truncating, so the embedded 120-row sample is representative instead of the first 120 rows of an export-ordered file; `split_counts`, `dataset_rows_total` and `embedded_in_module` are recorded in the scorecard so a number is never presented as "your whole dataset". |
+| **G16** | `PolicyExporter.verify_behavioural_parity` runs identical seeded episodes through the SB3 policy and the exported ONNX session, reporting action agreement and any success-rate gap. It is written into the bundle's `scorecard.json` alongside the numeric parity figure. |
+
+New module: [scorecard.py](./backend/rl_ide/autopilot/scorecard.py) (Wilson interval, majority /
+logreg baselines, scorecard schema and the in-sample warning). The scorecard is persisted to
+`workspaces/<session>/scorecard.json`, exposed on `SessionState`, on `GET /api/v4/conversations/{id}`,
+and pushed over the websocket as a `scorecard_ready` event. The UI shows it in the telemetry panel
+(held-out value with CI, each baseline, the uplift verdict, ONNX action agreement, split sizes).
+
+### 11.2 Measured effect
+
+Support-ticket fixture (600 rows, 4 queues), 2 rounds × 40 episodes:
+
+| | Before (masked, all rows) | After (held-out test split) |
+|---|---|---|
+| Reported metric | 90.6 % (val, same rows as training) | **85.4 %** (84 test rows) with 95 % CI [83.3, 87.2] |
+| Baselines shown | none | uniform 25.0 %, majority 30.9 %, **logistic regression 84.5 %** |
+| Uplift over best baseline | unknown | +0.9 pts |
+
+The last row is the point of the exercise: on this dataset the RL policy is only marginally better
+than a one-line classifier, and now the product says so instead of reporting 90.6 %.
+
+Reproduced end-to-end through the live API (upload → chat → arena preview → lock & train → export)
+on a real backend process, not a test client:
+
+```text
+held_out true · eval_split test · splits {train: 423, val: 93, test: 84}
+policy 85.44 % (95 % CI 83.38-87.29, 50 episodes, 0.0 % illegal)
+baselines: uniform 25.0 · majority 30.94 · logistic regression 84.5
+uplift vs best baseline +0.94 pts · rows {total: 600, embedded_in_module: 120}
+export deployment: 100 % action agreement over 250 steps, ONNX success == policy success (83.2),
+                   numeric parity 2.4e-07
+```
+
+Tic-Tac-Toe (control task) reports 78-90 % across runs unmasked, versus the previous ≥ 90 % which
+was only reachable with the oracle mask; the convergence test was rewritten to assert a best-round
+floor plus a 40-point margin over the in-run random baseline (≈ 20 %).
+
+### 11.3 Verification
+
+```text
+$ pytest -q
+101 passed, 7 warnings in 612.97s (0:10:12)
+```
+
+| Test file | Purpose |
+|---|---|
+| `tests/test_scorecard.py` | **New** (11 tests) — split stability across processes, disjoint/exhaustive splits, embedded-record split parity, episodes confined to the requested split, shuffled embedded sampling, oracle/mask trap during evaluation, Wilson interval, majority baseline, in-sample flagging, scorecard persistence, ONNX behavioural parity |
+| `tests/test_v4_convergence.py` | Rewritten to assert convergence without oracle masking, plus a margin over the in-run random baseline |
+| `tests/test_v4_1.py` | Unchanged; still verifies unique episode ids (held-out episodes are tagged `r<N>_holdout_*`) |
+| `npm run build` | Clean (tsc + vite, 1 599 modules) |
+
+Live verification (separate backend on `:8010`, deleted afterwards): dataset upload, arena preview,
+"Lock Arena & Start Training", two rounds, `scorecard_ready` in the session payload and in
+`GET /api/v4/conversations/{id}`, export bundle containing `scorecard.json` with the deployment
+section.
+
+### 11.4 Residual risk added by this phase
+
+- **Selection is single-shot.** Rounds are selected on `val`, but no checkpoint is retained per
+  round, so the scorecard reports the final model rather than the best-on-validation one. A cheap
+  follow-up is to snapshot `model.zip` when val improves and evaluate that checkpoint on test.
+- **Baseline sample sizes repeat rows.** `get_demonstrations(5000)` cycles the split, so the
+  numbers are unbiased but the reported `n` is the sample count, not the row count.
+- **Control tasks have no split.** They report `held_out: false` with an explanatory note; success is
+  measured over full episodes against the environment's own dynamics.
+- **Scorecard cost.** The final evaluation adds 50 episodes per run (≈ 2-4 s on tabular tasks).
+- **Demo rollouts still mask legality.** `_run_ppo_burst` (the rollout streamed to the arena during
+  training) applies `get_valid_actions()` so the visualisation stays legible; it is a display path,
+  not a measurement, and the scorecard path is unmasked. Worth unifying when the legality contract
+  is defined for export (G2/§7 R1).

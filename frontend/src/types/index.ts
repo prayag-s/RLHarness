@@ -151,6 +151,7 @@ export interface SessionState {
   episodes?: EpisodeLog[]
   latest_frame?: Record<string, any>
   total_episodes_trained?: number
+  scorecard?: Scorecard | null
 }
 
 export type StudioActionType =
@@ -180,6 +181,41 @@ export interface StudioChatResponse {
   current_round: number
   best_metric: number
   current_metric?: number
+}
+
+export interface ScorecardBaseline {
+  name: string
+  value_pct: number
+  detail?: string | null
+  n?: number | null
+}
+
+export interface Scorecard {
+  version: number
+  task_title: string
+  task_class: string
+  metric_name: string
+  held_out: boolean
+  eval_split: string
+  split_counts: Record<string, number>
+  policy: {
+    value_pct: number
+    episodes: number
+    ci95_pct: [number, number] | null
+    illegal_actions_pct: number
+  }
+  baselines: ScorecardBaseline[]
+  uplift_vs_best_baseline_pct: number
+  beats_all_baselines: boolean
+  rows: { total: number | null; embedded_in_module: number | null }
+  notes: string[]
+  deployment?: {
+    action_agreement_pct?: number
+    policy_success_pct?: number
+    onnx_success_pct?: number
+    onnx_numeric_parity_max_diff?: number
+    error?: string
+  }
 }
 
 export interface ConversationSummary {
@@ -212,6 +248,7 @@ export interface ConversationDetail {
   arena_html?: string | null
   latest_model_zip_path?: string | null
   arena_locked?: boolean
+  scorecard?: Scorecard | null
 }
 
 export interface IngestedDatasetSummary {

@@ -23,6 +23,7 @@ import {
   ConversationDetail,
   TrainingParams,
   StudioChatResponse,
+  Scorecard,
 } from './types'
 
 import {
@@ -70,6 +71,7 @@ export const App: React.FC = () => {
   const [currentRound, setCurrentRound] = useState<number>(1)
   const [maxRounds, setMaxRounds] = useState<number>(4)
   const [roundHistory, setRoundHistory] = useState<RoundSnapshot[]>([])
+  const [scorecard, setScorecard] = useState<Scorecard | null>(null)
   const [driftStatus] = useState<string>('unmonitored')
 
   // Dataset & Timeline
@@ -231,6 +233,7 @@ export const App: React.FC = () => {
       setArenaLocked(conv.arena_locked ?? false)
       setEnvModuleCode(conv.env_code || '')
       setEpisodes(conv.episodes || [])
+      setScorecard(conv.scorecard || null)
       if (conv.best_metric !== undefined) setCurrentMetric(conv.best_metric)
       if (conv.current_round !== undefined) setCurrentRound(conv.current_round)
       if (conv.training_params) {
@@ -637,6 +640,7 @@ export const App: React.FC = () => {
       setEnvModuleCode(sessionData.env_module_code || '')
       if (sessionData.current_round) setCurrentRound(sessionData.current_round)
       if (sessionData.current_metric) setCurrentMetric(sessionData.current_metric)
+      setScorecard(sessionData.scorecard || null)
       const history = sessionData.rounds_history || sessionData.round_history || []
       if (history.length > 0) {
         setRoundHistory(history.map((r: any) => ({
@@ -696,7 +700,15 @@ export const App: React.FC = () => {
   const handleWebSocketEvent = (event: any) => {
     const eventType = event.event
 
-    if (eventType === 'arena_updated') {
+    if (eventType === 'scorecard_ready') {
+      setScorecard(event.scorecard || null)
+      addTimelineItem(
+        'Held-Out Scorecard 🎯',
+        event.message || 'Evaluation finished on unseen rows.',
+        'round',
+        'success',
+      )
+    } else if (eventType === 'arena_updated') {
       if (event.arena_html) {
         setArenaHtml(event.arena_html)
       }
@@ -990,6 +1002,7 @@ export const App: React.FC = () => {
           currentRound={currentRound}
           maxRounds={maxRounds}
           roundHistory={roundHistory}
+          scorecard={scorecard}
           driftStatus={driftStatus}
           onRollback={handleRollback}
           isRollingBack={isRollingBack}

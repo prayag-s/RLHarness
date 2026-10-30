@@ -10,6 +10,10 @@ and the test history (covered by [progress.md](./progress.md), §10).
 **Method:** every claim below was read out of the source or measured on the live instance. Numbers in
 §3 were produced by running the commands shown next to them, not estimated.
 
+> **Remediation status (2026-10-30):** Phase **P0-A** is implemented and committed — **G1, G14 and
+> G16 are CLOSED** (see each entry, and `progress.md` §11). Phases P0-B (G2, G3, G4, G9) and P1-C
+> (G5–G8) remain open.
+
 ---
 
 ## 1. Verdict
@@ -85,6 +89,13 @@ no confidence interval, and no per-segment breakdown.
      policy must clear, add a Wilson 95 % CI to every success-rate figure, and emit a per-class /
      per-segment table.
 - **Effort:** ~1.5 days including tests.
+- **Status: CLOSED in Phase P0-A.** Content-hash 70/15/15 split (`zlib.crc32`, stable across
+  processes); rounds score on `val`, the scorecard scores `test` once; both masks are gone from
+  evaluation and illegal moves are reported; baselines are uniform (1/k), majority class and
+  logistic regression, with a Wilson 95 % interval. On the 600-row support-ticket fixture the honest
+  number is **85.4 % [83.3–87.2]** versus the previously reported 90.6 %, and the strongest baseline
+  (logistic regression) reaches 84.5 % — the RL policy is only 0.9 pts ahead, and the product now
+  says so.
 
 #### G2. LLM-generated Python executes inside the API process
 - **Evidence:** `load_synthesized_env_class` uses `importlib.util.spec_from_file_location` +
@@ -260,6 +271,10 @@ no confidence interval, and no per-segment breakdown.
   lookup over records; 5 000 rows is cheap), and record the sampled-row count in the metric metadata
   so the number is never presented as "your whole dataset".
 - **Effort:** ~0.5 day; folds into G1.
+- **Status: CLOSED in Phase P0-A.** Sampling is shuffled with a fixed seed (`random_state=1337`);
+  training and evaluation already used the full runtime record set, and the scorecard now records
+  `rows.total` (usable rows) next to `rows.embedded_in_module` (the 120-row standalone sample) and
+  the exact per-split counts.
 
 #### G15. The arena is a 30–155 s LLM call on the critical path
 - **Evidence:** commit `5e9ab72` raised the arena timeout to 240 s because live synthesis needs
@@ -288,6 +303,10 @@ no confidence interval, and no per-segment breakdown.
 - **Fix:** run one held-out episode batch through the exported ONNX session and assert action agreement
   with the SB3 policy; include the result in the bundle's `baseline.json`.
 - **Effort:** ~0.5 day.
+- **Status: CLOSED in Phase P0-A.** `PolicyExporter.verify_behavioural_parity` replays identical
+  seeded episodes through SB3 and ONNX and reports action agreement plus both success rates; the
+  result is written to the bundle as `scorecard.json → deployment`, next to the numeric parity
+  figure. A regression test asserts 100 % agreement for a freshly exported policy.
 
 ---
 
@@ -320,7 +339,7 @@ no confidence interval, and no per-segment breakdown.
 
 Three phases, each independently shippable and each ending in a green suite plus a commit.
 
-**Phase P0-A — "honest number" (≈2.5 days)**
+**Phase P0-A — "honest number" (≈2.5 days) — DONE (2026-10-30)**
 G1 + G14 + G16.
 Acceptance: a run produces a `scorecard.json` containing held-out success rate, human-label baseline,
 Wilson CI, per-segment breakdown, sampled-row counts, and ONNX-vs-SB3 action agreement; the browser

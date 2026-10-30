@@ -94,6 +94,20 @@ global_omni_agent = StudioOmniAgent(
 init_llm_state()
 
 
+def load_session_scorecard(session_id: str) -> dict[str, Any] | None:
+    """Returns the persisted held-out scorecard for a session, if one has been produced."""
+    session = global_store.get_session(session_id)
+    if session is not None and session.scorecard:
+        return session.scorecard
+    path = global_store.base_dir / session_id / "scorecard.json"
+    if path.exists():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+    return None
+
+
 def require_verified_llm() -> None:
     """Enforces that a working, verified LLM key is active before allowing task execution."""
     if not is_llm_ready():
@@ -622,11 +636,13 @@ def get_conversation(conversation_id: str):
                 env_module_code=env_code_val,
                 arena_html=arena_html_val,
                 latest_model_zip_path=conv.get("latest_model_zip_path"),
+                scorecard=load_session_scorecard(conversation_id),
             )
             global_store.set_session(session)
         except Exception as s_err:
             print(f"Warning: Failed to reconstruct SessionState: {s_err}")
 
+    conv["scorecard"] = load_session_scorecard(conversation_id)
     return conv
 
 
@@ -1075,7 +1091,16 @@ def session_export(session_id: str):
         model=model,
         env_module_path=env_path,
         arena_html_path=arena_path,
+        scorecard=load_session_scorecard(session_id),
     )
+
+    exported_scorecard: dict[str, Any] | None = None
+    scorecard_file = Path(bundle_dir) / "scorecard.json"
+    if scorecard_file.exists():
+        try:
+            exported_scorecard = json.loads(scorecard_file.read_text(encoding="utf-8"))
+        except Exception:
+            exported_scorecard = None
 
     return {
         "session_id": session_id,
@@ -1083,6 +1108,7 @@ def session_export(session_id: str):
         "bundle_path": str(bundle_dir),
         "zip_path": str(zip_path),
         "onnx_parity_diff": max_diff,
+        "scorecard": exported_scorecard,
         "download_url": f"/api/v4/sessions/{session_id}/download",
     }
 

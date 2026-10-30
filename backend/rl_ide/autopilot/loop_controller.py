@@ -126,6 +126,7 @@ class SessionState(BaseModel):
     arena_html: str = ""
     weights_path: str | None = None
     latest_model_zip_path: str | None = None
+    scorecard: dict[str, Any] | None = None
     error_message: str | None = None
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
@@ -533,13 +534,16 @@ class AutonomousLoopController:
             )
             replay_buffer.extend(burst_episodes)
 
-            # Stage 3.4: Evaluate Target Success Metric Strictly from Deterministic Rollouts
+            # Stage 3.4: Evaluate Target Success Metric Strictly from Deterministic Rollouts.
+            # Rounds are scored on the selection split (val, else train) so that the held-out
+            # test split is only ever used for the final scorecard.
             eval_metric, eval_episodes, illegal_pct = self.evaluate_policy_deterministic(
                 env=env,
                 model=model,
                 n_eval_episodes=50,
                 emit_fn=emit,
                 round_num=r,
+                split=self._selection_split(env),
             )
             current_metric = eval_metric
             session.current_metric = current_metric
@@ -551,7 +555,7 @@ class AutonomousLoopController:
                 "metric": current_metric,
                 "target": target_threshold,
                 "success_metric_name": blueprint.success_metric_name,
-                "episodes_tested": 50,
+                "episodes_tested": len(eval_episodes),
                 "illegal_moves_pct": illegal_pct,
             })
 
@@ -746,6 +750,17 @@ class AutonomousLoopController:
                 "metric": current_metric,
                 "diagnosis": tuning_res.diagnosis,
                 "changes_summary": tuning_res.changes_summary,
+            })
+
+        # Final held-out scorecard: the only number that describes the shipped policy.
+        try:
+            self._finalize_scorecard(session=session, model=model, env=env, blueprint=blueprint, emit=emit)
+        except Exception as scorecard_err:
+            print(f"Warning: scorecard finalization failed for {session_id}: {scorecard_err}")
+            emit({
+                "event": "scorecard_failed",
+                "round": session.current_round,
+                "message": f"Scorecard unavailable: {scorecard_err}",
             })
 
         return session
@@ -985,10 +1000,17 @@ class AutonomousLoopController:
         n_eval_episodes: int = 50,
         emit_fn: Callable[[dict[str, Any]], None] | None = None,
         round_num: int = 1,
+        split: str | None = None,
+        phase: str = "eval",
     ) -> tuple[float, list[dict[str, Any]], float]:
-        """Runs dedicated deterministic evaluation (deterministic=True) with valid action masking
-        across a balanced suite of opponent behavior profiles and player turn positions.
-        Returns: (success_rate_pct, eval_episodes, illegal_rate_pct)
+        """Scores the policy exactly as it ships: unmasked, on the requested data split.
+
+        Action masks are deliberately not applied. ``get_critical_actions()`` is a tactical
+        oracle, and legality masks are only meaningful if training and the exported ONNX policy
+        apply the identical mask — neither does. Illegal moves are counted and reported instead of
+        being hidden by a mask.
+
+        Returns: (metric_pct, eval_episodes, illegal_rate_pct)
         """
         eval_episodes: list[dict[str, Any]] = []
         success_count = 0
@@ -999,10 +1021,16 @@ class AutonomousLoopController:
             profile = profiles[(ep_idx - 1) % len(profiles)]
             agent_first = (ep_idx % 2 == 1)
             reset_opts = {"opponent_profile": profile, "agent_first": agent_first}
+            if split:
+                reset_opts["split"] = split
             try:
                 obs, info = env.reset(options=reset_opts)
             except (TypeError, ValueError):
-                obs, info = env.reset()
+                try:
+                    obs, info = env.reset(options={"split": split}) if split else env.reset()
+                except (TypeError, ValueError):
+                    obs, info = env.reset()
+            effective_split = str((info or {}).get("split") or split or "all")
 
             ep_steps = []
             ep_reward = 0.0
@@ -1020,36 +1048,9 @@ class AutonomousLoopController:
                     logits = model.policy.action_net(latent_pi)
                     probs = torch.softmax(logits, dim=-1).squeeze(0).cpu().numpy()
 
-                # Action Masking: mask out invalid actions and prioritize critical threat actions if any
-                critical_actions = env.get_critical_actions() if hasattr(env, "get_critical_actions") else None
-                valid_actions = env.get_valid_actions() if hasattr(env, "get_valid_actions") else None
-                target_actions = critical_actions if (critical_actions and len(critical_actions) > 0) else valid_actions
-
-                if target_actions is not None and len(target_actions) > 0:
-                    masked_probs = np.zeros_like(probs)
-                    for a in target_actions:
-                        if a < len(probs):
-                            masked_probs[a] = probs[a]
-                    if masked_probs.sum() > 0:
-                        masked_probs /= masked_probs.sum()
-                        action = int(np.argmax(masked_probs))
-                    else:
-                        action = int(target_actions[0])
-                    action_probs_to_emit = masked_probs.tolist()
-                elif valid_actions is not None and len(valid_actions) > 0:
-                    masked_probs = np.zeros_like(probs)
-                    for a in valid_actions:
-                        if a < len(probs):
-                            masked_probs[a] = probs[a]
-                    if masked_probs.sum() > 0:
-                        masked_probs /= masked_probs.sum()
-                        action = int(np.argmax(masked_probs))
-                    else:
-                        action = int(valid_actions[0])
-                    action_probs_to_emit = masked_probs.tolist()
-                else:
-                    action = int(np.argmax(probs))
-                    action_probs_to_emit = probs.tolist()
+                # No action masking: the policy is scored exactly as it is exported.
+                action = int(np.argmax(probs))
+                action_probs_to_emit = probs.tolist()
 
                 next_obs, reward, terminated, truncated, step_info = env.step(action)
                 ep_reward += float(reward)
@@ -1068,7 +1069,7 @@ class AutonomousLoopController:
                     "is_correct": step_info.get("is_correct"),
                 })
 
-                ep_id = f"r{round_num}_eval_{ep_idx}"
+                ep_id = f"r{round_num}_{phase}_{effective_split}_{ep_idx}"
                 # Stream top deterministic evaluation episodes to the UI Arena
                 if emit_fn and ep_idx <= 5:
                     emit_fn({
@@ -1094,6 +1095,7 @@ class AutonomousLoopController:
             eval_episodes.append({
                 "episode_id": ep_id,
                 "round": round_num,
+                "split": effective_split,
                 "total_reward": ep_reward,
                 "steps": ep_steps,
                 "is_success": bool(ep_steps and ep_steps[-1].get("is_success")),
@@ -1110,6 +1112,154 @@ class AutonomousLoopController:
             metric = round((success_count / max(1, n_eval_episodes)) * 100.0, 2)
         illegal_rate = round((illegal_count / max(1, n_eval_episodes)) * 100.0, 2)
         return metric, eval_episodes, illegal_rate
+
+    @staticmethod
+    def _selection_split(env: gym.Env) -> str | None:
+        """Split used while training/selecting: validation when present, else train."""
+        available = getattr(env, "available_splits", None)
+        if callable(available):
+            try:
+                names = available()
+            except Exception:
+                return None
+            if "val" in names:
+                return "val"
+            if "train" in names:
+                return "train"
+        return None
+
+    @staticmethod
+    def _held_out_split(env: gym.Env) -> tuple[str | None, dict[str, int]]:
+        """Prefers the untouched test split, then val, then whatever remains."""
+        counts = env.split_counts() if callable(getattr(env, "split_counts", None)) else {}
+        for name in ("test", "val", "train"):
+            if counts.get(name):
+                return name, counts
+        return None, counts
+
+    def _random_policy_baseline(
+        self,
+        env: gym.Env,
+        split: str | None,
+        n_episodes: int = 20,
+        seed: int = 7,
+    ) -> dict[str, Any]:
+        """Uniform-random-action baseline, scored with the same episode metric as the policy."""
+        rng = np.random.default_rng(seed)
+        n_actions = int(getattr(env.action_space, "n", 1) or 1)
+        values: list[float] = []
+        for _ in range(max(1, n_episodes)):
+            try:
+                obs, info = env.reset(options={"split": split}) if split else env.reset()
+            except (TypeError, ValueError):
+                obs, info = env.reset()
+            steps: list[dict[str, Any]] = []
+            for _step in range(episode_step_limit(env)):
+                obs, _reward, terminated, truncated, info = env.step(int(rng.integers(0, n_actions)))
+                steps.append({
+                    "is_success": bool(info.get("is_success", False)),
+                    "is_correct": info.get("is_correct"),
+                })
+                if terminated or truncated:
+                    break
+            values.append(episode_metric_value(env, steps))
+        return {
+            "name": "random_policy",
+            "value_pct": round(sum(values) / max(1, len(values)), 2),
+            "detail": "uniform random actions over full episodes",
+            "n": len(values),
+        }
+
+    def _finalize_scorecard(
+        self,
+        session: SessionState,
+        model: PPO,
+        env: gym.Env,
+        blueprint: Any,
+        emit: Callable[[dict[str, Any]], None],
+    ) -> dict[str, Any]:
+        """Evaluates on the untouched split, adds baselines, and persists the scorecard."""
+        from rl_ide.autopilot.scorecard import (
+            build_scorecard,
+            logreg_baseline,
+            majority_class_baseline,
+            uniform_chance_pct,
+            wilson_ci,
+        )
+
+        eval_split, split_counts = self._held_out_split(env)
+        task_class = str(getattr(env, "task_class", "control"))
+
+        metric, episodes, illegal = self.evaluate_policy_deterministic(
+            env=env,
+            model=model,
+            n_eval_episodes=50,
+            round_num=session.current_round,
+            split=eval_split,
+            phase="holdout",
+        )
+        session.episodes.extend(episodes)
+
+        if task_class == "classification":
+            graded = [s for ep in episodes for s in ep.get("steps", []) if s.get("is_correct") is not None]
+            interval = wilson_ci(sum(1 for s in graded if s.get("is_correct")), len(graded))
+        else:
+            wins = sum(1 for ep in episodes if float(ep.get("metric_value", 0.0)) >= 100.0)
+            interval = wilson_ci(wins, len(episodes))
+
+        n_actions = int(getattr(env, "n_actions", getattr(env.action_space, "n", 1)) or 1)
+        baselines: list[dict[str, Any]] = [
+            {
+                "name": "uniform_random",
+                "value_pct": uniform_chance_pct(n_actions),
+                "detail": "1/k uniform guess",
+                "n": None,
+            }
+        ]
+        if task_class == "classification":
+            for baseline_fn in (majority_class_baseline, logreg_baseline):
+                entry = baseline_fn(env, eval_split or "train")
+                if entry:
+                    baselines.append(entry)
+        else:
+            baselines.append(self._random_policy_baseline(env, eval_split))
+
+        scorecard = build_scorecard(
+            task_title=getattr(blueprint, "task_title", session.session_id),
+            task_class=task_class,
+            metric_name=getattr(blueprint, "success_metric_name", None) or "success rate",
+            split_counts=split_counts,
+            eval_split=eval_split or "all",
+            split_fallback=bool(getattr(env, "split_fallback", False)),
+            policy_metric_pct=metric,
+            episodes=len(episodes),
+            illegal_rate_pct=illegal,
+            baselines=baselines,
+            ci95_pct=interval,
+            rows_total=getattr(env, "dataset_rows_total", None),
+            embedded_rows=len(getattr(env, "_records", []) or []) or None,
+            notes=[
+                "Scored without action masking: the exported ONNX policy applies no mask, so "
+                "neither does the evaluation.",
+            ],
+        )
+        session.scorecard = scorecard
+
+        scorecard_path = self.store.base_dir / session.session_id / "scorecard.json"
+        scorecard_path.parent.mkdir(parents=True, exist_ok=True)
+        scorecard_path.write_text(json.dumps(scorecard, indent=2), encoding="utf-8")
+
+        emit({
+            "event": "scorecard_ready",
+            "round": session.current_round,
+            "scorecard": scorecard,
+            "message": (
+                f"Held-out evaluation on the '{scorecard['eval_split']}' split: "
+                f"{scorecard['policy']['value_pct']}% "
+                f"(baseline best {max((b['value_pct'] for b in baselines), default=0.0)}%)."
+            ),
+        })
+        return scorecard
 
     def _critic_warmup(
         self,

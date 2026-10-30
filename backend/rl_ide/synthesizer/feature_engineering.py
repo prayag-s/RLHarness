@@ -18,11 +18,18 @@ from __future__ import annotations
 
 import math
 import re
+import zlib
 from typing import Any, Iterable
 
 MAX_CATEGORIES = 12
 MAX_FEATURES = 64
+# Rows embedded in the generated module (the runtime passes the full record set separately).
+# Kept small so a runbundle stays readable; sampling is shuffled, never "first N in file order".
 MAX_ROWS = 120
+
+TRAIN_SPLIT_PCT = 70
+VAL_SPLIT_PCT = 85  # cumulative: train < 70, val < 85, test >= 85
+SPLIT_NAMES = ("train", "val", "test")
 
 _STOP_TOKENS = {"to", "the", "a", "an", "of", "for", "and", "or", "agent", "route", "action"}
 
@@ -187,10 +194,55 @@ def select_usable_rows(df: Any, label_column: str, label_map: dict[str, int]) ->
     return df[mask]
 
 
-def records_from_frame(df: Any, limit: int = MAX_ROWS) -> list[dict[str, Any]]:
-    """Serialises rows into JSON-safe dicts (raw values, so labels and arenas stay meaningful)."""
+def record_fingerprint(record: dict[str, Any], label_column: str | None = None) -> str:
+    """Builds a stable, content-only key for a row (used for deterministic splitting).
+
+    Uses ``zlib.crc32`` rather than ``hash()`` because Python salts string hashing per process,
+    which would move rows between splits on restart and between the API process and a worker.
+    """
+    parts: list[str] = []
+    for key in sorted(record):
+        if label_column is not None and str(key) == str(label_column):
+            continue
+        value = record[key]
+        if isinstance(value, float):
+            value = f"{value:.6f}"
+        parts.append(f"{key}={value}")
+    return "|".join(parts)
+
+
+def split_for_record(record: dict[str, Any], label_column: str | None = None) -> str:
+    """Assigns a record to ``train``/``val``/``test`` by content hash (70/15/15)."""
+    bucket = zlib.crc32(record_fingerprint(record, label_column).encode("utf-8")) % 100
+    if bucket < TRAIN_SPLIT_PCT:
+        return "train"
+    if bucket < VAL_SPLIT_PCT:
+        return "val"
+    return "test"
+
+
+def split_counts(records: Iterable[dict[str, Any]], label_column: str | None = None) -> dict[str, int]:
+    """Counts records per split without materialising the groups."""
+    counts = {name: 0 for name in SPLIT_NAMES}
+    for record in records:
+        counts[split_for_record(record, label_column)] += 1
+    return counts
+
+
+def records_from_frame(df: Any, limit: int = MAX_ROWS, shuffle: bool = True) -> list[dict[str, Any]]:
+    """Serialises rows into JSON-safe dicts (raw values, so labels and arenas stay meaningful).
+
+    Sampling is shuffled with a fixed seed before truncation: taking ``head(limit)`` of an
+    export-ordered file silently trains on one region of the data and reports on that same region.
+    """
+    frame = df
+    if limit is not None and shuffle and len(df) > limit:
+        frame = df.sample(frac=1.0, random_state=1337).head(limit)
+    elif limit is not None:
+        frame = df.head(limit)
+
     records: list[dict[str, Any]] = []
-    for _, row in df.head(limit).iterrows():
+    for _, row in frame.iterrows():
         rec: dict[str, Any] = {}
         for col, value in row.items():
             if hasattr(value, "item"):

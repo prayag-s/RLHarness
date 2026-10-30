@@ -361,6 +361,82 @@ class PolicyExporter:
         return max_diff
 
     @classmethod
+    def verify_behavioural_parity(
+        cls,
+        model: PPO,
+        onnx_path: str | Path,
+        env: Any,
+        n_episodes: int = 10,
+        seed: int = 1234,
+    ) -> dict[str, Any]:
+        """Compares the exported ONNX policy with the SB3 policy over whole episodes.
+
+        Numerical parity on random observations (``verify_parity``) proves the graph computes the
+        same numbers; it does not prove the shipped artefact behaves the same. This runs full
+        episodes with each policy and reports action agreement plus any success-rate gap.
+        """
+        from rl_ide.autopilot.loop_controller import episode_metric_value, episode_step_limit
+
+        orig_device = getattr(model.policy, "device", None)
+        model.policy.to("cpu")
+        wrapper = _OnnxActorWrapper(model.policy)
+        wrapper.eval()
+        sess = ort.InferenceSession(str(onnx_path))
+        rng = np.random.default_rng(seed)
+
+        agreement = 0
+        compared = 0
+
+        def _probs(obs: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+            obs_t = torch.from_numpy(obs.reshape(1, -1).astype(np.float32))
+            with torch.no_grad():
+                sb3 = wrapper(obs_t).cpu().numpy()[0]
+            onnx = sess.run(None, {"obs": obs.reshape(1, -1).astype(np.float32)})[0][0]
+            return sb3, onnx
+
+        # Both passes must face identical episodes, otherwise a success-rate gap could come from
+        # a different sample of rows rather than from the policy.
+        episode_seeds = [int(rng.integers(0, 1_000_000)) for _ in range(max(1, n_episodes))]
+
+        def _rollout(use_onnx: bool, compare: bool) -> list[float]:
+            nonlocal agreement, compared
+            values: list[float] = []
+            for episode_seed in episode_seeds:
+                obs, _info = env.reset(seed=episode_seed)
+                steps: list[dict[str, Any]] = []
+                for _step in range(episode_step_limit(env)):
+                    sb3_probs, onnx_probs = _probs(np.asarray(obs, dtype=np.float32))
+                    if compare:
+                        compared += 1
+                        if int(np.argmax(sb3_probs)) == int(np.argmax(onnx_probs)):
+                            agreement += 1
+                    action = int(np.argmax(onnx_probs if use_onnx else sb3_probs))
+                    obs, _reward, terminated, truncated, info = env.step(action)
+                    steps.append({
+                        "is_success": bool(info.get("is_success", False)),
+                        "is_correct": info.get("is_correct"),
+                    })
+                    if terminated or truncated:
+                        break
+                values.append(episode_metric_value(env, steps))
+            return values
+
+        try:
+            policy_values = _rollout(use_onnx=False, compare=True)
+            onnx_values = _rollout(use_onnx=True, compare=False)
+        finally:
+            if orig_device is not None:
+                model.policy.to(orig_device)
+
+        return {
+            "action_agreement_pct": round(100.0 * agreement / max(1, compared), 2),
+            "steps_compared": compared,
+            "policy_success_pct": round(sum(policy_values) / max(1, len(policy_values)), 2),
+            "onnx_success_pct": round(sum(onnx_values) / max(1, len(onnx_values)), 2),
+            "episodes": max(1, n_episodes),
+        }
+
+    @classmethod
     def package_runbundle(
         cls,
         session_id: str,
@@ -370,6 +446,7 @@ class PolicyExporter:
         arena_html_path: Path | str,
         output_dir: str | Path = "exported_bundles",
         bundle_name: str | None = None,
+        scorecard: dict[str, Any] | None = None,
     ) -> tuple[Path, Path, float]:
         """Creates a standalone .runbundle directory and zip archive."""
         out_dir = Path(output_dir).resolve()
@@ -400,6 +477,7 @@ class PolicyExporter:
         from rl_ide.state.records_store import load_records
 
         real_obs_samples: list[list[float]] = []
+        sample_env = None
         try:
             env_cls = load_synthesized_env_class(env_module_path)
             sample_env = instantiate_env(env_cls, dataset_records=load_records(Path(env_module_path).parent))
@@ -427,6 +505,30 @@ class PolicyExporter:
         finally:
             if orig_device is not None and model and hasattr(model, "policy"):
                 model.policy.to(orig_device)
+
+        # 1b. Behavioural parity: the shipped artefact must behave like the trained policy,
+        # not merely compute the same numbers on random observations.
+        deployment: dict[str, Any] = {}
+        if sample_env is not None and model is not None:
+            try:
+                deployment = cls.verify_behavioural_parity(
+                    model=model, onnx_path=onnx_file, env=sample_env
+                )
+            except Exception as behaviour_err:
+                deployment = {"error": f"behavioural parity unavailable: {behaviour_err}"}
+
+        scorecard_payload: dict[str, Any] = dict(scorecard) if scorecard else {
+            "version": 1,
+            "notes": ["No training scorecard was available for this session."],
+        }
+        scorecard_payload["deployment"] = {
+            **deployment,
+            "onnx_numeric_parity_max_diff": float(max_diff),
+            "onnx_numeric_parity_tolerance": ONNX_PARITY_TOLERANCE,
+        }
+        (bundle_dir / "scorecard.json").write_text(
+            json.dumps(scorecard_payload, indent=2), encoding="utf-8"
+        )
 
         # 2. Save blueprint_spec.json
         (bundle_dir / "blueprint_spec.json").write_text(

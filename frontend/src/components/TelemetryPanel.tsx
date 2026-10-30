@@ -10,7 +10,7 @@ import {
   Sparkles,
   Zap,
 } from 'lucide-react'
-import { RoundSnapshot } from '../types'
+import { RoundSnapshot, Scorecard } from '../types'
 
 interface TelemetryPanelProps {
   targetMetricName?: string
@@ -19,6 +19,7 @@ interface TelemetryPanelProps {
   currentRound: number
   maxRounds: number
   roundHistory: RoundSnapshot[]
+  scorecard?: Scorecard | null
   driftStatus: string
   onRollback: (roundNum: number) => Promise<void>
   isRollingBack?: boolean
@@ -31,6 +32,7 @@ export const TelemetryPanel: React.FC<TelemetryPanelProps> = ({
   currentRound = 1,
   maxRounds = 4,
   roundHistory = [],
+  scorecard = null,
   driftStatus = 'healthy',
   onRollback,
   isRollingBack = false,
@@ -93,6 +95,84 @@ export const TelemetryPanel: React.FC<TelemetryPanelProps> = ({
           </div>
         </div>
       </div>
+
+      {/* 1b. Held-out scorecard: the only number that describes the shipped policy */}
+      {scorecard && (
+        <div className="p-4 border-b border-gray-800 bg-gray-950/60 space-y-2.5">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-bold uppercase tracking-wider text-gray-400 flex items-center space-x-1.5">
+              <CheckCircle2 className="h-4 w-4 text-cyan-400" />
+              <span>Held-Out Scorecard</span>
+            </span>
+            <span
+              className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                scorecard.held_out
+                  ? 'bg-cyan-950/80 text-cyan-300 border-cyan-800/60'
+                  : 'bg-amber-950/80 text-amber-300 border-amber-800/60'
+              }`}
+            >
+              {scorecard.held_out ? `held out · ${scorecard.eval_split}` : 'in-sample'}
+            </span>
+          </div>
+
+          <div className="flex items-baseline justify-between">
+            <span className="text-[11px] text-gray-500 font-mono truncate pr-2">
+              {scorecard.metric_name}
+            </span>
+            <div className="flex items-baseline space-x-1">
+              <span className="text-xl font-black font-mono text-cyan-300">
+                {scorecard.policy.value_pct.toFixed(1)}%
+              </span>
+              {scorecard.policy.ci95_pct && (
+                <span className="text-[10px] text-gray-500 font-mono">
+                  [{scorecard.policy.ci95_pct[0].toFixed(1)}–{scorecard.policy.ci95_pct[1].toFixed(1)}]
+                </span>
+              )}
+            </div>
+          </div>
+
+          <div className="space-y-1">
+            {scorecard.baselines.map((b) => (
+              <div key={b.name} className="flex items-center justify-between text-[11px]">
+                <span className="text-gray-400 truncate pr-2">
+                  {b.name.replace(/_/g, ' ')}
+                  {b.detail ? <span className="text-gray-600"> · {b.detail}</span> : null}
+                </span>
+                <span className="font-mono text-gray-500">{b.value_pct.toFixed(1)}%</span>
+              </div>
+            ))}
+          </div>
+
+          <div
+            className={`text-[11px] rounded-lg px-2 py-1.5 border ${
+              scorecard.beats_all_baselines
+                ? 'bg-emerald-950/40 border-emerald-800/40 text-emerald-300'
+                : 'bg-amber-950/40 border-amber-800/40 text-amber-300'
+            }`}
+          >
+            {scorecard.beats_all_baselines
+              ? `Beats every baseline by +${scorecard.uplift_vs_best_baseline_pct.toFixed(1)} pts`
+              : `${Math.abs(scorecard.uplift_vs_best_baseline_pct).toFixed(1)} pts below the best baseline`}
+          </div>
+
+          {scorecard.deployment?.action_agreement_pct !== undefined && (
+            <div className="flex items-center justify-between text-[10px] text-gray-500 font-mono">
+              <span>ONNX behaviour</span>
+              <span>
+                {scorecard.deployment.action_agreement_pct.toFixed(1)}% action agreement
+              </span>
+            </div>
+          )}
+
+          <div className="flex items-center justify-between text-[10px] text-gray-600 font-mono">
+            <span>
+              train {scorecard.split_counts.train ?? 0} · val {scorecard.split_counts.val ?? 0} · test{' '}
+              {scorecard.split_counts.test ?? 0}
+            </span>
+            <span>{scorecard.policy.episodes} eps</span>
+          </div>
+        </div>
+      )}
 
       {/* 2. Autonomous Closed-Loop Self-Tuning History */}
       <div className="flex-1 p-4 space-y-3 overflow-y-auto">
