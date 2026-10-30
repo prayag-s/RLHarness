@@ -45,6 +45,19 @@ The blunt summary: today this is a **single-tenant research studio that produces
 and an unverifiable number**. A buyer's three questions — *"does it work on data you didn't train on?"*,
 *"where does my data go?"*, *"who else can see it?"* — have no good answer in the product.
 
+**Update (2026-10-30, end of P2-D): all sixteen gaps now carry a CLOSED status.** The three buyer
+questions have direct answers in the product: a held-out, baseline-compared `scorecard.json` including
+deployed-policy parity (G1, G14, G16); generated code that runs inside a `bwrap` boundary with no
+network and no view of other tenants (G2, G3); and proven tenant identity with hashed tokens, a scoped
+websocket and a retention window (G4, G9). The operational layer that was missing — async jobs,
+metering, CI, pinned deps, a container, live drift, resumable training — is in place (G5–G8, G11), and
+the two product-friction items are gone: the studio opens and is explorable without a key (G13), and a
+journey-shaped task is modelled as a journey rather than as twenty-five independent guesses (G10, G12).
+
+What remains is not in this register: the multi-worker/resumable-*mid-round* training limit, the
+Markovian (rather than partially observable) sequential template, and the absence of a real pricing or
+onboarding funnel — those are listed as residuals under their gaps rather than as open gaps.
+
 ---
 
 ## 2. Gap register
