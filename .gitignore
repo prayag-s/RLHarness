@@ -51,13 +51,26 @@ yarn-error.log*
 runs/
 workspaces/
 exported_bundles/
+*.onnx
 *.onnx.data
+*.pt
+*.pth
+*.runbundle
+*.runbundle.zip
+model.zip
 deepseek_text_*.txt
+
+# Local databases & logs
+*.db
+*.db-wal
+*.db-shm
+*.log
 
 # Environment variables & local secrets
 .env
 .env.local
 .env.*.local
+.llm_config.json
 
 # Operating System & Editor Files
 .DS_Store
