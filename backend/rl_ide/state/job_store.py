@@ -10,12 +10,13 @@ explicit, retryable failure instead of a spinner that never resolves.
 from __future__ import annotations
 
 import json
-import sqlite3
 import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from rl_ide.state.sqlite_utils import bounded_connection
 
 QUEUED = "queued"
 RUNNING = "running"
@@ -45,10 +46,9 @@ class JobStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
-    def _conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path), timeout=30.0)
-        conn.row_factory = sqlite3.Row
-        return conn
+    def _conn(self) -> Any:
+        """Context manager yielding a connection that is always closed (see ``sqlite_utils``)."""
+        return bounded_connection(self.db_path)
 
     def _init_db(self) -> None:
         with self._conn() as conn:
@@ -238,7 +238,7 @@ class JobStore:
 
     # ------------------------------------------------------------------ helper
     @staticmethod
-    def _decode(row: sqlite3.Row) -> dict[str, Any]:
+    def _decode(row: Any) -> dict[str, Any]:
         job = dict(row)
         for key in ("payload", "result"):
             if job.get(key):

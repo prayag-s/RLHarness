@@ -154,6 +154,9 @@ export interface SessionState {
   scorecard?: Scorecard | null
 }
 
+/** How the arena on screen was produced. A preview must never be mistaken for the final canvas. */
+export type ArenaSource = 'bespoke' | 'fallback' | 'preview'
+
 export type StudioActionType =
   | 'clarify_or_discuss'
   | 'update_arena'
@@ -174,6 +177,8 @@ export interface StudioChatResponse {
   arena_html?: string | null
   env_code?: string | null
   arena_locked: boolean
+  /** "bespoke" (LLM canvas), "fallback" (schema-driven preview after a failed canvas) or "preview". */
+  arena_source?: ArenaSource | null
   questions: ClarifyingQuestion[]
   clarifying_questions: ClarifyingQuestion[]
   quick_chips: string[]
@@ -248,7 +253,10 @@ export interface ConversationDetail {
   arena_html?: string | null
   latest_model_zip_path?: string | null
   arena_locked?: boolean
+  arena_source?: ArenaSource | null
   scorecard?: Scorecard | null
+  /** Present while a synthesis/training job is in flight, so a reload knows work is still running. */
+  active_job?: { job_id: string; kind: string; stage: string; status: string } | null
 }
 
 export interface IngestedDatasetSummary {

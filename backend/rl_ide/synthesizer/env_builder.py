@@ -420,6 +420,8 @@ class JITEnvironmentSynthesizer:
     def __init__(self, llm_client: BaseLLMClient | None = None):
         self._llm_client = llm_client
         self.last_warnings: list[str] = []
+        # What the automatic KPI repair did, for the turn's timeline and logs.
+        self._relaxation_log: list[str] = []
 
     @property
     def client(self) -> BaseLLMClient:
@@ -478,6 +480,29 @@ class JITEnvironmentSynthesizer:
                 "Environment failed sandbox verification: " + (logs[-1][-500:] if logs else "unknown error")
             )
         self.last_warnings = list(tester.last_warnings)
+
+        # A success condition no policy can reach makes the whole run report 0 % and wastes every
+        # training round. Repair it here — bounded, re-verified — instead of only warning (G12).
+        if tester.last_success_observed is False:
+            fixed, relaxed_code, relax_logs = tester.relax_unreachable_success(
+                code_str=healed_code,
+                blueprint=bp_spec,
+                dataset=dataset,
+                workspace_dir=out_dir,
+            )
+            self._relaxation_log = relax_logs
+            if fixed:
+                healed_code = relaxed_code
+                logs.extend(relax_logs)
+                self.last_warnings = list(tester.last_warnings)
+            else:
+                self.last_warnings = list(tester.last_warnings) + [
+                    "The environment's success criteria could not be made reachable automatically; "
+                    "expect a low or zero success rate for this task."
+                ]
+        else:
+            self._relaxation_log = []
+
         file_path.write_text(healed_code, encoding="utf-8")
         env_cls = load_synthesized_env_class(file_path)
         return healed_code, file_path, env_cls

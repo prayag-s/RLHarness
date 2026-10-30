@@ -82,6 +82,10 @@ class StudioChatResponse(BaseModel):
     arena_html: str | None = None
     env_code: str | None = None
     arena_locked: bool = False
+    # "bespoke" (LLM canvas), "fallback" (schema-driven preview because the canvas failed) or
+    # "preview" (shown while the bespoke canvas is still generating). Lets the UI label a
+    # generic preview instead of presenting it as the final artefact.
+    arena_source: str | None = None
     questions: list[ClarifyingQuestion] = Field(default_factory=list)
     clarifying_questions: list[ClarifyingQuestion] = Field(default_factory=list)
     quick_chips: list[str] = Field(default_factory=list)
@@ -686,10 +690,44 @@ class StudioOmniAgent:
 
             questions = intake_resp.questions or intake_resp.clarifying_questions or []
 
+            # Declare the arena as soon as the blueprint exists, before the 60-155 s environment
+            # synthesis. The declared contract is enough to render a playable preview, so the user
+            # is never staring at an empty stage — and "Lock Arena" is never blocked on a provider.
+            if blueprint:
+                report("arena_preview", "Declaring the instant arena preview")
+                try:
+                    early_preview = self.arena_synthesizer.preview_arena_html(
+                        blueprint=blueprint,
+                        sample_arena_state=self._neutral_sample_state(blueprint),
+                    )
+                    current_arena_html = early_preview
+                    self.conv_store.save_or_update(
+                        conversation_id=conversation_id,
+                        status="arena_preview",
+                        title=blueprint.task_title or conv.get("title", "New Agent"),
+                        blueprint_spec=blueprint.model_dump(),
+                        arena_html=early_preview,
+                        training_params=t_params,
+                        dataset_id=effective_dataset_id,
+                        arena_source="preview",
+                    )
+                    if broadcast_callback:
+                        broadcast_callback(
+                            {
+                                "event": "arena_updated",
+                                "arena_html": early_preview,
+                                "arena_kind": "preview",
+                                "pending_bespoke": True,
+                            }
+                        )
+                except Exception as exc:  # a preview is never worth failing the turn for
+                    report("arena_preview", f"Preview unavailable: {exc}")
+
             # Synthesize + verify the environment first so the arena is bound to real state.
             sample_state: dict[str, Any] | None = None
             synthesis_error: str | None = None
             synthesis_warnings: list[str] = []
+            relaxation_log: list[str] = []
             if active_dataset is not None and hasattr(active_dataset, "df"):
                 save_records(ws_dir, active_dataset.df.to_dict(orient="records"))
 
@@ -705,6 +743,7 @@ class StudioOmniAgent:
                     report("verification", "Verifying the generated environment")
                     sample_state = self._render_sample_state(env_cls, active_dataset)
                     synthesis_warnings = list(getattr(self.env_synthesizer, "last_warnings", []) or [])
+                    relaxation_log = list(getattr(self.env_synthesizer, "_relaxation_log", []) or [])
                 except Exception as ex:
                     synthesis_error = str(ex)
                     sample_state = self._neutral_sample_state(blueprint)
@@ -737,14 +776,50 @@ class StudioOmniAgent:
                     action_plan=action_plan,
                 )
 
-            report("arena", "Designing the arena")
+            # Declare the deterministic arena *first*: it is built from the declared contract in
+            # milliseconds, so the studio (and "Lock Arena") never waits on a 30-155 s provider
+            # call. The bespoke canvas replaces it in place when it arrives (G15).
+            report("arena_preview", "Declaring the instant arena preview")
+            preview_html = self.arena_synthesizer.preview_arena_html(
+                blueprint=blueprint,
+                sample_arena_state=sample_state,
+            )
+            current_arena_html = preview_html
+            self.conv_store.save_or_update(
+                conversation_id=conversation_id,
+                # Status is left alone: the early save already set "arena_preview", and the user may
+                # have locked and started training while this turn was still generating.
+                title=blueprint.task_title or conv.get("title", "New Agent"),
+                blueprint_spec=blueprint.model_dump(),
+                arena_html=preview_html,
+                env_code=current_env_code,
+                # `None` preserves whatever the user chose: locking during generation must stick.
+                arena_locked=None,
+                training_params=t_params,
+                dataset_id=effective_dataset_id,
+                arena_source="preview",
+            )
+            if broadcast_callback:
+                broadcast_callback(
+                    {
+                        "event": "arena_updated",
+                        "arena_html": preview_html,
+                        "arena_kind": "preview",
+                        "pending_bespoke": True,
+                    }
+                )
+
+            report("arena", "Designing the bespoke arena")
             arena_html_str, _ = self.arena_synthesizer.synthesize(
                 blueprint=blueprint,
                 sample_arena_state=sample_state,
                 session_id=conversation_id,
                 workspace_dir=ws_dir,
             )
-            current_arena_html = arena_html_str
+            arena_source = "bespoke" if getattr(self.arena_synthesizer, "last_source", "fallback") == "llm" else "fallback"
+            arena_error = getattr(self.arena_synthesizer, "last_error", None)
+            if arena_source == "bespoke":
+                current_arena_html = arena_html_str
 
             status = "arena_preview"
             arena_locked = False
@@ -752,6 +827,20 @@ class StudioOmniAgent:
                 f"✨ Generated a live Arena preview for **{blueprint.task_title}** bound to the environment's real state. "
                 "Ask me in chat to adjust the look & feel, or click **[ 🔒 Lock Arena & Start Training ]** when ready."
             )
+            if arena_source != "bespoke":
+                assistant_reply += (
+                    "\n\n⚠️ The bespoke domain canvas could not be generated"
+                    f"{f' ({arena_error})' if arena_error else ''}. "
+                    "The arena shown is a schema-driven preview built from the declared actions and state — "
+                    "it is fully playable, but ask me to *retry the arena* once the provider recovers for the tailored view."
+                )
+            if relaxation_log and any("now reachable" in line for line in relaxation_log):
+                # Say the criteria changed: a silently relaxed KPI is a different task.
+                assistant_reply += (
+                    "\n\n🔧 The environment's success criteria were unreachable at first, so I "
+                    "relaxed and re-verified them. Review them in **🔍 Inspect Code** if the "
+                    "objective looks easier than you described."
+                )
             if synthesis_warnings:
                 # Surface verification uncertainty instead of silently training toward a 0% KPI.
                 assistant_reply += "\n\n⚠️ " + " ".join(synthesis_warnings)
@@ -770,6 +859,14 @@ class StudioOmniAgent:
                 "timestamp": utc_now_iso(),
             })
 
+            # The user can lock (and start training) from the instant preview while the bespoke
+            # canvas is still generating: never clobber that lock with this turn's stale state.
+            latest = self.conv_store.get_conversation(conversation_id, owner_id=owner_id) or {}
+            locked_during_turn = bool(latest.get("arena_locked"))
+            status_at_lock = str(latest.get("status") or "")
+            if locked_during_turn and status_at_lock not in ("", "arena_preview", "clarifying"):
+                status = status_at_lock
+
             self.conv_store.save_or_update(
                 conversation_id=conversation_id,
                 status=status,
@@ -778,13 +875,22 @@ class StudioOmniAgent:
                 blueprint_spec=blueprint.model_dump(),
                 arena_html=current_arena_html,
                 env_code=current_env_code,
-                arena_locked=False,
+                arena_locked=locked_during_turn or None,
                 training_params=t_params,
                 dataset_id=effective_dataset_id,
+                arena_source=arena_source,
             )
 
             if broadcast_callback:
-                broadcast_callback({"event": "arena_updated", "arena_html": current_arena_html})
+                broadcast_callback(
+                    {
+                        "event": "arena_updated",
+                        "arena_html": current_arena_html,
+                        "arena_kind": arena_source,
+                        "pending_bespoke": False,
+                        "error": arena_error,
+                    }
+                )
 
             return StudioChatResponse(
                 conversation_id=conversation_id,
@@ -794,7 +900,8 @@ class StudioOmniAgent:
                 blueprint_spec=blueprint,
                 arena_html=current_arena_html,
                 env_code=current_env_code,
-                arena_locked=False,
+                arena_locked=locked_during_turn,
+                arena_source=arena_source,
                 questions=questions,
                 quick_chips=quick_chips,
                 training_params=t_params,

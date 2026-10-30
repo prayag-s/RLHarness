@@ -19,12 +19,17 @@ interface LLMVerificationGateModalProps {
   isOpen: boolean
   currentSettings: LLMSettings
   onVerified: (settings: LLMSettings) => void
+  /** Exploration is not blocked on a key, so the dialog can be closed (G13). */
+  canDismiss?: boolean
+  onClose?: () => void
 }
 
 export const LLMVerificationGateModal: React.FC<LLMVerificationGateModalProps> = ({
   isOpen,
   currentSettings,
   onVerified,
+  canDismiss = false,
+  onClose,
 }) => {
   const [provider, setProvider] = useState<'deepseek' | 'openai' | 'anthropic' | 'ollama'>(
     currentSettings.provider !== 'fallback' ? (currentSettings.provider as any) : 'deepseek',
@@ -135,25 +140,36 @@ export const LLMVerificationGateModal: React.FC<LLMVerificationGateModalProps> =
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-md p-4 animate-in fade-in duration-200">
       <div className="w-full max-w-xl bg-gray-900 border border-indigo-500/40 rounded-2xl shadow-2xl shadow-indigo-950/50 overflow-hidden flex flex-col text-gray-200">
-        {/* Mandatory Header Banner */}
-        <div className="px-6 py-5 bg-gradient-to-r from-red-950/70 via-gray-950 to-indigo-950/70 border-b border-gray-800 flex items-start space-x-3.5">
-          <div className="h-10 w-10 rounded-xl bg-red-900/60 border border-red-500/50 flex items-center justify-center text-red-400 shrink-0 shadow-lg">
+        {/* Header Banner */}
+        <div className="px-6 py-5 bg-gradient-to-r from-indigo-950/70 via-gray-950 to-indigo-950/70 border-b border-gray-800 flex items-start space-x-3.5">
+          <div className="h-10 w-10 rounded-xl bg-indigo-900/60 border border-indigo-500/50 flex items-center justify-center text-indigo-300 shrink-0 shadow-lg">
             <ShieldAlert className="h-5 w-5" />
           </div>
           <div className="flex-1">
             <div className="flex items-center space-x-2">
               <h2 className="text-sm font-extrabold text-white tracking-wide">
-                MANDATORY LLM API KEY VERIFICATION
+                CONNECT A MODEL
               </h2>
-              <span className="text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-full bg-red-950 border border-red-600/60 text-red-300">
-                Studio Locked
+              <span className="text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-full bg-indigo-950 border border-indigo-600/60 text-indigo-300">
+                Required to synthesize
               </span>
             </div>
             <p className="text-xs text-gray-300 mt-1 leading-relaxed">
-              To ensure real, high-quality code synthesis and prevent rubbish fallback results, an
-              active and verified LLM key is mandatory before accessing the application.
+              Synthesizing environments, chatting with the architect and training need a verified
+              provider. Uploading data, browsing existing agents and the arena preview already work
+              without one.
             </p>
           </div>
+          {canDismiss && onClose && (
+            <button
+              type="button"
+              onClick={onClose}
+              className="text-gray-400 hover:text-white text-xs px-2 py-1 rounded border border-gray-700 hover:border-gray-500 transition shrink-0"
+              title="Keep exploring without a key"
+            >
+              Explore first
+            </button>
+          )}
         </div>
 
         {/* Form Body */}

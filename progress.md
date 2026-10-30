@@ -1248,3 +1248,124 @@ with the default owner, so the tenant could not read its own conversation while 
 
 **Final gate:** `pytest -q` → **126 passed, 2 skipped, 0 failed in 5:26**. Fast gate
 (`-m "not slow and not live_llm"`) → **67 passed, 2 skipped in 1:08**.
+
+---
+
+## 16. v5.1 — Phase P2-A: remove sales friction (2026-10-30)
+
+The three P2 items that stop a prospect from seeing the product at all: an unlearnable task, a
+key-gated app, and a three-minute wait before *anything* appears. One operational bug surfaced on the
+way and is fixed here too.
+
+### 16.1 G15 — the arena no longer waits on the provider
+
+The arena used to be the *last* thing a turn produced, so a new user watched an empty stage for
+~135 s and then waited again for the canvas. Now the arena is declared from the blueprint the moment
+the blueprint exists, and replaced in place.
+
+- `JITArenaSynthesizer.preview_arena_html()` builds the schema-driven arena with **no provider call**
+  (milliseconds), from the declared actions and `state_dict_schema`.
+- `process_message` saves and broadcasts that preview *before* environment synthesis, then builds it
+  again with the real `get_render_state()` sample, then swaps in the bespoke canvas when it arrives.
+- Every save and broadcast now carries `arena_source` (`preview` | `bespoke` | `fallback`), and the
+  provider outcome is reported by `synthesize_universal_arena_html(outcome=...)` instead of being
+  inferred from log warnings.
+- **A failed restyle no longer downgrades a working canvas.** `update_arena` used to overwrite the
+  bespoke HTML with the generic preview when the LLM call failed; it now keeps what the user has and
+  reports the error, and the route returns `arena_source` + `error`.
+- **Frontend:** a live pill in the arena header — `🎨 Synthesizing bespoke domain canvas (~90s) —
+  showing live telemetry preview` — driven by the job's real stage (and by `active_job` after a
+  reload, so it cannot go stale), a red `Bespoke canvas failed` pill with **Retry**, and a
+  `Generic preview` label so a screenshot can never present a preview as the final artefact.
+- **Race fixed:** locking the arena during generation used to be clobbered by the turn's completion
+  save (it wrote `arena_locked=False` unconditionally). Intermediate saves now pass `None`
+  (preserve), the final save re-reads the lock, and a status the user moved past (`training`) is not
+  reset.
+
+Measured on a real turn (`deepseek-flash`, tenant `acme`, insurance-claims routing task):
+
+```text
+POST /conversations/conv_g15_.../chat   Prefer: respond-async   -> 202 in 0.08 s
+  0.1 s   queued
+  5.1 s   intake
+ 60.2 s   env_synthesis
+135.3 s   arena            arena_source=preview   15 973 B   <- playable + lockable here
+          (locked the arena from the preview at this point)
+260.6 s   succeeded        arena_source=bespoke   38 856 B
+final: arena_locked=true (lock survived the completion save)
+```
+
+### 16.2 G13 — explore first, connect a model when you need one
+
+- The startup lockout is gone: the whole app used to sit behind a blurred overlay and an unclosable
+  modal until a key verified. It now opens in **explore mode**; upload, dataset profiling, listing and
+  reading existing agents, the arena preview and ONNX export all work with no provider.
+- Only `synthesize_environment`, `architect_chat`, `train` and `restyle_arena` refuse, and the refusal
+  is machine-readable: `403` + `X-RL-Reason: llm-key-required` + a message that says what still works.
+  The UI switches on that header (`ApiError.needsModel`) instead of string-matching `"403"` / `"verified"`
+  in prose, which was the previous behaviour.
+- `GET /api/v4/capabilities` publishes the honest state (verified? which actions need a model? is a
+  sandbox available? is isolation required?), so the UI does not have to guess.
+- Data-intake controls are no longer disabled while unverified, and the composer stays enabled so a
+  clickable send explains what is missing instead of dead-ending.
+
+### 16.3 G12 — an unreachable success condition is repaired, not just reported
+
+A success signal that never fires makes every round report 0 % and burns the whole training budget.
+`SandboxSmokeTester.relax_unreachable_success` now rewrites the environment's *success criteria* (a
+relaxed threshold cannot help a signal that never fires), re-runs the full smoke test, and accepts
+the result only when success becomes observable — at most two rewrites, and the previously verified
+module is kept when the provider cannot fix it. `JITEnvironmentSynthesizer.synthesize` runs this
+automatically and records what it did, and the assistant reply says the criteria were relaxed.
+
+The probe also stopped conflating two different questions. `_probe_success(use_oracle=...)` now
+separates *"can this ever succeed?"* (the environment's own `get_critical_actions` hint) from *"can a
+policy that has to be learned succeed?"* (random/heuristic play). A task that only the oracle can
+complete is reported as a low achievable rate instead of looking healthy — the same masking doctrine
+as G1, applied to synthesis rather than evaluation.
+
+### 16.4 A 2.4 GB write-ahead log, and why it filled the disk
+
+Found the hard way: a test run died with `OSError: [Errno 28] No space left on device`. The cause was
+not the tests:
+
+- `with sqlite3.connect(...) as conn:` **does not close the connection** — it only commits or rolls
+  back. Both stores used that idiom everywhere.
+- In WAL mode SQLite *reuses* a WAL rather than truncating it, so a checkpoint that is ever blocked by
+  a reader leaves the file at its high-water mark forever. On this machine
+  `runs/conversations.db-wal` reached **2 432 606 208 bytes** beside an 88 MB database.
+
+`rl_ide/state/sqlite_utils.py` now owns connection handling: `bounded_connection()` always closes,
+`journal_size_limit` is 64 MB, `busy_timeout` is 30 s, and `checkpoint()` truncates. Deletion
+checkpoints before and after `VACUUM`. `tests/test_state_durability.py` asserts the WAL returns to
+zero bytes, that 200 sequential writes never accumulate one, and that a delete reclaims disk.
+
+### 16.5 Verification
+
+- New tests: `tests/test_state_durability.py` (5) and `tests/test_product_friction.py` (12) — the
+  repair loop both succeeding and hitting its cap, the offline path never calling a provider, the
+  end-to-end synthesizer hook, oracle-vs-learnable reachability, the instant preview, preview-before-
+  synthesis ordering, the failed-restyle guard, the lock race, and the 403 reason header.
+- Updated: `tests/test_llm_mandatory_gate.py` now asserts the new contract (reason header + "needs a
+  model") instead of the retired "mandatory" wording.
+- Frontend: `tsc --noEmit` clean, `vite build` clean (267 kB JS).
+- Gates: **`pytest -q` -> 143 passed, 2 skipped, 0 failed in 11:04**; fast gate
+  (`-m "not slow and not live_llm"`) -> **84 passed, 2 skipped in 1:26**.
+
+### 16.6 Residual risk from P2-A
+
+- **Two pytest sessions must not share `--basetemp`.** pytest keeps the three most recent
+  `pytest-of-<user>/pytest-N` directories and deletes older ones at *session start*. Running a second
+  invocation while a long suite is in flight can delete the running session's temporary directories,
+  which surfaces as a `FileNotFoundError` in whichever test was writing at that moment. Two failures
+  in this phase were exactly that, not product bugs - both tests pass alone and the clean full run is
+  green. Use `--basetemp=` when running suites in parallel.
+- **The preview is honest but not instant from *submit*.** It is instant from the moment the
+  blueprint exists, which is after intake (~60 s on `deepseek-flash`). A user-visible "instant" arena
+  before intake would have to be domain-agnostic, which is the generic filler this phase removed.
+- **Retry reuses the restyle path.** A retry regenerates the canvas from the current HTML with the
+  same 240 s ceiling; there is no queue position or backoff, so a retry during a provider outage
+  fails visibly rather than waiting it out.
+- **G13 is the gate only.** Enterprise provider targets (Azure OpenAI, self-hosted) are still open,
+  and `x-owner-id` is still plumbing rather than authentication (G4).
+

@@ -11,9 +11,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 import re
 import shutil
-import sqlite3
 from typing import Any
 import uuid
+
+from rl_ide.state.sqlite_utils import bounded_connection, checkpoint, open_connection
 
 
 def utc_now_iso() -> str:
@@ -49,10 +50,13 @@ class ConversationStore:
         self.workspaces_dir.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
-    def _get_connection(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path), timeout=30.0)
-        conn.row_factory = sqlite3.Row
-        return conn
+    def _get_connection(self) -> Any:
+        """Context manager yielding a connection that is always closed.
+
+        ``with sqlite3.connect(...)`` would only end the transaction, leaving the connection open
+        and the WAL un-resettable; see ``rl_ide.state.sqlite_utils``.
+        """
+        return bounded_connection(self.db_path)
 
     def _init_db(self) -> None:
         with self._get_connection() as conn:
@@ -78,6 +82,7 @@ class ConversationStore:
                     arena_html TEXT,
                     latest_model_zip_path TEXT,
                     arena_locked INTEGER DEFAULT 0,
+                    arena_source TEXT,
                     owner_id TEXT NOT NULL DEFAULT 'local'
                 );
                 """
@@ -88,6 +93,11 @@ class ConversationStore:
             if "arena_locked" not in columns:
                 try:
                     conn.execute("ALTER TABLE conversations ADD COLUMN arena_locked INTEGER DEFAULT 0;")
+                except Exception:
+                    pass
+            if "arena_source" not in columns:
+                try:
+                    conn.execute("ALTER TABLE conversations ADD COLUMN arena_source TEXT;")
                 except Exception:
                     pass
             if "owner_id" not in columns:
@@ -259,6 +269,7 @@ class ConversationStore:
             "arena_html": None,
             "latest_model_zip_path": None,
             "arena_locked": 1 if arena_locked else 0,
+            "arena_source": None,
             "owner_id": str(owner_id or "local"),
         }
 
@@ -269,12 +280,12 @@ class ConversationStore:
                     conversation_id, title, created_at, updated_at, status, chat_history,
                     dataset_id, blueprint_spec, training_params, current_round, best_metric,
                     rounds_history, episodes, env_code, arena_html, latest_model_zip_path,
-                    arena_locked, owner_id
+                    arena_locked, arena_source, owner_id
                 ) VALUES (
                     :conversation_id, :title, :created_at, :updated_at, :status, :chat_history,
                     :dataset_id, :blueprint_spec, :training_params, :current_round, :best_metric,
                     :rounds_history, :episodes, :env_code, :arena_html, :latest_model_zip_path,
-                    :arena_locked, :owner_id
+                    :arena_locked, :arena_source, :owner_id
                 )
                 ON CONFLICT(conversation_id) DO NOTHING;
                 """,
@@ -374,6 +385,7 @@ class ConversationStore:
         arena_html: str | None = None,
         latest_model_zip_path: str | None = None,
         arena_locked: bool | None = None,
+        arena_source: str | None = None,
     ) -> dict[str, Any]:
         """Upserts conversation state, serializing lists/dicts to JSON."""
         existing = self.get_conversation(conversation_id)
@@ -401,8 +413,8 @@ class ConversationStore:
                         conversation_id, title, created_at, updated_at, status, chat_history,
                         dataset_id, blueprint_spec, training_params, current_round, best_metric,
                         rounds_history, episodes, env_code, arena_html, latest_model_zip_path,
-                        arena_locked
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        arena_locked, arena_source
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         conversation_id,
@@ -422,6 +434,7 @@ class ConversationStore:
                         arena_html,
                         latest_model_zip_path,
                         effective_locked,
+                        arena_source,
                     ),
                 )
                 conn.commit()
@@ -452,6 +465,7 @@ class ConversationStore:
                 if arena_locked is not None
                 else (1 if existing.get("arena_locked") else 0)
             )
+            effective_arena_source = arena_source if arena_source is not None else existing.get("arena_source")
 
             with self._get_connection() as conn:
                 conn.execute(
@@ -471,7 +485,8 @@ class ConversationStore:
                         env_code = ?,
                         arena_html = ?,
                         latest_model_zip_path = ?,
-                        arena_locked = ?
+                        arena_locked = ?,
+                        arena_source = ?
                     WHERE conversation_id = ?
                     """,
                     (
@@ -490,6 +505,7 @@ class ConversationStore:
                         effective_arena,
                         effective_model_path,
                         effective_locked,
+                        effective_arena_source,
                         conversation_id,
                     ),
                 )
@@ -580,11 +596,16 @@ class ConversationStore:
     def _compact(self) -> None:
         """Reclaims free pages so deleting a conversation actually frees disk."""
         try:
-            conn = sqlite3.connect(str(self.db_path), timeout=30.0, isolation_level=None)
+            # Truncate the WAL first: VACUUM cannot shrink a database whose pages are still
+            # pending in a multi-gigabyte write-ahead log.
+            checkpoint(self.db_path)
+            conn = open_connection(self.db_path)
+            conn.isolation_level = None
             try:
                 conn.execute("VACUUM;")
             finally:
                 conn.close()
+            checkpoint(self.db_path)
         except Exception:
             pass      # A locked database is not a reason to fail a delete.
 

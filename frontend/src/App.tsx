@@ -24,9 +24,11 @@ import {
   TrainingParams,
   StudioChatResponse,
   Scorecard,
+  ArenaSource,
 } from './types'
 
 import {
+  ApiError,
   chatWithArchitect,
   chatWithStudioOmni,
   getUsage,
@@ -49,6 +51,11 @@ import {
   clearAllConversations,
 } from './services/api'
 
+/** True when the backend refused because no verified model is configured (G13). */
+function isModelRequired(err: unknown): boolean {
+  return err instanceof ApiError && err.needsModel
+}
+
 export const App: React.FC = () => {
   // Session & Training State
   const [activeSession, setActiveSession] = useState<SessionState | null>(null)
@@ -60,6 +67,12 @@ export const App: React.FC = () => {
   // Arena & Code State
   const [arenaHtml, setArenaHtml] = useState<string>('')
   const [arenaLocked, setArenaLocked] = useState<boolean>(false)
+  // Arena provenance and progress, so a generic preview is never mistaken for the bespoke canvas
+  // and an in-flight synthesis never looks like a broken generator (G15).
+  const [arenaSource, setArenaSource] = useState<ArenaSource | null>(null)
+  const [arenaPending, setArenaPending] = useState<boolean>(false)
+  const [arenaError, setArenaError] = useState<string | null>(null)
+  const [arenaStage, setArenaStage] = useState<string>('')
   const [envModuleCode, setEnvModuleCode] = useState<string>('')
   const [latestFrame, setLatestFrame] = useState<Record<string, any> | undefined>(undefined)
   const [episodes, setEpisodes] = useState<EpisodeLog[]>([])
@@ -170,15 +183,16 @@ export const App: React.FC = () => {
           }
         }
 
-        // 3. Not verified: Lock studio and trigger mandatory setup gate
+        // 3. Not verified: stay in explore mode. The studio, uploads and existing agents keep
+        // working; only synthesis opens the setup gate (G13).
         if (isMounted) {
           setIsLLMVerified(false)
-          setIsGateModalOpen(true)
+          setIsGateModalOpen(false)
         }
       } catch (err) {
         if (isMounted) {
           setIsLLMVerified(false)
-          setIsGateModalOpen(true)
+          setIsGateModalOpen(false)
         }
       } finally {
         if (isMounted) setIsCheckingLLM(false)
@@ -247,6 +261,12 @@ export const App: React.FC = () => {
       setActiveConversationId(cid)
       setArenaHtml(conv.arena_html || '')
       setArenaLocked(conv.arena_locked ?? false)
+      setArenaSource((conv.arena_source as ArenaSource) || null)
+      setArenaError(null)
+      // A reload mid-synthesis must still show that the bespoke canvas is on its way.
+      const job = conv.active_job
+      setArenaPending(Boolean(job && (job.stage === 'env_synthesis' || job.stage === 'arena' || job.stage === 'verification')))
+      setArenaStage(job?.stage || '')
       setEnvModuleCode(conv.env_code || '')
       setEpisodes(conv.episodes || [])
       setScorecard(conv.scorecard || null)
@@ -322,6 +342,10 @@ export const App: React.FC = () => {
     setAttachedDataset(null)
     setArenaHtml('')
     setArenaLocked(false)
+    setArenaSource(null)
+    setArenaPending(false)
+    setArenaError(null)
+    setArenaStage('')
     setEnvModuleCode('')
     setEpisodes([])
     setRoundHistory([])
@@ -424,7 +448,7 @@ export const App: React.FC = () => {
   ): Promise<IntakeResponse> => {
     if (!isLLMVerified) {
       setIsGateModalOpen(true)
-      throw new Error('A verified LLM API key is mandatory before using the studio.')
+      throw new Error('This step needs a model. Connect a provider in Settings to synthesize, chat or train. Uploading data and browsing existing agents work without a key.')
     }
 
     addTimelineItem(
@@ -462,7 +486,7 @@ export const App: React.FC = () => {
 
       return resp
     } catch (err: any) {
-      if (err.message && (err.message.includes('verified') || err.message.includes('mandatory') || err.message.includes('403'))) {
+      if (isModelRequired(err)) {
         setIsLLMVerified(false)
         setIsGateModalOpen(true)
       }
@@ -478,7 +502,7 @@ export const App: React.FC = () => {
   ): Promise<StudioChatResponse> => {
     if (!isLLMVerified) {
       setIsGateModalOpen(true)
-      throw new Error('A verified LLM API key is mandatory before using the studio.')
+      throw new Error('This step needs a model. Connect a provider in Settings to synthesize, chat or train. Uploading data and browsing existing agents work without a key.')
     }
 
     const cid = activeConversationId || `conv_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`
@@ -503,6 +527,11 @@ export const App: React.FC = () => {
           training_params: explicitParams || trainingParams,
         },
         (stage, detail) => {
+          setArenaStage(stage)
+          if (stage === 'arena_preview' || stage === 'arena') {
+            setArenaPending(true)
+            setArenaError(null)
+          }
           addTimelineItem(
             `Job stage: ${stage.replace(/_/g, ' ')}`,
             detail || 'Working…',
@@ -519,6 +548,11 @@ export const App: React.FC = () => {
       if (resp.arena_html) {
         setArenaHtml(resp.arena_html)
       }
+      if (resp.arena_source) {
+        setArenaSource(resp.arena_source)
+      }
+      setArenaPending(false)
+      setArenaError(resp.arena_source === 'fallback' ? 'Fell back to the schema-driven preview.' : null)
 
       if (resp.arena_locked !== undefined) {
         setArenaLocked(resp.arena_locked)
@@ -586,7 +620,7 @@ export const App: React.FC = () => {
       refreshUsage(cid)
       return resp
     } catch (err: any) {
-      if (err.message && (err.message.includes('verified') || err.message.includes('mandatory') || err.message.includes('403'))) {
+      if (isModelRequired(err)) {
         setIsLLMVerified(false)
         setIsGateModalOpen(true)
       }
@@ -613,6 +647,45 @@ export const App: React.FC = () => {
     } catch (err: any) {
       console.error('Failed to lock arena', err)
       addTimelineItem('Lock Failed', err.message || 'Could not lock arena', 'error', 'warning')
+    }
+  }
+
+  // 1c-bis. Retry the bespoke canvas after a failed generation (G15).
+  // A failed restyle now keeps the arena on screen, so the user is never downgraded silently.
+  const handleRetryArena = async () => {
+    const cid = activeConversationId
+    if (!cid) return
+    if (!isLLMVerified) {
+      setIsGateModalOpen(true)
+      return
+    }
+    setArenaPending(true)
+    setArenaError(null)
+    addTimelineItem('Arena Retry Requested 🎨', 'Rebuilding the bespoke domain canvas…', 'arena', 'info')
+    try {
+      const res = await updateArenaLook(
+        cid,
+        'Rebuild this arena as a bespoke, domain-specific canvas that renders the real state fields.',
+      )
+      if (res.arena_html) setArenaHtml(res.arena_html)
+      if (res.arena_source === 'bespoke') {
+        setArenaSource('bespoke')
+        setArenaError(null)
+        addTimelineItem('Bespoke Canvas Ready ✅', 'The arena was regenerated for this domain.', 'arena', 'success')
+      } else {
+        setArenaError(res.error || 'The provider did not return a valid canvas.')
+        addTimelineItem(
+          'Arena Retry Failed',
+          res.error || 'Kept the existing arena.',
+          'arena',
+          'warning',
+        )
+      }
+    } catch (err: any) {
+      setArenaError(err.message || 'Arena retry failed')
+      addTimelineItem('Arena Retry Failed', err.message || 'Could not rebuild the arena', 'arena', 'warning')
+    } finally {
+      setArenaPending(false)
     }
   }
 
@@ -739,11 +812,19 @@ export const App: React.FC = () => {
       if (event.arena_html) {
         setArenaHtml(event.arena_html)
       }
+      if (event.arena_kind) {
+        // 'preview' arrives first (instant, deterministic) and 'bespoke' replaces it in place.
+        setArenaSource(event.arena_kind as ArenaSource)
+      }
+      setArenaPending(Boolean(event.pending_bespoke))
+      setArenaError(event.error || (event.arena_kind === 'fallback' ? 'Bespoke canvas failed.' : null))
       addTimelineItem(
-        'Arena Hot-Reloaded 🎨',
-        event.message || 'Updated arena layout and styles without resetting policy weights.',
+        event.arena_kind === 'preview' ? 'Instant Arena Preview ⚡' : 'Arena Hot-Reloaded 🎨',
+        event.arena_kind === 'preview'
+          ? 'Deterministic preview rendered; the bespoke canvas is still generating.'
+          : event.message || 'Updated arena layout and styles without resetting policy weights.',
         'arena',
-        'success',
+        event.arena_kind === 'fallback' ? 'warning' : 'success',
       )
     } else if (eventType === 'round_started') {
       const rNum = event.round ?? event.round_num ?? 1
@@ -986,7 +1067,7 @@ export const App: React.FC = () => {
       />
 
       {/* Main Studio 3-Panel Workspace */}
-      <div className={`flex-1 flex overflow-hidden transition-all duration-300 ${!isLLMVerified ? 'filter blur-[1px] select-none' : ''}`}>
+      <div className="flex-1 flex overflow-hidden transition-all duration-300">
         {/* Left Panel: Conversational Intake Architect & Autonomous Stream */}
         <ArchitectPanel
           onStartSession={handleStartSession}
@@ -1021,6 +1102,10 @@ export const App: React.FC = () => {
           onOpenCodeInspector={() => setIsCodeInspectorOpen(true)}
           onLockArena={handleLockArena}
           onEditArenaLook={handleEditArenaLook}
+          arenaSource={arenaSource}
+          arenaPending={arenaPending}
+          arenaError={arenaError}
+          onRetryArena={handleRetryArena}
         />
 
         {/* Right Panel: Target Expectations & Multi-Round Telemetry */}
@@ -1051,11 +1136,13 @@ export const App: React.FC = () => {
         isLoading={isLoadingConversations}
       />
 
-      {/* Mandatory LLM Verification Gate Modal (Unclosable until verified) */}
+      {/* Provider setup: opened on demand by any model-backed action, dismissible otherwise. */}
       <LLMVerificationGateModal
-        isOpen={!isCheckingLLM && (!isLLMVerified || isGateModalOpen)}
+        isOpen={!isCheckingLLM && isGateModalOpen}
+        canDismiss={isLLMVerified === false}
         currentSettings={llmSettings}
         onVerified={handleGateVerified}
+        onClose={() => setIsGateModalOpen(false)}
       />
 
       {/* Modals */}

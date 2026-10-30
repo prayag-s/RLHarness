@@ -306,25 +306,26 @@ export const ArchitectPanel: React.FC<ArchitectPanelProps> = ({
 
   return (
     <aside className="w-96 flex flex-col h-full bg-gray-900 border-r border-gray-800 text-gray-200 select-none">
-      {/* Mandatory LLM Lockout Banner if Unverified */}
+      {/* Explore mode: data intake and existing agents work; synthesis needs a model. */}
       {!isLLMVerified && (
         <div
           onClick={onOpenSettings}
-          className="p-3 bg-red-950/90 border-b border-red-700/70 text-red-200 text-xs flex items-center space-x-2.5 cursor-pointer hover:bg-red-900/90 transition shadow-inner"
-          title="Click to configure and verify a working LLM API key"
+          className="p-3 bg-amber-950/80 border-b border-amber-700/60 text-amber-100 text-xs flex items-center space-x-2.5 cursor-pointer hover:bg-amber-900/80 transition shadow-inner"
+          title="Click to connect and verify a model"
         >
-          <AlertCircle className="h-4 w-4 text-red-400 shrink-0 animate-pulse" />
+          <AlertCircle className="h-4 w-4 text-amber-400 shrink-0" />
           <div className="flex-1">
-            <span className="font-bold block text-red-300">LLM Verification Mandatory</span>
+            <span className="font-bold block text-amber-300">Explore mode — no model connected</span>
             <span className="text-[10px] text-gray-300">
-              Studio is locked until a working key is verified. Click to configure credentials.
+              Upload data, inspect datasets and open existing agents. Connect a provider to
+              synthesize, chat or train.
             </span>
           </div>
         </div>
       )}
 
       {/* 1. Attachment Bar: Files & SQL */}
-      <div className={`p-3 border-b border-gray-800 bg-gray-950/70 ${!isLLMVerified ? 'opacity-50 pointer-events-none' : ''}`}>
+      <div className="p-3 border-b border-gray-800 bg-gray-950/70">
         <div className="flex items-center justify-between mb-2">
           <span className="text-xs font-bold uppercase tracking-wider text-gray-400 flex items-center space-x-1.5">
             <Upload className="h-3.5 w-3.5 text-indigo-400" />
@@ -333,7 +334,6 @@ export const ArchitectPanel: React.FC<ArchitectPanelProps> = ({
           <button
             type="button"
             onClick={onOpenSQLModal}
-            disabled={!isLLMVerified}
             className="flex items-center space-x-1 text-[11px] text-cyan-400 hover:text-cyan-300 font-medium px-2 py-0.5 rounded bg-cyan-950/50 border border-cyan-800/40 transition disabled:opacity-50"
             title="Connect SQLite, PostgreSQL, or MySQL"
           >
@@ -639,19 +639,19 @@ export const ArchitectPanel: React.FC<ArchitectPanelProps> = ({
               onChange={(e) => setUserPrompt(e.target.value)}
               placeholder={
                 !isLLMVerified
-                  ? '⚠️ Verify working LLM key above to begin...'
+                  ? 'Connect a model above to synthesize — or attach a dataset to explore...'
                   : !isArenaLocked
                   ? "Describe agent or say e.g. 'Make cells larger and animate gold lines'..."
                   : "Say e.g. 'Train 5 more rounds', 'Make agent more aggressive', or ask a question..."
               }
-              disabled={!isLLMVerified || isAskingArchitect}
+              disabled={isAskingArchitect}
               className="flex-1 bg-gray-900 border border-gray-700 focus:border-indigo-500 rounded-lg px-2.5 py-2 text-xs text-gray-200 focus:outline-none placeholder-gray-500 disabled:opacity-40 disabled:cursor-not-allowed shadow-inner"
             />
             <button
               type="submit"
-              disabled={!isLLMVerified || isAskingArchitect || !userPrompt.trim()}
+              disabled={isAskingArchitect || !userPrompt.trim()}
               className="p-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition disabled:opacity-40 disabled:cursor-not-allowed shadow"
-              title={!isLLMVerified ? 'Verify LLM key first' : 'Send message to StudioOmniAgent'}
+              title={!isLLMVerified ? 'A model is required — click to connect one' : 'Send message to StudioOmniAgent'}
             >
               {isAskingArchitect ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
             </button>

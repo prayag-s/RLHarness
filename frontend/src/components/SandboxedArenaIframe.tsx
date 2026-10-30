@@ -9,9 +9,10 @@ import {
   Unlock,
   Play,
   RotateCcw,
+  AlertTriangle,
 } from 'lucide-react'
 import { interactSession } from '../services/api'
-import { EpisodeLog } from '../types'
+import { ArenaSource, EpisodeLog } from '../types'
 
 interface SandboxedArenaIframeProps {
   sessionId?: string
@@ -23,6 +24,11 @@ interface SandboxedArenaIframeProps {
   onOpenCodeInspector: () => void
   onLockArena?: () => void
   onEditArenaLook?: () => void
+  /** How the current arena was produced, and whether a bespoke canvas is still on its way. */
+  arenaSource?: ArenaSource | null
+  arenaPending?: boolean
+  arenaError?: string | null
+  onRetryArena?: () => void
 }
 
 export const SandboxedArenaIframe: React.FC<SandboxedArenaIframeProps> = ({
@@ -35,6 +41,10 @@ export const SandboxedArenaIframe: React.FC<SandboxedArenaIframeProps> = ({
   onOpenCodeInspector,
   onLockArena,
   onEditArenaLook,
+  arenaSource = null,
+  arenaPending = false,
+  arenaError = null,
+  onRetryArena,
 }) => {
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const [mode, setMode] = useState<'mock' | 'watch' | 'play'>(isArenaLocked ? 'watch' : 'mock')
@@ -214,6 +224,41 @@ export const SandboxedArenaIframe: React.FC<SandboxedArenaIframeProps> = ({
               <span>STREAMING EPISODES</span>
             </span>
           )}
+
+          {/* Arena provenance: a preview must never be mistaken for the bespoke canvas, and a
+              synthesis in flight must never look like a finished (or broken) generator. */}
+          {arenaPending && (
+            <span
+              className="flex items-center space-x-1.5 text-[11px] text-amber-300 font-mono bg-amber-950/60 border border-amber-700/50 px-2 py-0.5 rounded-full"
+              title="The deterministic preview is live and playable. The bespoke canvas replaces it automatically when it arrives."
+            >
+              <Palette className="h-3 w-3 animate-pulse" />
+              <span>🎨 Synthesizing bespoke domain canvas (~90s) — showing live telemetry preview</span>
+            </span>
+          )}
+
+          {!arenaPending && arenaError && (
+            <span className="flex items-center space-x-1.5 text-[11px] text-red-300 font-mono bg-red-950/60 border border-red-700/50 px-2 py-0.5 rounded-full">
+              <AlertTriangle className="h-3 w-3" />
+              <span>Bespoke canvas failed</span>
+              {onRetryArena && (
+                <button
+                  type="button"
+                  onClick={onRetryArena}
+                  className="ml-1 px-1.5 py-0.5 rounded bg-red-900/70 hover:bg-red-800 text-red-100 border border-red-700/60 transition"
+                  title={arenaError}
+                >
+                  Retry
+                </button>
+              )}
+            </span>
+          )}
+
+          {!arenaPending && arenaSource === 'preview' && !arenaError && (
+            <span className="text-[11px] text-gray-400 font-mono bg-gray-800/70 border border-gray-700 px-2 py-0.5 rounded-full">
+              Generic preview
+            </span>
+          )}
         </div>
 
         {/* Action Buttons: Quick Restyle & Code Inspector */}
@@ -248,7 +293,9 @@ export const SandboxedArenaIframe: React.FC<SandboxedArenaIframeProps> = ({
           <div className="flex items-center space-x-2 text-amber-200">
             <Sparkles className="h-4 w-4 text-amber-400 shrink-0 animate-pulse" />
             <span className="font-medium">
-              Previewing Arena with Mock Data & Animation — Ask in chat to tweak the look, or confirm when ready.
+              {arenaSource === 'bespoke'
+                ? 'Bespoke canvas, mock data & animation — ask in chat to tweak the look, or lock when ready.'
+                : 'Generic preview built from the declared actions and state (not the bespoke canvas yet). You can lock and train on it now.'}
             </span>
           </div>
           {onLockArena && (

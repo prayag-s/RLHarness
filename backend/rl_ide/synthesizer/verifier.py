@@ -22,7 +22,11 @@ import numpy as np
 from rl_ide.architect.models import AgentBlueprintSpec
 from rl_ide.ingest.loader import IngestedDataset
 from rl_ide.llm.client import BaseLLMClient, create_llm_client, FallbackCodeSynthesizer, get_active_llm_client
-from rl_ide.synthesizer.env_builder import load_synthesized_env_class, instantiate_env
+from rl_ide.synthesizer.env_builder import (
+    extract_python_code,
+    instantiate_env,
+    load_synthesized_env_class,
+)
 
 
 class SecurityViolationError(Exception):
@@ -77,6 +81,11 @@ class SandboxSmokeTester:
     def __init__(self, llm_client: BaseLLMClient | None = None):
         self._llm_client = llm_client
         self.last_warnings: list[str] = []
+        # None = not probed yet. False means no policy ever produced a success, which makes the
+        # declared KPI unreachable and is worth repairing rather than merely warning about.
+        self.last_success_observed: bool | None = None
+        # True when only the environment's own ``get_critical_actions`` oracle could succeed.
+        self.last_success_needs_oracle: bool = False
 
     @property
     def client(self) -> BaseLLMClient:
@@ -254,33 +263,51 @@ class SandboxSmokeTester:
 
         # Success reachability is reported as uncertainty, never silently assumed. A 25-step window
         # cannot see terminal-only success signals, so fall back to complete episodes.
+        placeholder = bool(getattr(env, "is_placeholder", False))
         success_observed = any(bool(s.get("is_success")) for s in step_infos)
-        if not success_observed and not getattr(env, "is_placeholder", False):
-            success_observed = self._probe_success(env)
+        needs_oracle = False
+        if not success_observed and not placeholder:
+            # Distinguish "reachable in principle" from "reachable by a policy that can be learned".
+            # An oracle-only success means the KPI is effectively unreachable in training, and
+            # silently reporting it as achievable is how a run ends at 0 % after five rounds.
+            oracle_success = self._probe_success(env, use_oracle=True)
+            random_success = self._probe_success(env, use_oracle=False)
+            success_observed = oracle_success or random_success
+            needs_oracle = oracle_success and not random_success
 
         warnings: list[str] = []
-        if not success_observed and not getattr(env, "is_placeholder", False):
+        if not success_observed and not placeholder:
             warnings.append(
                 "Success signal never observed across full probe episodes; the reported KPI may stay "
                 "at 0% until the environment's success criteria are reachable."
+            )
+        elif needs_oracle and not placeholder:
+            warnings.append(
+                "Success requires near-oracle play: random and heuristic probes never succeeded, only "
+                "the environment's own critical-action hint did. The achievable success rate is low."
             )
 
         return {
             "verified": True,
             "obs_dim": obs_shape[0],
             "n_actions": n_actions,
-            "is_placeholder": bool(getattr(env, "is_placeholder", False)),
+            "is_placeholder": placeholder,
             "success_observed": success_observed,
+            "success_needs_oracle": needs_oracle,
             "warnings": warnings,
             "sample_arena_state": interactive_res["arena_state"],
         }
 
     @staticmethod
-    def _probe_success(env: Any, episodes_per_policy: int = 3, max_steps: int = 200) -> bool:
+    def _probe_success(
+        env: Any, episodes_per_policy: int = 3, max_steps: int = 200, use_oracle: bool = True
+    ) -> bool:
         """Runs complete episodes to observe terminal-only success signals.
 
-        Uses the environment's own ``get_critical_actions`` hint when available (many synthesized
-        envs expose it) and falls back to random actions. Any observed success ends the probe.
+        With ``use_oracle`` the environment's own ``get_critical_actions`` hint is tried, which
+        answers "can this ever succeed?". Without it only random actions are used, which answers
+        "can a policy that has to be learned succeed?" — the two are not the same, and treating the
+        first as the second is what makes a 0 % KPI look surprising after training.
         """
         horizon = getattr(env, "episode_horizon", None)
         if horizon is None:
@@ -293,7 +320,7 @@ class SandboxSmokeTester:
         horizon = max(1, min(horizon, max_steps))
 
         policies: list[Any] = []
-        critical = getattr(env, "get_critical_actions", None)
+        critical = getattr(env, "get_critical_actions", None) if use_oracle else None
         if callable(critical):
             def _critical_action() -> int:
                 hinted = critical()
@@ -318,6 +345,89 @@ class SandboxSmokeTester:
         except Exception:
             return False
         return False
+
+    def relax_unreachable_success(
+        self,
+        code_str: str,
+        blueprint: AgentBlueprintSpec,
+        dataset: IngestedDataset | None = None,
+        workspace_dir: str | Path | None = None,
+        max_attempts: int = 2,
+    ) -> tuple[bool, str, list[str]]:
+        """Rewrites success criteria no policy can reach, then re-verifies.
+
+        The synthesis prompt decides the success condition, and it is re-generated every time: the
+        same inventory task produced 100 %, 62 %, 18 % and 0 % across runs because the criteria were
+        sometimes knife-edge. Warning about it leaves the user with a task that cannot be learned, so
+        the criteria are relaxed and the whole smoke test is re-run — at most ``max_attempts`` times,
+        after which the caller keeps the verified code and the warning.
+        """
+        logs: list[str] = []
+        if isinstance(self.client, FallbackCodeSynthesizer):
+            logs.append("No model configured; success criteria cannot be relaxed.")
+            return False, code_str, logs
+
+        current = code_str
+        for attempt in range(1, max_attempts + 1):
+            logs.append(f"KPI relaxation attempt {attempt}/{max_attempts}")
+            prompt = (
+                "This Gymnasium environment never signals success in any probe episode, so the "
+                "declared KPI (success rate) can only ever be 0%. Relax the environment's *success "
+                "criteria* so that a sensible heuristic or short PPO run can reach success on a "
+                "reasonable fraction of episodes, while keeping the task non-trivial and everything "
+                "else unchanged.\n\n"
+                "Hard requirements — keep all of them:\n"
+                "- the class name, constructor signature and every method already defined\n"
+                "- observation_space / action_space shapes\n"
+                "- info['arena_state'] / get_render_state() keys (state_dict_schema)\n"
+                "- compute_reward() returning (float, dict) and get_demonstrations(32)\n"
+                "- interactive_step() contract\n"
+                "- no new imports outside numpy/gymnasium/math/random\n\n"
+                f"Goal: {blueprint.task_title} — success means {blueprint.success_metric_name or 'the task objective'}.\n\n"
+                f"```python\n{current}\n```\n\n"
+                "Return the complete corrected module inside ```python ... ```."
+            )
+            try:
+                raw = self.client.generate(
+                    prompt,
+                    system_prompt=(
+                        "You are an expert RL environment engineer. You fix environments whose success "
+                        "condition is unreachable, without weakening the task into a trivial one."
+                    ),
+                )
+            except Exception as exc:
+                logs.append(f"Relaxation call failed: {type(exc).__name__}: {exc}")
+                break
+
+            extracted = extract_python_code(raw)
+            if not extracted or "class SynthesizedGymEnv" not in extracted:
+                logs.append("Relaxation output did not contain a complete environment module.")
+                continue
+            try:
+                audit_ast_security(extracted)
+            except Exception as exc:
+                logs.append(f"Relaxed code failed the security audit: {exc}")
+                continue
+
+            verified, healed, verify_logs = self.verify_and_heal(
+                code_str=extracted,
+                blueprint=blueprint,
+                dataset=dataset,
+                workspace_dir=workspace_dir,
+                max_retries=1,
+            )
+            logs.extend(verify_logs[-3:])
+            if not verified:
+                logs.append("Relaxed environment failed verification; keeping the previous version.")
+                continue
+
+            current = healed
+            if self.last_success_observed:
+                logs.append("Success signal is now reachable after relaxation.")
+                return True, current, logs
+            logs.append("Success is still unreachable after relaxation.")
+
+        return False, current, logs
 
     def verify_and_heal(
         self,
@@ -406,6 +516,8 @@ class SandboxSmokeTester:
                 canonical_file.write_text(current_code, encoding="utf-8")
 
                 self.last_warnings = list(res.get("warnings") or [])
+                self.last_success_observed = bool(res.get("success_observed", False))
+                self.last_success_needs_oracle = bool(res.get("success_needs_oracle", False))
                 repair_logs.append(f"Attempt {attempt}: Verification PASSED 100% (25 steps, demos, interactive).")
                 for warning in self.last_warnings:
                     repair_logs.append(f"Attempt {attempt} WARNING: {warning}")

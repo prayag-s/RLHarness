@@ -117,15 +117,24 @@ def synthesize_universal_arena_html(
     sample_render_state: dict[str, Any] | None = None,
     visual_style: str | None = None,
     client: BaseLLMClient | None = None,
+    outcome: dict[str, Any] | None = None,
 ) -> str:
     """Universal Generative Arena UI Synthesizer.
 
     Generates a bespoke, interactive HTML5/SVG/Canvas/Tailwind Arena component
     bound directly to the blueprint's visual metaphor, actions, and state_dict_schema.
     Zero hardcoded domain branches or 2D rover fallbacks.
+
+    ``outcome`` (optional) is filled with ``{"source": "llm"|"fallback", "error": str|None}`` so
+    callers can tell a bespoke canvas from the schema-driven preview instead of guessing. A silent
+    fallback that looks like a bespoke arena is what made a broken generator indistinguishable from
+    a working one in the earlier Submarine run.
     """
     bp_spec = blueprint.to_agent_blueprint_spec() if hasattr(blueprint, "to_agent_blueprint_spec") else blueprint
     active_client = client or get_active_llm_client()
+    if outcome is not None:
+        outcome.clear()
+        outcome.update({"source": "fallback", "error": None, "fallback_reason": "no_client"})
 
     # 1. Try Live LLM UI generation if configured and not FallbackCodeSynthesizer
     if not isinstance(active_client, FallbackCodeSynthesizer):
@@ -160,20 +169,31 @@ def synthesize_universal_arena_html(
             if html and "ARENA_UPDATE" in html and "startMockAnimationLoop" in html and ("<html" in html.lower() or "<!doctype html" in html.lower()):
                 healed = heal_arena_html_scripts(html)
                 if validate_arena_html_scripts(healed):
+                    if outcome is not None:
+                        outcome.update({"source": "llm", "error": None, "fallback_reason": None})
                     return healed
                 logger.warning(
                     "LLM arena HTML failed JavaScript validation; falling back to the generic arena preview."
                 )
+                if outcome is not None:
+                    outcome["error"] = "Generated canvas failed JavaScript validation."
+                    outcome["fallback_reason"] = "invalid_js"
             else:
                 logger.warning(
                     "LLM arena HTML is missing the required preview hooks; falling back to the generic arena preview."
                 )
+                if outcome is not None:
+                    outcome["error"] = "Generated canvas was missing the required preview hooks."
+                    outcome["fallback_reason"] = "missing_hooks"
         except Exception as exc:
             logger.warning(
                 "LLM arena synthesis failed (%s: %s); falling back to the generic arena preview.",
                 type(exc).__name__,
                 exc,
             )
+            if outcome is not None:
+                outcome["error"] = f"{type(exc).__name__}: {exc}"
+                outcome["fallback_reason"] = "exception"
 
     # 2. Universal Schema-Driven Arena Generator
     synthesizer = JITArenaSynthesizer(active_client)
@@ -189,6 +209,11 @@ class JITArenaSynthesizer:
 
     def __init__(self, llm_client: BaseLLMClient | None = None):
         self._llm_client = llm_client
+        # "llm" when a bespoke canvas was produced, "fallback" when only the schema-driven
+        # preview could be built. Set by ``synthesize`` so a caller can say so instead of
+        # presenting a generic preview as if it were the bespoke artefact.
+        self.last_source: str = "fallback"
+        self.last_error: str | None = None
 
     @property
     def client(self) -> BaseLLMClient:
@@ -214,6 +239,23 @@ class JITArenaSynthesizer:
         file_path.write_text(html_str, encoding="utf-8")
         return html_str, file_path
 
+    def preview_arena_html(
+        self,
+        blueprint: AgentBlueprintSpec | DynamicTaskBlueprint,
+        sample_arena_state: dict[str, Any] | None = None,
+        visual_style: str | None = None,
+    ) -> str:
+        """Deterministic, sub-second arena built from the declared contract alone.
+
+        No provider call, so it can be shown while the bespoke canvas is still generating.
+        """
+        bp_spec = blueprint.to_agent_blueprint_spec() if hasattr(blueprint, "to_agent_blueprint_spec") else blueprint
+        return self._generate_deterministic_arena_html(
+            blueprint=bp_spec,
+            sample_arena_state=sample_arena_state,
+            visual_style=visual_style,
+        )
+
     def update_arena(
         self,
         blueprint: AgentBlueprintSpec | DynamicTaskBlueprint,
@@ -224,6 +266,8 @@ class JITArenaSynthesizer:
     ) -> str:
         """Updates and restyles arena.html according to user's request while preserving live mock animation and bi-directional bridges."""
         bp_spec = blueprint.to_agent_blueprint_spec() if hasattr(blueprint, "to_agent_blueprint_spec") else blueprint
+        self.last_source = "fallback"
+        self.last_error = None
         if not isinstance(self.client, FallbackCodeSynthesizer):
             try:
                 prompt = (
@@ -253,20 +297,29 @@ class JITArenaSynthesizer:
                     if validate_arena_html_scripts(healed):
                         if workspace_dir:
                             (Path(workspace_dir) / "arena.html").write_text(healed, encoding="utf-8")
+                        self.last_source = "llm"
                         return healed
                     logger.warning(
                         "Restyled arena HTML failed JavaScript validation; falling back to the generic arena preview."
                     )
+                    self.last_error = "Restyled canvas failed JavaScript validation."
                 else:
                     logger.warning(
                         "Restyled arena HTML is missing the required preview hooks; falling back to the generic arena preview."
                     )
+                    self.last_error = "Restyled canvas was missing the required preview hooks."
             except Exception as exc:
                 logger.warning(
                     "LLM arena restyle failed (%s: %s); falling back to the generic arena preview.",
                     type(exc).__name__,
                     exc,
                 )
+                self.last_error = f"{type(exc).__name__}: {exc}"
+
+        if self.last_error and current_arena_html and not isinstance(self.client, FallbackCodeSynthesizer):
+            # A failed restyle must not silently replace a better canvas with the generic preview:
+            # keep what the user already has and report the failure so they can retry.
+            return current_arena_html
 
         updated = self._generate_deterministic_arena_html(
             blueprint=bp_spec,
@@ -284,12 +337,17 @@ class JITArenaSynthesizer:
         visual_style: str | None = None,
     ) -> str:
         """Synthesizes HTML code using Universal Generative UI pipeline."""
-        return synthesize_universal_arena_html(
+        outcome: dict[str, Any] = {}
+        html_str = synthesize_universal_arena_html(
             blueprint=blueprint,
             sample_render_state=sample_arena_state,
             visual_style=visual_style,
             client=self.client,
+            outcome=outcome,
         )
+        self.last_source = str(outcome.get("source") or "fallback")
+        self.last_error = outcome.get("error")
+        return html_str
 
     def _generate_deterministic_arena_html(
         self,

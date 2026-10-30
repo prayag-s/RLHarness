@@ -18,6 +18,30 @@ import {
 
 const API_V4 = '/api/v4'
 
+/** The backend marks model-backed routes with this reason so the UI need not parse prose. */
+export const LLM_KEY_REQUIRED = 'llm-key-required'
+
+export class ApiError extends Error {
+  readonly status: number
+  readonly reason: string | null
+
+  constructor(message: string, status: number, reason: string | null) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+    this.reason = reason
+  }
+
+  get needsModel(): boolean {
+    return this.status === 403 && this.reason === LLM_KEY_REQUIRED
+  }
+}
+
+async function failFrom(res: Response, fallback: string): Promise<never> {
+  const body = await res.json().catch(() => ({ detail: fallback }))
+  throw new ApiError(body.detail || fallback, res.status, res.headers.get('X-RL-Reason'))
+}
+
 // -----------------------------------------------------------------------------
 // 1. Data Ingestion
 // -----------------------------------------------------------------------------
@@ -36,8 +60,7 @@ export async function uploadDatasetFile(
   })
 
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: 'Upload failed' }))
-    throw new Error(err.detail || 'Dataset file upload failed')
+    await failFrom(res, 'Dataset file upload failed')
   }
 
   return res.json()
@@ -90,8 +113,7 @@ export async function chatWithArchitect(
   })
 
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: 'Architect interview failed' }))
-    throw new Error(err.detail || 'Architect interview failed')
+    await failFrom(res, 'Architect interview failed')
   }
 
   const data = await res.json()
@@ -198,18 +220,26 @@ export async function chatWithStudioOmni(
   }
 
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: 'Omni chat failed' }))
-    throw new Error(err.detail || 'Studio chat failed')
+    await failFrom(res, 'Studio chat failed')
   }
 
   const data = await res.json()
   return data
 }
 
+export interface ArenaUpdateResult {
+  conversation_id: string
+  arena_html: string
+  status: string
+  /** "bespoke" when the provider produced a canvas, "fallback" when it had to be previewed. */
+  arena_source?: 'bespoke' | 'fallback'
+  error?: string | null
+}
+
 export async function updateArenaLook(
   conversationId: string,
   userVisualRequest: string,
-): Promise<{ conversation_id: string; arena_html: string; status: string }> {
+): Promise<ArenaUpdateResult> {
   const res = await fetch(`${API_V4}/conversations/${conversationId}/arena/update`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -217,8 +247,7 @@ export async function updateArenaLook(
   })
 
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: 'Failed to update arena look' }))
-    throw new Error(err.detail || 'Failed to update arena look')
+    await failFrom(res, 'Failed to update arena look')
   }
 
   return res.json()
@@ -338,8 +367,7 @@ export async function startSynthesisSession(
   })
 
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: 'Failed to start synthesis session' }))
-    throw new Error(err.detail || 'Failed to start synthesis session')
+    await failFrom(res, 'Failed to start synthesis session')
   }
 
   return res.json()
@@ -386,8 +414,7 @@ export async function nudgeSession(
   })
 
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: 'Nudge feedback failed' }))
-    throw new Error(err.detail || 'Nudge feedback failed')
+    await failFrom(res, 'Nudge feedback failed')
   }
 
   return res.json()

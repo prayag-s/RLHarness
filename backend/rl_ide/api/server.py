@@ -78,6 +78,9 @@ from rl_ide.state.records_store import load_records, save_records
 from rl_ide.synthesizer.verifier import SandboxSmokeTester
 from rl_ide.synthesizer.arena_builder import JITArenaSynthesizer
 
+# Marker the UI switches on when a model-backed route is called without a verified provider.
+LLM_KEY_REQUIRED = "llm-key-required"
+
 app = FastAPI(
     title="RL-Native Agent Studio v4.0 API",
     description="Autonomous JIT Agent Synthesis, Conversational Architect & Closed-Loop Training",
@@ -161,14 +164,21 @@ def load_session_scorecard(session_id: str) -> dict[str, Any] | None:
 
 
 def require_verified_llm() -> None:
-    """Enforces that a working, verified LLM key is active before allowing task execution."""
+    """Blocks the model-backed actions until a working provider is verified.
+
+    Only synthesis-time work needs this. Uploading a dataset, listing conversations, reading an
+    existing arena and the deterministic preview are all local and stay available, so a prospective
+    user can evaluate the studio before they have a key (G13).
+    """
     if not is_llm_ready():
         raise HTTPException(
             status_code=403,
             detail=(
-                "A verified LLM API key is mandatory before using the studio. "
-                "Please configure and test your LLM API credentials in Settings."
+                "This step needs a model. Connect and verify an LLM provider in Settings to "
+                "synthesize environments, chat with the architect or train. Uploading data, browsing "
+                "existing agents and the arena preview work without a key."
             ),
+            headers={"X-RL-Reason": LLM_KEY_REQUIRED},
         )
 
 
@@ -735,6 +745,14 @@ def get_conversation(conversation_id: str):
             print(f"Warning: Failed to reconstruct SessionState: {s_err}")
 
     conv["scorecard"] = load_session_scorecard(conversation_id)
+    # A reload mid-synthesis must still say "the bespoke canvas is on its way": the pending flag is
+    # derived from the durable job row, so it can never go stale after a crash or restart.
+    active = get_job_store().active_job(conversation_id)
+    conv["active_job"] = (
+        {"job_id": active["job_id"], "kind": active["kind"], "stage": active["stage"], "status": active["status"]}
+        if active
+        else None
+    )
     return conv
 
 
@@ -1256,13 +1274,34 @@ async def update_conversation_arena(conversation_id: str, req: ArenaUpdateReques
         workspace_dir=ws_dir,
     )
 
-    conv_store.save_or_update(conversation_id, arena_html=new_html)
+    arena_source = "bespoke" if arena_builder.last_source == "llm" else "fallback"
+    arena_error = arena_builder.last_error
+    conv_store.save_or_update(
+        conversation_id,
+        arena_html=new_html,
+        arena_source=arena_source if not arena_error else conv.get("arena_source"),
+    )
     sess = global_store.get_session(conversation_id)
     if sess:
         sess.arena_html = new_html
 
-    await manager.broadcast(conversation_id, {"event": "arena_updated", "arena_html": new_html})
-    return {"conversation_id": conversation_id, "arena_html": new_html, "status": "arena_updated"}
+    await manager.broadcast(
+        conversation_id,
+        {
+            "event": "arena_updated",
+            "arena_html": new_html,
+            "arena_kind": arena_source,
+            "pending_bespoke": False,
+            "error": arena_error,
+        },
+    )
+    return {
+        "conversation_id": conversation_id,
+        "arena_html": new_html,
+        "status": "arena_updated" if not arena_error else "arena_update_failed",
+        "arena_source": arena_source,
+        "error": arena_error,
+    }
 
 
 @app.post("/api/v4/conversations/{conversation_id}/arena/lock")
@@ -1725,6 +1764,44 @@ def validate_settings(config: LLMConfig):
     res = validate_llm_connection(config)
     res["valid"] = res.get("success", False)
     return res
+
+
+@app.get("/api/v4/capabilities")
+def get_capabilities():
+    """What this deployment can do right now, and what still needs a model.
+
+    The studio is usable without a provider: upload, profiling, browsing existing agents, the
+    deterministic arena preview and ONNX export are all local. Synthesis, architect chat, training
+    and restyling need one. Reporting that explicitly is what lets the UI offer exploration instead
+    of a hard lockout (G13).
+    """
+    status = get_llm_status()
+    return {
+        "llm": {
+            "verified": bool(status.get("is_verified")),
+            "provider": status.get("provider"),
+            "model_name": status.get("model_name"),
+            "offline_test_mode": bool(is_test_mode()),
+        },
+        "needs_llm": [
+            "synthesize_environment",
+            "architect_chat",
+            "train",
+            "restyle_arena",
+        ],
+        "works_without_llm": [
+            "upload_dataset",
+            "profile_dataset",
+            "list_conversations",
+            "read_arena",
+            "arena_preview",
+            "export_onnx",
+        ],
+        "isolation": {
+            "sandboxed_execution": bool(isolation_available()),
+            "required": os.environ.get("RL_IDE_REQUIRE_ISOLATION", "").lower() in ("1", "true", "yes"),
+        },
+    }
 
 
 @app.get("/api/v4/jobs")

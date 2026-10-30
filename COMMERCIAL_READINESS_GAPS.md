@@ -304,6 +304,14 @@ no confidence interval, and no per-segment breakdown.
   automatically, rather than only warning. Cap at two rewrites, then fall back to the deterministic
   template.
 - **Effort:** ~1–2 days.
+- **Status: CLOSED in Phase P2-A.** `SandboxSmokeTester.relax_unreachable_success` rewrites the
+  *success criteria* (a relaxed threshold cannot help a signal that never fires), re-runs the full
+  smoke test, and accepts the result only if success becomes observable; capped at two rewrites, and
+  the verified module is kept when the provider cannot fix it. The probe now separates "reachable in
+  principle" (the environment's own `get_critical_actions` hint) from "reachable by a policy that can
+  be learned" (random/heuristic play), so an oracle-only task is reported as a low achievable rate
+  instead of looking fine. The turn tells the user when criteria were relaxed, because a silently
+  relaxed KPI is a different task.
 
 #### G13. Onboarding requires a verified key before anything works
 - **Evidence:** every substantive route calls `require_verified_llm()` and returns 403 otherwise
@@ -314,6 +322,12 @@ no confidence interval, and no per-segment breakdown.
 - **Fix:** allow exploration (upload + profiling + preview) without a key, keep synthesis gated; add
   the enterprise provider targets.
 - **Effort:** ~0.5 day for the gate, provider work depends on the target.
+- **Status: CLOSED in Phase P2-A (gate only).** The startup lockout is gone: the studio opens in
+  explore mode, uploads and existing agents work, and only the four model-backed actions
+  (`synthesize_environment`, `architect_chat`, `train`, `restyle_arena`) refuse. The refusal carries
+  an `X-RL-Reason: llm-key-required` header so the UI opens the setup dialog instead of
+  string-matching prose, and `GET /api/v4/capabilities` publishes exactly what needs a model. The
+  enterprise provider targets (Azure OpenAI, self-hosted) remain open.
 
 #### G14. Only the first 120 rows of a file are ever used
 - **Evidence:** `records_from_frame(df, limit=MAX_ROWS)` with `MAX_ROWS = 120` and `df.head(limit)`
@@ -349,6 +363,13 @@ no confidence interval, and no per-segment breakdown.
   - the generic arena must be visibly labelled as a preview, so it can never be mistaken for the
     final artefact in a screenshot or a demo.
 - **Effort:** ~1 day; mostly frontend sequencing plus the stage event from G5.
+- **Status: CLOSED in Phase P2-A.** The arena is declared from the blueprint *before* environment
+  synthesis and replaced in place when the bespoke canvas arrives, so nothing waits on the provider.
+  The toolbar carries a live pill driven by the real job stage, a failed generation turns into an
+  explicit error with a **Retry** action, and the generic arena is labelled as a preview. Measured on
+  a real turn: `202` in 0.08 s, preview visible at 135 s (the moment the environment existed — it
+  used to be the *final* state at ~260 s), bespoke canvas at 261 s, and a lock set during generation
+  survived the completion save.
 
 #### G16. No evaluation of the *deployed* policy, only of the trained one
 - **Evidence:** metrics come from `evaluate_policy_deterministic` over the env instance
@@ -416,7 +437,15 @@ Acceptance: `/chat` returns a job id in < 1 s; progress streams over the websock
 restarting the API mid-synthesis resumes or fails cleanly with a retry hint; usage and cost are
 recorded per conversation; CI runs the fast suite on every push and a container image builds.
 
-Only after these three does G10 (sequential tasks) make sense — it is a value upgrade, not a
+**Phase P2-A — "remove sales friction" (≈2.5 days) — DONE (2026-10-30)**
+G12 + G13 + G15, plus a write-ahead-log leak found while doing them.
+Acceptance: a studio with no provider still opens, uploads, lists agents and shows an arena; only
+the four model-backed actions refuse, in a machine-readable way; the arena is visible and lockable
+before the bespoke canvas exists and is labelled honestly if that canvas fails; an environment whose
+success criteria can never fire is repaired and re-verified rather than trained against.
+All met, with a live measurement in `progress.md` §16.
+
+Only after these does G10 (sequential tasks) make sense — it is a value upgrade, not a
 trust-building one.
 
 ---

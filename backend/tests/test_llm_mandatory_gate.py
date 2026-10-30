@@ -35,7 +35,11 @@ def reset_llm_state():
 
 
 def test_unverified_llm_status_and_gating():
-    """Verify that unverified LLM state blocks operations with 403."""
+    """Unverified state blocks only the model-backed actions, and says why.
+
+    Exploration (upload, listing, reading an arena) is deliberately not gated: a prospective user
+    must be able to evaluate the studio before buying a key (G13).
+    """
     client = TestClient(app)
 
     # 1. Check status endpoint returns unverified
@@ -54,7 +58,9 @@ def test_unverified_llm_status_and_gating():
             json={"user_prompt": "Build an agent"},
         )
         assert chat_resp.status_code == 403
-        assert "verified LLM API key is mandatory" in chat_resp.json()["detail"]
+        # The refusal must be machine-readable, not only prose: the UI switches on the reason.
+        assert chat_resp.headers.get("X-RL-Reason") == "llm-key-required"
+        assert "needs a model" in chat_resp.json()["detail"]
 
         start_resp = client.post(
             "/api/v4/sessions/start",
