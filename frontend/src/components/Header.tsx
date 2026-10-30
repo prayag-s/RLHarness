@@ -145,9 +145,9 @@ export const Header: React.FC<HeaderProps> = ({
           className={`flex items-center space-x-1.5 px-3 py-1 rounded-lg text-xs font-semibold border transition hover:opacity-90 ${
             isLLMVerified
               ? provider.color
-              : 'bg-red-950/80 border-red-600/70 text-red-300 animate-pulse'
+              : 'bg-amber-950/80 border-amber-600/70 text-amber-300'
           }`}
-          title={isLLMVerified ? 'LLM Key Verified & Active. Click to modify.' : 'Mandatory LLM verification required. Click to setup.'}
+          title={isLLMVerified ? 'LLM key verified and active. Click to modify.' : 'No model connected. Exploration works; connect a provider to synthesize.'}
         >
           {isLLMVerified ? (
             <>
@@ -163,10 +163,10 @@ export const Header: React.FC<HeaderProps> = ({
             </>
           ) : (
             <>
-              <AlertTriangle className="h-3.5 w-3.5 text-red-400" />
-              <span>LLM Not Verified</span>
-              <span className="text-[10px] uppercase font-bold px-1.5 py-0.2 rounded bg-red-900/80 border border-red-500/50 text-red-200 ml-1">
-                Required
+              <AlertTriangle className="h-3.5 w-3.5 text-amber-400" />
+              <span>No Model</span>
+              <span className="text-[10px] uppercase font-bold px-1.5 py-0.2 rounded bg-amber-900/80 border border-amber-500/50 text-amber-200 ml-1">
+                Explore mode
               </span>
             </>
           )}

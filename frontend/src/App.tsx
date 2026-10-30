@@ -1041,7 +1041,7 @@ export const App: React.FC = () => {
     setIsGateModalOpen(false)
     addTimelineItem(
       'LLM Connection Verified ⚡',
-      `Credentials verified with live probe: ${settings.provider.toUpperCase()} (${settings.modelName || 'default'}). Studio unlocked!`,
+      `Credentials verified with live probe: ${settings.provider.toUpperCase()} (${settings.modelName || 'default'}). Synthesis, chat and training are enabled.`,
       'info',
       'success',
     )

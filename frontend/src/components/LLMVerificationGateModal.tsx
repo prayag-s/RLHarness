@@ -115,7 +115,7 @@ export const LLMVerificationGateModal: React.FC<LLMVerificationGateModalProps> =
 
       if (res.is_verified || res.success) {
         setSuccessMsg(
-          `Connection verified successfully to ${provider.toUpperCase()} (${res.model_name || modelName})! Studio unlocked.`,
+          `Connection verified successfully to ${provider.toUpperCase()} (${res.model_name || modelName})! Synthesis, chat and training are enabled.`,
         )
         // Store in localStorage
         localStorage.setItem('rl_ide_v4_llm_settings', JSON.stringify(payload))
@@ -301,7 +301,7 @@ export const LLMVerificationGateModal: React.FC<LLMVerificationGateModalProps> =
               ) : (
                 <>
                   <Check className="h-4 w-4 text-cyan-200" />
-                  <span>Verify Key & Unlock Studio</span>
+                  <span>Verify & Connect Model</span>
                   <ArrowRight className="h-4 w-4 ml-1 opacity-80" />
                 </>
               )}
