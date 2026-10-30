@@ -367,9 +367,9 @@ no confidence interval, and no per-segment breakdown.
   synthesis and replaced in place when the bespoke canvas arrives, so nothing waits on the provider.
   The toolbar carries a live pill driven by the real job stage, a failed generation turns into an
   explicit error with a **Retry** action, and the generic arena is labelled as a preview. Measured on
-  a real turn: `202` in 0.08 s, preview visible at 135 s (the moment the environment existed — it
-  used to be the *final* state at ~260 s), bespoke canvas at 261 s, and a lock set during generation
-  survived the completion save.
+  a real turn: `202` in 0.24 s, a playable preview at 75 s *while the environment was still being
+  written* (the arena used to be the *final* state at ~260 s), bespoke canvas at 261 s, a lock set
+  during generation survived the completion save, and a cancelled synthesis left the preview usable.
 
 #### G16. No evaluation of the *deployed* policy, only of the trained one
 - **Evidence:** metrics come from `evaluate_policy_deterministic` over the env instance

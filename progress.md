@@ -1282,9 +1282,10 @@ the blueprint exists, and replaced in place.
   (preserve), the final save re-reads the lock, and a status the user moved past (`training`) is not
   reset.
 
-Measured on a real turn (`deepseek-flash`, tenant `acme`, insurance-claims routing task):
+Measured on real turns (`deepseek-flash`, tenant `acme`):
 
 ```text
+# 1. full turn, insurance-claims routing (measured before the preview was moved earlier)
 POST /conversations/conv_g15_.../chat   Prefer: respond-async   -> 202 in 0.08 s
   0.1 s   queued
   5.1 s   intake
@@ -1293,7 +1294,17 @@ POST /conversations/conv_g15_.../chat   Prefer: respond-async   -> 202 in 0.08 s
           (locked the arena from the preview at this point)
 260.6 s   succeeded        arena_source=bespoke   38 856 B
 final: arena_locked=true (lock survived the completion save)
+
+# 2. current code, SOC-alert triage (preview declared before the environment exists)
+POST .../chat -> 202 in 0.24 s
+ 75.1 s   arena_source=preview, 17 594 B, job stage still "env_synthesis"
+          cancel -> "Cancellation requested; the job stops at the next stage boundary."
+ +20 s    status=arena_preview, arena_source=preview, 17 594 B  (still usable, not stuck)
 ```
+
+The second run is the important one: the preview is visible **while the environment is still being
+written**, so "Lock Arena" never waits on a provider, and a cancelled synthesis leaves a playable
+arena behind instead of an empty stage.
 
 ### 16.2 G13 — explore first, connect a model when you need one
 
