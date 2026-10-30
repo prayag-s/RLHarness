@@ -363,9 +363,19 @@ def is_test_mode() -> bool:
     )
 
 
+def is_offline_test_mode() -> bool:
+    """Test mode pinned to the deterministic fallback synthesizer.
+
+    The default test suite must never reach a real provider: a persisted key or an exported
+    ``DEEPSEEK_API_KEY`` would otherwise turn every chat test into a paid network round trip.
+    Live-LLM suites opt back in by exporting ``RL_IDE_LIVE_LLM=1``.
+    """
+    return is_test_mode() and os.environ.get("RL_IDE_LIVE_LLM") != "1"
+
+
 def get_config_persistence_path() -> Path:
     """Returns local path where verified LLM config is persisted across restarts."""
-    if is_test_mode():
+    if is_offline_test_mode():
         import tempfile
         return Path(tempfile.gettempdir()) / ".test_llm_config.json"
     base_dir = Path(os.environ.get("RL_IDE_WORKSPACE_DIR", "workspaces"))
@@ -401,7 +411,7 @@ def get_llm_status() -> dict[str, Any]:
 
 def is_llm_ready() -> bool:
     """Checks whether LLM is active and verified for studio tasks."""
-    if is_test_mode():
+    if is_offline_test_mode():
         return True
     return bool(_llm_state.get("is_verified") and _llm_state.get("client"))
 
@@ -427,12 +437,12 @@ class UnconfiguredLLMClient(BaseLLMClient):
 def get_active_llm_client() -> BaseLLMClient:
     """Returns the globally active verified LLM client.
     
-    Returns UnconfiguredLLMClient if LLM has not been verified yet (or fallback in test mode).
+    Returns UnconfiguredLLMClient if LLM has not been verified yet (or fallback in offline test mode).
     """
     if _llm_state.get("is_verified") and _llm_state.get("client"):
         return _llm_state["client"]
 
-    if is_test_mode():
+    if is_offline_test_mode():
         cfg = _llm_state.get("config") or LLMConfig(provider="fallback")
         return create_llm_client(cfg)
 
@@ -445,8 +455,8 @@ def verify_and_set_llm_config(
     """Validates connectivity to provider and activates it globally if successful."""
     p = config.provider.lower()
 
-    # Block fallback from being set as verified active provider in non-test mode
-    if p in ("fallback", "mock") and not is_test_mode():
+    # Block fallback from being set as verified active provider outside offline test mode
+    if p in ("fallback", "mock") and not is_offline_test_mode():
         err = "Offline Fallback cannot be used as a verified LLM. A valid API key for DeepSeek, OpenAI, Anthropic, or Ollama is mandatory."
         _llm_state["is_verified"] = False
         _llm_state["last_error"] = err
@@ -502,6 +512,9 @@ def verify_and_set_llm_config(
 
 def init_llm_state() -> None:
     """Attempts to auto-load saved config or env variables on startup."""
+    if is_offline_test_mode():
+        return
+
     # 1. Try saved config from disk
     try:
         p_file = get_config_persistence_path()
@@ -536,7 +549,7 @@ def create_llm_client(config: LLMConfig | None = None) -> BaseLLMClient:
     if config is None:
         if _llm_state.get("is_verified") and _llm_state.get("client"):
             return _llm_state["client"]
-        if is_test_mode():
+        if is_offline_test_mode():
             config = LLMConfig(provider="fallback")
         else:
             return UnconfiguredLLMClient()
@@ -559,9 +572,8 @@ def create_llm_client(config: LLMConfig | None = None) -> BaseLLMClient:
 def validate_llm_connection(config: LLMConfig) -> dict[str, Any]:
     """Tests connectivity to the configured provider."""
     p = config.provider.lower()
-
     if p in ("fallback", "mock"):
-        if is_test_mode():
+        if is_offline_test_mode():
             return {
                 "success": True,
                 "valid": True,

@@ -18,6 +18,7 @@ Demonstrates and verifies real-world user workflows:
   5. Continue training -> Resumes model to adapt to new environment mechanics
 """
 
+import os
 import uuid
 from pathlib import Path
 import pytest
@@ -26,6 +27,15 @@ from fastapi.testclient import TestClient
 from rl_ide.architect.omni_agent import StudioActionType
 from rl_ide.api.server import app, global_store
 from rl_ide.state.conversation_store import get_conversation_store
+
+# Multi-turn studio walkthroughs against the real provider: paid and slow, so excluded by default.
+pytestmark = pytest.mark.live_llm
+
+if os.environ.get("RL_IDE_LIVE_LLM") != "1":
+    pytest.skip(
+        "live-LLM use-case suite: export RL_IDE_LIVE_LLM=1 and run with `-m live_llm`",
+        allow_module_level=True,
+    )
 
 
 @pytest.fixture

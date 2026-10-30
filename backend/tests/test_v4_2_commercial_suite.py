@@ -15,6 +15,7 @@ Executes and verifies all 10 Commercial Use Cases from V4_2_COMMERCIAL_E2E_AUDIT
 """
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -28,6 +29,17 @@ from rl_ide.api.server import app, global_store, dataset_store
 from rl_ide.state.conversation_store import get_conversation_store
 from rl_ide.ingest.loader import load_file
 from rl_ide.ingest.sql_connector import SQLConnector
+
+# Each case runs a multi-turn studio session (blueprint synthesis, arena generation, code synthesis,
+# training) against the *real* provider. That is a paid, slow verification pass, so it stays out of
+# the default suite: `pytest` deselects `live_llm`, and even an explicit run requires opt-in.
+pytestmark = pytest.mark.live_llm
+
+if os.environ.get("RL_IDE_LIVE_LLM") != "1":
+    pytest.skip(
+        "live-LLM use-case suite: export RL_IDE_LIVE_LLM=1 and run with `-m live_llm`",
+        allow_module_level=True,
+    )
 
 
 @pytest.fixture

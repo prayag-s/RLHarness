@@ -41,3 +41,7 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+addopts = '-m "not live_llm"'
+markers = [
+    "live_llm: drives the real LLM-backed studio pipeline; excluded from the default run, opt in with RL_IDE_LIVE_LLM=1",
+]

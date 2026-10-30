@@ -978,7 +978,7 @@ sampling/parity — and makes the one remaining path fail closed for hosted tena
 | Verification | `SandboxSmokeTester` imports and exercises generated modules inside the worker (`smoke`). |
 | Training | `run_training_task` prefers the sandbox; `SandboxUnavailable` (no bwrap) falls back in-process with a loud `sandbox_bypassed` event, an isolation *failure* does not fall back. |
 | Export | Observation sampling for parity/drift and the ONNX-vs-SB3 episode comparison both run in the worker; the API no longer instantiates the generated module during export. |
-| Interactivity | `/interact` and the environment instantiation in `GET /conversations/{id}` are local-only until a persistent serve worker exists: a non-`local` owner receives **501**. |
+| Interactivity | A persistent `serve` worker holds the environment (and policy) so state survives between requests; `/interact` talks to it over JSON lines. `GET /conversations/{id}` no longer instantiates the module at all. Idle sessions are reaped (`RL_IDE_INTERACT_IDLE_SECONDS`, default 900 s) and concurrency is capped (`RL_IDE_MAX_INTERACT_SESSIONS`, default 8); `atexit` closes the rest. |
 
 **`unshare -rn` was deliberately rejected.** It gives network/PID isolation but leaves the host
 filesystem readable, so it is not an equivalent boundary; treating it as one would be security
@@ -994,7 +994,8 @@ worker has no network                      -> OSError: Network is unreachable
 provider keys are not forwarded            -> sandbox env contains no *KEY*/*TOKEN* variables
 benign environment still verifies          -> smoke ok, obs_dim 2
 training worker returns a session          -> rounds recorded, scorecard.json copied back
-hosted tenant hitting /interact            -> 501 (local studio unchanged)
+hosted tenant hitting /interact            -> 200 from a persistent `serve` worker, no in-process env
+serve session keeps state                  -> "call 1" then "call 2" from the same worker
 ```
 
 ### 13.3 Behaviour change to be aware of
@@ -1021,11 +1022,96 @@ $ pytest -q
 
 ### 13.5 Residual risk from B.2
 
-- **`/interact` still needs a persistent serve worker.** Until then a hosted tenant cannot use
-  interactive play (501), and a local studio still executes the verified module in-process.
+- **Interactive sessions are process-per-conversation.** Each live conversation holds one bwrap
+  worker (≈100–200 MB with torch). Idle reaping bounds this, but a hundred simultaneously active
+  conversations would not fit on one host; the serve path needs pooling before that.
+- **`--die-with-parent` is deliberately not used for serve.** Linux delivers that signal when the
+  spawning *thread* exits, and FastAPI runs sync endpoints in a threadpool — the worker was being
+  SIGKILLed between requests. Serve sessions now end when the API closes their stdin (EOF), which
+  also covers an API crash.
 - **Sandbox escape surface.** `bwrap` is the boundary; kernel or bubblewrap vulnerabilities are out
   of scope. The case directory is writable by design (the trainer writes models there).
 - **`bwrap` availability.** Without it there is no isolation; hosted deployments must treat
   `isolation_available() == False` as a hard startup failure. That startup assertion is not wired
   yet — a P1-C item.
 - **No seccomp profile.** The worker can still make syscalls the interpreter does not need.
+
+---
+
+## 14. v4.10 — Suite hygiene: the default run is free, use-case suites are opt-in (2026-10-30)
+
+### 14.1 The leak
+
+`rl_ide/api/server.py` calls `init_llm_state()` at import time. Inside pytest that used to read the
+persisted config at `/tmp/.test_llm_config.json` and then `DEEPSEEK_API_KEY`/`OPENAI_API_KEY`/
+`ANTHROPIC_API_KEY` from the environment, and *verify the provider over the network*. Two
+consequences:
+
+1. Every test process that imported the app made a real outbound call. With a placeholder key
+   (written by `test_valid_key_verifies_and_activates_globally`) it was a guaranteed 401 — a
+   non-hermetic, offline-hostile, 0.5 s tax per process.
+2. With a **real** key exported, the verification succeeded and every `/chat` in
+   `test_v4_2_commercial_suite.py` (10 domains × 5–8 turns) and `test_sample_usecases.py` drove the
+   live provider — a real, paid token burn hidden inside `pytest`.
+
+### 14.2 What changed
+
+- **`is_offline_test_mode()`** ([client.py](./backend/rl_ide/llm/client.py)) — test mode *unless*
+  `RL_IDE_LIVE_LLM=1`. Every place that previously forced the deterministic fallback under pytest
+  (`init_llm_state`, `get_active_llm_client`, `create_llm_client`, `is_llm_ready`,
+  `verify_and_set_llm_config`, `validate_llm_connection`, config persistence path) now keys off it.
+  `init_llm_state()` returns immediately, so no provider is probed and no key on disk or in the
+  environment is consumed.
+- **`live_llm` marker** registered in [pyproject.toml](./backend/pyproject.toml) with
+  `addopts = -m "not live_llm"` — the ten commercial domains and the two sample walkthroughs are
+  deselected from the default suite. Each file also module-skips unless `RL_IDE_LIVE_LLM=1`, so an
+  explicit `pytest tests/test_v4_2_commercial_suite.py` can never silently spend tokens.
+- Opt-in command: `RL_IDE_LIVE_LLM=1 ../.venv/bin/python -m pytest -m live_llm tests/test_v4_2_commercial_suite.py tests/test_sample_usecases.py`.
+
+### 14.3 Crash leftovers: staged rows do not outlive the process (G3/G9 follow-through)
+
+A `serve` case directory under `runs/sandbox/serve_*` holds `env_module.py`, `records.json` (the
+customer rows sampled for that session) and `model.zip`. `SandboxedEnvSession.close()` removes it,
+but a SIGKILLed or crashed API leaves it behind — and the interrupted test runs had left ten of them.
+
+- `_purge_orphan_serve_dirs()` ([server.py](./backend/rl_ide/api/server.py)) deletes case dirs that
+  are neither live in this process nor modified in the last hour. Runs at API start-up (skipped under
+  pytest, so a test run beside a dev server cannot delete a live session's case) and after every
+  idle sweep.
+- The one-hour grace is what makes it safe to run at all: a second instance sharing the same working
+  directory keeps its own case dirs, while a day-old crash leftover is always collected.
+
+### 14.4 Verification
+
+```text
+$ pytest -q
+108 passed, 2 skipped in 678.43s (0:11:18)   (13 live-LLM use-case tests deselected)
+
+$ RL_IDE_LIVE_LLM=1 pytest -m live_llm --collect-only -q tests/test_v4_2_commercial_suite.py tests/test_sample_usecases.py
+13 tests collected
+```
+
+| Test | Asserts |
+|---|---|
+| `test_offline_test_mode_never_reaches_a_provider` | With a real-looking `DEEPSEEK_API_KEY` set, startup makes **zero** provider calls, state stays unverified, studio stays unlocked, and the active client is `FallbackCodeSynthesizer` |
+| `test_live_llm_opt_in_restores_provider_verification` | `RL_IDE_LIVE_LLM=1` restores env-key verification, the only supported way to reach a paid provider under pytest |
+| `test_orphan_sandbox_case_dirs_are_purged` | A two-hour-old `serve_*` case dir holding staged rows is deleted; a fresh one is left alone |
+| `test_serve_session_keeps_state_between_requests`, `test_interact_endpoint_runs_in_the_sandbox`, `test_hosted_tenant_can_interact_without_in_process_execution` | Interactive play is answered by the sandbox worker over JSON lines, keeps environment state, and never instantiates the module in the API process |
+
+Live confirmation on the restarted API (not a test fixture), with an existing `env_module.py`:
+
+```text
+POST /api/v4/sessions/live_verify_serve/interact   x-owner-id: acme
+  -> {"arena_state":{"calls":1},"action_probs":[0.5,0.5],"status_text":"call 1"}
+POST ... (again)
+  -> {"arena_state":{"calls":2},...,"status_text":"call 2"}
+ps -> bwrap ... python -m rl_ide.security.worker --mode serve   (180 MB RSS)
+```
+
+### 14.5 Residual risk
+
+- The opt-in suites still assert product behaviour that the fallback synthesizer satisfies only
+  approximately; they are a manual pre-release check, not CI. Use-case generation and its
+  verification are to be rebuilt as a separate, cost-bounded harness.
+- `RL_IDE_LIVE_LLM=1` is inherited by child processes; a live run therefore also disables the
+  offline-fallback safety net for any nested pytest invocation.

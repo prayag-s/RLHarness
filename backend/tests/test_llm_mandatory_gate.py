@@ -145,3 +145,39 @@ def test_fallback_rejected_in_production_mode():
         assert success is False
         assert res["is_verified"] is False
         assert "Offline Fallback cannot be used" in res["error"]
+
+
+def test_offline_test_mode_never_reaches_a_provider(monkeypatch):
+    """A regression run must stay free and hermetic even when a real key is present."""
+    from rl_ide.llm.client import FallbackCodeSynthesizer, init_llm_state
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-a-real-looking-key-12345678")
+    provider_calls: list[str] = []
+    monkeypatch.setattr(
+        "rl_ide.llm.client.DeepSeekLLMClient.generate",
+        lambda self, *args, **kwargs: provider_calls.append("call") or "pong",
+    )
+
+    init_llm_state()
+
+    assert provider_calls == [], "startup must not probe a paid provider during tests"
+    assert _llm_state["is_verified"] is False
+    assert is_llm_ready() is True  # offline studio access stays unlocked
+    assert isinstance(get_active_llm_client(), FallbackCodeSynthesizer)
+
+
+def test_live_llm_opt_in_restores_provider_verification(monkeypatch, tmp_path):
+    """RL_IDE_LIVE_LLM=1 is the only way back to the real provider inside pytest."""
+    from rl_ide.llm.client import init_llm_state
+
+    monkeypatch.setenv("RL_IDE_LIVE_LLM", "1")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-live-key-12345678")
+    monkeypatch.setattr("rl_ide.llm.client.DeepSeekLLMClient.generate", lambda self, *a, **k: "pong")
+    monkeypatch.setattr(
+        "rl_ide.llm.client.get_config_persistence_path", lambda: tmp_path / "absent.json"
+    )
+
+    init_llm_state()
+
+    assert _llm_state["is_verified"] is True
+    assert _llm_state["config"].provider == "deepseek"
