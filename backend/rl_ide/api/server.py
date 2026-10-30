@@ -7,9 +7,13 @@ mid-flight feedback nudges, and ONNX .runbundle packaging.
 
 from __future__ import annotations
 import asyncio
+import atexit
 from contextvars import ContextVar
+import threading
+import time
 import json
 import os
+import shutil
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 from pathlib import Path
 from typing import Any
@@ -55,8 +59,10 @@ from rl_ide.llm.client import (
     verify_and_set_llm_config,
     is_llm_ready,
     init_llm_state,
+    is_test_mode,
 )
 from rl_ide.synthesizer.env_builder import JITEnvironmentSynthesizer, load_synthesized_env_class, instantiate_env
+from rl_ide.security import isolation_available
 from rl_ide.state.dataset_store import get_dataset_store
 from rl_ide.state.records_store import load_records, save_records
 from rl_ide.synthesizer.verifier import SandboxSmokeTester
@@ -579,11 +585,12 @@ def get_conversation(conversation_id: str):
         raise HTTPException(status_code=404, detail=f"Conversation '{conversation_id}' not found.")
 
     # Re-instantiate SynthesizedGymEnv and reload saved SB3 model into global_store.
-    # Only the local studio may load generated code in-process; hosted tenants wait for the
-    # sandboxed serve worker (see SANDBOXED_INTERACT_AVAILABLE).
+    # Generated code is only executed in-process for the local single-user studio, and only when the
+    # sandboxed serve worker is unavailable; otherwise `/interact` goes through that worker
+    # (see SANDBOXED_INTERACT_AVAILABLE).
     ws_dir = global_store.base_dir / conversation_id
     env_file = ws_dir / "env_module.py"
-    if env_file.exists() and (SANDBOXED_INTERACT_AVAILABLE or current_owner() == "local"):
+    if env_file.exists() and not SANDBOXED_INTERACT_AVAILABLE and current_owner() == "local":
         try:
             from rl_ide.synthesizer.env_builder import load_synthesized_env_class, instantiate_env
             env_cls = load_synthesized_env_class(env_file)
@@ -708,6 +715,7 @@ def clear_all_conversations():
     for summary in conversations:
         cid = summary["conversation_id"]
         conv_store.delete(cid, owner_id=owner)
+        close_interact_session(cid)
         global_store.delete_session(cid)
     for dataset in dataset_store.list(owner_id=owner):
         dataset_store.delete(dataset["dataset_id"], owner_id=owner)
@@ -723,6 +731,7 @@ def delete_conversation(conversation_id: str):
     if not conv:
         raise HTTPException(status_code=404, detail=f"Conversation '{conversation_id}' not found.")
     conv_store.delete(conversation_id, owner_id=owner)
+    close_interact_session(conversation_id)
     global_store.delete_session(conversation_id)
     ds_id = conv.get("dataset_id")
     if ds_id:
@@ -798,7 +807,10 @@ def run_training_task(
     would re-open the boundary the sandbox exists to close.
     """
     from rl_ide.autopilot.sandbox_runner import SandboxedTrainingError, run_training_in_sandbox
-    from rl_ide.security import SandboxUnavailable, isolation_available
+    from rl_ide.security import SandboxUnavailable
+
+    # A retrained or rewritten environment invalidates any cached interactive session.
+    close_interact_session(conversation_id)
 
     records = dataset.df.to_dict(orient="records") if (dataset is not None and hasattr(dataset, "df")) else None
 
@@ -1021,10 +1033,138 @@ class InteractRequest(BaseModel):
         return base or self.payload
 
 
-# Interactive play still instantiates the generated environment in the API process (the sandboxed
-# serve worker is not implemented yet). Until it is, a hosted tenant must not be able to trigger it:
-# the local single-user studio keeps working, everything else is refused rather than silently exposed.
-SANDBOXED_INTERACT_AVAILABLE = False
+# Interactive play runs in a persistent sandboxed worker whenever bwrap is available. Without it,
+# a hosted tenant must not be able to trigger in-process execution, so only the local studio may use
+# the legacy path.
+SANDBOXED_INTERACT_AVAILABLE = isolation_available()
+
+_interact_sessions: dict[str, Any] = {}
+_interact_sessions_lock = threading.RLock()
+# A serve worker holds a whole interpreter plus torch: never let them accumulate per conversation.
+_INTERACT_IDLE_SECONDS = float(os.environ.get("RL_IDE_INTERACT_IDLE_SECONDS", "900"))
+_MAX_INTERACT_SESSIONS = int(os.environ.get("RL_IDE_MAX_INTERACT_SESSIONS", "8"))
+
+
+def _resolve_model_zip(session_id: str) -> Path | None:
+    conv = get_conversation_store().get_conversation(session_id)
+    candidates = [
+        conv.get("latest_model_zip_path") if conv else None,
+        Path("runs") / session_id / "model.zip",
+        global_store.base_dir / session_id / "model.zip",
+    ]
+    for candidate in candidates:
+        if candidate and Path(str(candidate)).exists():
+            return Path(str(candidate))
+    return None
+
+
+def _purge_orphan_serve_dirs(max_age_seconds: float = 3600.0) -> None:
+    """Deletes case dirs a dead process left behind: each can still hold staged customer rows.
+
+    Only dirs untouched for ``max_age_seconds`` are removed so a second instance sharing this
+    working directory (a test run beside a dev server) never deletes a live session's case.
+    """
+    root = Path("runs") / "sandbox"
+    if not root.is_dir():
+        return
+    now = time.time()
+    with _interact_sessions_lock:
+        live = {session.case_dir for session in _interact_sessions.values() if session.case_dir}
+    for case in root.glob("serve_*"):
+        if case in live:
+            continue
+        try:
+            if now - case.stat().st_mtime < max_age_seconds:
+                continue
+        except OSError:
+            continue
+        shutil.rmtree(case, ignore_errors=True)
+
+
+def _sweep_interact_sessions() -> None:
+    """Closes idle and surplus sandboxed environments (bounded memory, no orphan processes)."""
+    now = time.monotonic()
+    stale: list[str] = []
+    with _interact_sessions_lock:
+        for sid, session in list(_interact_sessions.items()):
+            if now - getattr(session, "last_used", now) > _INTERACT_IDLE_SECONDS:
+                stale.append(sid)
+        while len(_interact_sessions) - len(stale) > _MAX_INTERACT_SESSIONS:
+            candidates = [sid for sid in _interact_sessions if sid not in stale]
+            if not candidates:
+                break
+            oldest = min(candidates, key=lambda sid: getattr(_interact_sessions[sid], "last_used", 0.0))
+            stale.append(oldest)
+        evicted = [_interact_sessions.pop(sid) for sid in stale if sid in _interact_sessions]
+    for session in evicted:
+        try:
+            session.close()
+        except Exception:
+            pass
+    _purge_orphan_serve_dirs()
+
+
+def close_all_interact_sessions() -> None:
+    with _interact_sessions_lock:
+        sessions = list(_interact_sessions.values())
+        _interact_sessions.clear()
+    for session in sessions:
+        try:
+            session.close()
+        except Exception:
+            pass
+
+
+atexit.register(close_all_interact_sessions)
+
+# A previous process may have died without closing its sessions; their case dirs hold staged rows.
+# Skipped under pytest, where an API instance may be serving a developer's live session in parallel.
+if not is_test_mode():
+    _purge_orphan_serve_dirs()
+
+
+def get_interact_session(session_id: str):
+    """Returns this session's sandboxed environment, starting one on first use."""
+    from rl_ide.security.serve_client import SandboxedEnvSession
+
+    _sweep_interact_sessions()
+    with _interact_sessions_lock:
+        existing = _interact_sessions.get(session_id)
+        if existing is not None:
+            return existing
+
+        workspace = global_store.base_dir / session_id
+        env_file = workspace / "env_module.py"
+        if not env_file.exists():
+            conv = get_conversation_store().get_conversation(session_id)
+            if conv and conv.get("env_code"):
+                workspace.mkdir(parents=True, exist_ok=True)
+                env_file.write_text(conv["env_code"], encoding="utf-8")
+            else:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Active environment not found for session '{session_id}'.",
+                )
+
+        session = SandboxedEnvSession()
+        session.start(
+            env_module=env_file,
+            records=load_records(workspace),
+            model_path=_resolve_model_zip(session_id),
+        )
+        _interact_sessions[session_id] = session
+        return session
+
+
+def close_interact_session(session_id: str) -> None:
+    """Drops the sandboxed environment after training or deletion so stale code is never served."""
+    with _interact_sessions_lock:
+        session = _interact_sessions.pop(session_id, None)
+    if session is not None:
+        try:
+            session.close()
+        except Exception:
+            pass
 
 
 @app.post("/api/v4/sessions/{session_id}/interact")
@@ -1035,13 +1175,20 @@ def session_interact(session_id: str, req: InteractRequest):
             status_code=409,
             detail="Training is currently mutating this session's policy; retry once the round completes.",
         )
-    if not SANDBOXED_INTERACT_AVAILABLE and current_owner() != "local":
+    if SANDBOXED_INTERACT_AVAILABLE:
+        try:
+            return get_interact_session(session_id).interact(req.get_effective_payload())
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Interactive step failed: {exc}")
+
+    if current_owner() != "local":
         raise HTTPException(
             status_code=501,
             detail=(
-                "Interactive play is not available for hosted tenants yet: it requires running the "
-                "generated environment inside the sandbox worker, which is not implemented. "
-                "Scoring, export and the held-out scorecard are unaffected."
+                "Interactive play requires sandboxed execution, and bwrap is not available on this "
+                "host. Scoring, export and the held-out scorecard are unaffected."
             ),
         )
     env = global_store.get_env(session_id)

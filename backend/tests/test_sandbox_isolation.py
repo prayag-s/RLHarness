@@ -8,6 +8,8 @@ denylist entirely and prove the *sandbox* stops the code at the OS level.
 from __future__ import annotations
 
 import os
+import shutil
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -172,21 +174,144 @@ def test_training_worker_returns_session_and_copies_artefacts(tmp_path):
     assert not list((tmp_path / "workspaces").glob("temp_verify_*"))
 
 
-def test_hosted_interact_is_refused_until_sandboxed():
-    """A tenant must never trigger in-process execution of generated code."""
+def test_hosted_tenant_can_interact_without_in_process_execution(tmp_path):
+    """A non-local owner is served by the sandbox, never by the API process."""
+    import shutil
+    import uuid
+
     from fastapi.testclient import TestClient
-    from rl_ide.api.server import app
+
+    from rl_ide.api.server import app, close_interact_session, global_store
+
+    session_id = f"sandbox_hosted_{uuid.uuid4().hex[:8]}"
+    workspace = global_store.base_dir / session_id
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "env_module.py").write_text(_SERVE_ENV, encoding="utf-8")
 
     client = TestClient(app)
-    hosted = client.post(
-        "/api/v4/sessions/does_not_exist/interact",
-        json={"payload": {"user_action": 0}},
-        headers={"x-owner-id": "acme"},
-    )
-    assert hosted.status_code == 501, hosted.text
+    try:
+        resp = client.post(
+            f"/api/v4/sessions/{session_id}/interact",
+            json={"payload": {"user_action": 0}},
+            headers={"x-owner-id": "acme"},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["status_text"] == "call 1"
+        assert global_store.get_env(session_id) is None
+    finally:
+        close_interact_session(session_id)
+        shutil.rmtree(workspace, ignore_errors=True)
 
-    local = client.post(
-        "/api/v4/sessions/does_not_exist/interact",
-        json={"payload": {"user_action": 0}},
-    )
-    assert local.status_code == 404, "the local studio keeps its existing behaviour"
+
+_SERVE_ENV = """
+from __future__ import annotations
+import gymnasium as gym
+import numpy as np
+from gymnasium import spaces
+
+
+class SynthesizedGymEnv(gym.Env):
+    is_placeholder = False
+    task_class = "classification"
+    episode_horizon = 5
+    action_labels = ["A", "B"]
+
+    def __init__(self, dataset_records=None, config=None):
+        super().__init__()
+        self.observation_space = spaces.Box(low=0.0, high=1.0, shape=(2,), dtype=np.float32)
+        self.action_space = spaces.Discrete(2)
+        self.calls = 0
+
+    def reset(self, seed=None, options=None):
+        super().reset(seed=seed)
+        return np.zeros(2, dtype=np.float32), {"arena_state": self.get_render_state()}
+
+    def step(self, action):
+        return np.zeros(2, dtype=np.float32), 1.0, True, False, {"reward_breakdown": {}}
+
+    def get_render_state(self):
+        return {"calls": self.calls}
+
+    def interactive_step(self, payload, policy_predict_fn=None, mode="agent_vs_env"):
+        self.calls += 1
+        label = "A"
+        probs = [1.0, 0.0]
+        if policy_predict_fn is not None:
+            action, probs = policy_predict_fn(np.zeros(2, dtype=np.float32))
+            label = self.action_labels[int(action)]
+        return {
+            "arena_state": self.get_render_state(),
+            "agent_action_label": label,
+            "action_probs": [float(p) for p in probs],
+            "status_text": f"call {self.calls}",
+        }
+"""
+
+
+def test_serve_session_keeps_state_between_requests(tmp_path):
+    from rl_ide.security.serve_client import SandboxedEnvSession
+
+    env_module = tmp_path / "env_module.py"
+    env_module.write_text(_SERVE_ENV, encoding="utf-8")
+
+    session = SandboxedEnvSession()
+    try:
+        session.start(env_module=env_module, records=[{"a": 1}])
+        first = session.interact({"user_action": 0})
+        second = session.interact({"user_action": 1})
+    finally:
+        session.close()
+
+    assert first["status_text"] == "call 1"
+    assert second["status_text"] == "call 2", "the worker must keep environment state between requests"
+    assert second["agent_action_label"] in {"A", "B"}
+
+
+def test_interact_endpoint_runs_in_the_sandbox(tmp_path, monkeypatch):
+    """The API must answer interactive play without instantiating the module in-process."""
+    import uuid
+
+    from fastapi.testclient import TestClient
+
+    from rl_ide.api.server import app, close_interact_session, global_store
+
+    session_id = f"sandbox_serve_{uuid.uuid4().hex[:8]}"
+    workspace = global_store.base_dir / session_id
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "env_module.py").write_text(_SERVE_ENV, encoding="utf-8")
+
+    client = TestClient(app)
+    try:
+        first = client.post(f"/api/v4/sessions/{session_id}/interact", json={"payload": {"user_action": 0}})
+        second = client.post(f"/api/v4/sessions/{session_id}/interact", json={"payload": {"user_action": 1}})
+        assert first.status_code == 200, first.text
+        assert second.status_code == 200, second.text
+        assert second.json()["status_text"] == "call 2"
+        assert global_store.get_env(session_id) is None, "no in-process env may be created"
+    finally:
+        close_interact_session(session_id)
+        import shutil
+
+        shutil.rmtree(workspace, ignore_errors=True)
+
+
+def test_orphan_sandbox_case_dirs_are_purged():
+    """A crashed API must not leave staged customer rows in runs/sandbox/serve_*."""
+    import uuid
+
+    from rl_ide.api import server
+
+    fresh = Path("runs") / "sandbox" / f"serve_{uuid.uuid4().hex[:8]}"
+    orphan = Path("runs") / "sandbox" / f"serve_{uuid.uuid4().hex[:8]}"
+    for case in (fresh, orphan):
+        case.mkdir(parents=True, exist_ok=True)
+        (case / "records.json").write_text('[{"tenant": "acme", "claim": "secret"}]', encoding="utf-8")
+    old = time.time() - 7200
+    os.utime(orphan, (old, old))  # abandoned by a process that died two hours ago
+
+    server._purge_orphan_serve_dirs()
+    try:
+        assert not orphan.exists(), "staged rows must not survive the process that created them"
+        assert fresh.exists(), "a concurrently running instance's case dir must never be deleted"
+    finally:
+        shutil.rmtree(fresh, ignore_errors=True)

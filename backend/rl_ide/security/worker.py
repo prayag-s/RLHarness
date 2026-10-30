@@ -79,6 +79,75 @@ def run_observations(job: dict[str, Any]) -> dict[str, Any]:
     return {"observations": samples, "obs_dim": int(getattr(env, "obs_dim", len(samples[0]) if samples else 0))}
 
 
+def run_serve(job: dict[str, Any]) -> dict[str, Any]:
+    """Long-lived interactive session: holds the env (and policy) and answers requests on stdin."""
+    from rl_ide.synthesizer.env_builder import instantiate_env, load_synthesized_env_class
+
+    env_cls = load_synthesized_env_class(job["env_module"])
+    env = instantiate_env(env_cls, dataset_records=_load_records(job.get("records_path")))
+
+    model = None
+    if job.get("model_path") and Path(job["model_path"]).exists():
+        try:
+            from stable_baselines3 import PPO
+
+            model = PPO.load(job["model_path"], env=env, device="cpu")
+        except Exception:
+            model = None
+
+    # The deployed policy chooses greedily with no mask, exactly like the scorecard.
+    def predict(obs):
+        if model is None:
+            n_actions = int(getattr(env.action_space, "n", 1))
+            return 0, [1.0 / max(1, n_actions)] * max(1, n_actions)
+        # Imported lazily: a session without a policy should not pay torch's ~5 s start-up.
+        import numpy as np
+        import torch
+
+        obs_t = torch.tensor(np.asarray(obs, dtype="float32").reshape(1, -1))
+        with torch.no_grad():
+            features = model.policy.extract_features(obs_t)
+            latent_pi, _ = model.policy.mlp_extractor(features)
+            logits = model.policy.action_net(latent_pi)
+            probs = torch.softmax(logits, dim=-1).squeeze(0).cpu().numpy()
+        return int(np.argmax(probs)), [float(p) for p in probs]
+
+    for raw in sys.stdin:
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            request = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            print("RESULT " + json.dumps({"ok": False, "error": f"bad request: {exc}"}), flush=True)
+            continue
+        command = request.get("cmd")
+        try:
+            if command == "close":
+                print("RESULT " + json.dumps({"ok": True, "result": {"closed": True}}), flush=True)
+                return {"closed": True}
+            if command == "interact":
+                result = env.interactive_step(
+                    request.get("payload") or {},
+                    predict,
+                    request.get("mode") or "agent_vs_env",
+                )
+            elif command == "reset":
+                obs, info = env.reset(**(request.get("reset_kwargs") or {}))
+                result = {"obs": [float(x) for x in obs], "info": info}
+            elif command == "state":
+                result = env.get_render_state() if hasattr(env, "get_render_state") else {}
+            else:
+                raise ValueError(f"unknown command {command!r}")
+            print("RESULT " + json.dumps({"ok": True, "result": result}, default=str), flush=True)
+        except Exception as exc:  # reported per request; the session stays alive
+            print(
+                "RESULT " + json.dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}"}),
+                flush=True,
+            )
+    return {"closed": True}
+
+
 def run_parity(job: dict[str, Any]) -> dict[str, Any]:
     """Compares the exported ONNX graph with the SB3 policy over whole episodes, in the sandbox."""
     from stable_baselines3 import PPO
@@ -141,11 +210,23 @@ def run_train(job: dict[str, Any]) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Sandboxed environment worker")
-    parser.add_argument("--mode", required=True, choices=["smoke", "train", "observations", "parity"])
+    parser.add_argument("--mode", required=True, choices=["smoke", "train", "observations", "parity", "serve"])
     parser.add_argument("--job", required=True)
     args = parser.parse_args(argv)
 
     job = json.loads(Path(args.job).read_text(encoding="utf-8"))
+
+    if args.mode == "serve":
+        # A serve session talks over stdin/stdout for its whole lifetime; there is no result file.
+        try:
+            run_serve(job)
+            return 0
+        except Exception:
+            import traceback
+
+            sys.stderr.write(traceback.format_exc())
+            return 1
+
     out_path = job["out_path"]
     try:
         if args.mode == "smoke":

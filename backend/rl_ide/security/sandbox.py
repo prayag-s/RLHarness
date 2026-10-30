@@ -56,7 +56,7 @@ def isolation_available() -> bool:
     return isolation_tool() is not None
 
 
-def _bwrap_argv(case_dir: Path, python: str) -> list[str]:
+def _bwrap_argv(case_dir: Path, python: str, die_with_parent: bool = True) -> list[str]:
     # Use the interpreter path inside the *bound* prefix. Resolving the symlink all the way to
     # /usr/bin/python3 would drop the venv (sys.prefix=/usr) and with it every installed package.
     venv_python = Path(sys.prefix).resolve() / "bin" / "python"
@@ -79,13 +79,13 @@ def _bwrap_argv(case_dir: Path, python: str) -> list[str]:
     # (tests, temp workspaces) a later tmpfs would shadow it and bwrap could not chdir into it.
     argv += ["--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp"]
     argv += ["--bind", str(case_dir), str(case_dir)]
-    argv += [
-        "--unshare-net",
-        "--unshare-pid",
-        "--die-with-parent",
-        "--chdir", str(case_dir),
-        python,
-    ]
+    argv += ["--unshare-net", "--unshare-pid"]
+    if die_with_parent:
+        # PDEATHSIG is delivered when the *thread* that spawned bwrap exits, not when the process
+        # does: never use this for a session that outlives one request (FastAPI runs sync endpoints
+        # in a threadpool, so the worker would be SIGKILLed between requests).
+        argv.append("--die-with-parent")
+    argv += ["--chdir", str(case_dir), python]
     return argv
 
 
@@ -96,7 +96,8 @@ def build_command(mode: str, case_dir: Path, job_path: Path) -> list[str]:
         raise SandboxUnavailable(
             "bwrap is not installed; refusing to execute generated code outside the API process."
         )
-    argv = _bwrap_argv(case_dir, sys.executable)
+    # Long-lived sessions end when the API closes their stdin instead of following a thread.
+    argv = _bwrap_argv(case_dir, sys.executable, die_with_parent=(mode != "serve"))
     argv += ["-m", "rl_ide.security.worker", "--mode", mode, "--job", str(job_path)]
     return argv
 

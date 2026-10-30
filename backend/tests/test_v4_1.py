@@ -200,9 +200,9 @@ def test_conversation_persistence_and_resumability(test_client: TestClient):
     assert reloaded_a["arena_html"] is not None and len(reloaded_a["arena_html"]) > 100
     assert len(reloaded_a["episodes"]) > 0
 
-    # Verify that SynthesizedGymEnv was reloaded into memory
-    reloaded_env = global_store.get_env(id_a)
-    assert reloaded_env is not None, "Environment must be re-instantiated into global_store"
+    # Generated code must NOT be instantiated in the API process any more (P0-B.2); the
+    # environment is loaded by the sandboxed worker on first interactive use instead.
+    assert global_store.get_env(id_a) is None, "the API must not import generated code"
 
     # Step 7: Live interactive play against reloaded agent
     interact_payload = {"action": "human_move", "cell": 4}
