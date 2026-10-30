@@ -1224,3 +1224,27 @@ and no gate that stops a regression.
 locked set, the SPA build and the API boot were each validated locally, but not the `docker build`
 itself. A virtualenv under `/tmp` cannot exec inside `bwrap` (`--tmpfs /tmp` shadows it) — the image
 is unaffected, but a dev venv must live outside `/tmp`.
+
+### 15.4 Live validation of P1-C (real provider, real job)
+
+Run against the API on `127.0.0.1:8000` as tenant `acme`, one real DeepSeek turn:
+
+```text
+POST /conversations/live_p1c_.../chat   Prefer: respond-async   x-owner-id: acme
+  -> 202 in 0.03 s   {"job_id": "job_b0cea6e4a264", "stage": "queued"}
+
+GET /jobs/job_b0cea6e4a264   (polled every 5 s)
+  intake         (~60 s)
+  env_synthesis  (~70 s)
+  arena          (~155 s)
+  succeeded      (~4 min 50 s total)
+
+result: status=arena_preview, arena_html 51 799 B, env_code 25 073 B
+GET /usage -> 13 calls, 1 190 in + 6 372 out tokens, $0.00733 (deepseek-flash)
+```
+
+That run also found a real tenancy bug (commit `6b2ec1d`): the omni agent created the conversation
+with the default owner, so the tenant could not read its own conversation while `local` could.
+
+**Final gate:** `pytest -q` → **126 passed, 2 skipped, 0 failed in 5:26**. Fast gate
+(`-m "not slow and not live_llm"`) → **67 passed, 2 skipped in 1:08**.
