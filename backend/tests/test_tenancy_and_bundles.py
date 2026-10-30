@@ -230,9 +230,9 @@ def test_verification_leaves_no_workspace_behind(tmp_path, monkeypatch):
     blueprint.observation_features = []
 
     before = len(list(Path(tempfile.gettempdir()).glob("rl_verify_*")))
-    ok, logs, _ = SandboxSmokeTester().verify_and_heal(code, blueprint, dataset)
+    ok, _verified_code, repair_logs = SandboxSmokeTester().verify_and_heal(code, blueprint, dataset)
     after = len(list(Path(tempfile.gettempdir()).glob("rl_verify_*")))
 
-    assert ok is True, logs[-1][:400]
+    assert ok is True, str(repair_logs)[-800:]
     assert after <= before, "verification must not leak a temporary workspace"
     assert not list((tmp_path / "workspaces").glob("temp_verify_*"))

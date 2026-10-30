@@ -960,3 +960,72 @@ $ pytest -q
   obvious upgrade if uploads grow.
 - **`save_or_update` creating a conversation falls back to owner `local`.** Normal flows always
   create the conversation first, so this only matters for internal callers.
+
+---
+
+## 13. v4.9 — Phase P0-B.2: generated code behind an OS boundary (2026-10-30)
+
+Implements G2 for the paths that execute model-generated Python — training, verification, and export
+sampling/parity — and makes the one remaining path fail closed for hosted tenants.
+
+### 13.1 What changed
+
+| Component | Change |
+|---|---|
+| `rl_ide/security/sandbox.py` | **New.** Builds a `bwrap` invocation with only `/usr`, `/lib`, `/lib64`, the venv, `rl_ide` (read-only at `/opt`) and the job's case directory visible; `--unshare-net --unshare-pid --die-with-parent`; hard wall-clock timeout; merged stderr pipe (a separate stderr pipe can deadlock when it fills); minimal environment (no provider keys). |
+| `rl_ide/security/worker.py` | **New.** Modes `smoke`, `train`, `observations`, `parity`. Writes results to a file in the case dir and streams events on stdout; never imported by the API. |
+| `rl_ide/autopilot/sandbox_runner.py` | **New.** Stages a private case directory per job, runs the worker, copies back only that session's artefacts, removes the case dir. |
+| Verification | `SandboxSmokeTester` imports and exercises generated modules inside the worker (`smoke`). |
+| Training | `run_training_task` prefers the sandbox; `SandboxUnavailable` (no bwrap) falls back in-process with a loud `sandbox_bypassed` event, an isolation *failure* does not fall back. |
+| Export | Observation sampling for parity/drift and the ONNX-vs-SB3 episode comparison both run in the worker; the API no longer instantiates the generated module during export. |
+| Interactivity | `/interact` and the environment instantiation in `GET /conversations/{id}` are local-only until a persistent serve worker exists: a non-`local` owner receives **501**. |
+
+**`unshare -rn` was deliberately rejected.** It gives network/PID isolation but leaves the host
+filesystem readable, so it is not an equivalent boundary; treating it as one would be security
+theatre. Hosts without `bwrap` get the explicit single-user fallback instead.
+
+### 13.2 What the tests prove (not just assert)
+
+The isolation tests bypass the AST denylist entirely — the module is hostile at import time:
+
+```text
+worker cannot read runs/conversations.db   -> FileNotFoundError (path does not exist in the sandbox)
+worker has no network                      -> OSError: Network is unreachable
+provider keys are not forwarded            -> sandbox env contains no *KEY*/*TOKEN* variables
+benign environment still verifies          -> smoke ok, obs_dim 2
+training worker returns a session          -> rounds recorded, scorecard.json copied back
+hosted tenant hitting /interact            -> 501 (local studio unchanged)
+```
+
+### 13.3 Behaviour change to be aware of
+
+**LLM auto-tuning is disabled inside the sandbox.** The worker has no network and no provider keys
+by design, so when the loop detects a plateau it emits `auto_tune_skipped` and keeps the reward
+function instead of calling the LLM. Dataset-driven runs converge without tuning; if auto-tuning
+matters for a task, the environment must eventually move behind an RPC boundary (a P1-C follow-up).
+
+Suite runtime grew from **11:24 to 16:03** because each worker imports numpy/gym (and torch for
+parity). That is the cost of the boundary, not a regression.
+
+### 13.4 Verification
+
+```text
+$ pytest -q
+116 passed, 11 warnings in 963.83s (0:16:03)
+```
+
+| Test file | Purpose |
+|---|---|
+| `tests/test_sandbox_isolation.py` | **New** (7 tests) — tenant file unreadable, no network, keys not forwarded, benign env verifies, bwrap reported, training worker returns session + artefacts, hosted `/interact` refused |
+| `tests/test_tenancy_and_bundles.py` | Verification test now asserts the sandboxed path leaves no workspace behind |
+
+### 13.5 Residual risk from B.2
+
+- **`/interact` still needs a persistent serve worker.** Until then a hosted tenant cannot use
+  interactive play (501), and a local studio still executes the verified module in-process.
+- **Sandbox escape surface.** `bwrap` is the boundary; kernel or bubblewrap vulnerabilities are out
+  of scope. The case directory is writable by design (the trainer writes models there).
+- **`bwrap` availability.** Without it there is no isolation; hosted deployments must treat
+  `isolation_available() == False` as a hard startup failure. That startup assertion is not wired
+  yet — a P1-C item.
+- **No seccomp profile.** The worker can still make syscalls the interpreter does not need.

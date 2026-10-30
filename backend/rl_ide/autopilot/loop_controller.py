@@ -651,6 +651,18 @@ class AutonomousLoopController:
                 "message": f"Plateau detected at {current_metric}%. Diagnosing failure episodes and rewriting reward function for Round {r+1}...",
             })
 
+            if os.environ.get("RL_IDE_SANDBOX") == "1":
+                # The worker has neither network nor provider keys, so the LLM tuner cannot run
+                # there; skipping is honest and keeps the round alive.
+                session.status = "training"
+                emit({
+                    "event": "auto_tune_skipped",
+                    "round": r,
+                    "metric": current_metric,
+                    "message": "LLM auto-tuning is disabled inside the sandbox (no network); reward function retained.",
+                })
+                continue
+
             tuning_res = self.auto_tuner.tune(
                 round_num=r,
                 episodes=burst_episodes,

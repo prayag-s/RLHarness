@@ -578,10 +578,12 @@ def get_conversation(conversation_id: str):
     if not conv:
         raise HTTPException(status_code=404, detail=f"Conversation '{conversation_id}' not found.")
 
-    # Re-instantiate SynthesizedGymEnv and reload saved SB3 model into global_store
+    # Re-instantiate SynthesizedGymEnv and reload saved SB3 model into global_store.
+    # Only the local studio may load generated code in-process; hosted tenants wait for the
+    # sandboxed serve worker (see SANDBOXED_INTERACT_AVAILABLE).
     ws_dir = global_store.base_dir / conversation_id
     env_file = ws_dir / "env_module.py"
-    if env_file.exists():
+    if env_file.exists() and (SANDBOXED_INTERACT_AVAILABLE or current_owner() == "local"):
         try:
             from rl_ide.synthesizer.env_builder import load_synthesized_env_class, instantiate_env
             env_cls = load_synthesized_env_class(env_file)
@@ -778,6 +780,80 @@ class ArenaLockRequest(BaseModel):
     locked: bool = True
 
 
+def run_training_task(
+    *,
+    conversation_id: str,
+    blueprint: AgentBlueprintSpec,
+    env_file: Path,
+    dataset: Any,
+    max_rounds: int,
+    additional_rounds: int | None,
+    episodes_per_burst: int,
+    on_event,
+) -> SessionState:
+    """Trains a session, preferring the sandbox and never silently ignoring its failure.
+
+    A missing isolation mechanism (no bwrap/unshare, e.g. macOS or a locked-down CI) falls back to
+    in-process execution with a loud event; an isolation *failure* does not, because falling back
+    would re-open the boundary the sandbox exists to close.
+    """
+    from rl_ide.autopilot.sandbox_runner import SandboxedTrainingError, run_training_in_sandbox
+    from rl_ide.security import SandboxUnavailable, isolation_available
+
+    records = dataset.df.to_dict(orient="records") if (dataset is not None and hasattr(dataset, "df")) else None
+
+    if isolation_available():
+        try:
+            summary = run_training_in_sandbox(
+                session_id=conversation_id,
+                blueprint=blueprint.model_dump(),
+                env_module=env_file,
+                records=records,
+                base_dir=global_store.base_dir,
+                max_rounds=max_rounds,
+                episodes_per_burst=episodes_per_burst,
+                additional_rounds=additional_rounds,
+                on_event=on_event,
+            )
+            summary.pop("scorecard", None)      # re-read from the copied workspace file
+            session = SessionState.model_validate(summary)
+            workspace = global_store.base_dir / conversation_id
+            env_path = workspace / "env_module.py"
+            arena_path = workspace / "arena.html"
+            if env_path.exists():
+                session.env_module_code = env_path.read_text(encoding="utf-8")
+            if arena_path.exists():
+                session.arena_html = arena_path.read_text(encoding="utf-8")
+            session.scorecard = load_session_scorecard(conversation_id)
+            global_store.set_session(session)
+            return session
+        except SandboxUnavailable as exc:
+            on_event({"event": "sandbox_unavailable", "conversation_id": conversation_id,
+                      "message": f"Isolation unavailable ({exc}); falling back to in-process training."})
+        except SandboxedTrainingError as exc:
+            on_event({"event": "sandbox_failed", "conversation_id": conversation_id,
+                      "message": f"Sandboxed training failed: {exc}"})
+            raise
+        except Exception as exc:  # noqa: BLE001 - surface, do not silently degrade
+            on_event({"event": "sandbox_failed", "conversation_id": conversation_id,
+                      "message": f"Sandboxed training error: {exc}"})
+            raise
+
+    on_event({"event": "sandbox_bypassed", "conversation_id": conversation_id,
+              "message": "Training runs in the API process (single-user mode, no isolation)."})
+    env_cls = load_synthesized_env_class(env_file)
+    return global_controller.run_loop(
+        session_id=conversation_id,
+        blueprint=blueprint,
+        env_cls=env_cls,
+        dataset=dataset,
+        on_event_callback=on_event,
+        max_rounds=max_rounds,
+        additional_rounds=additional_rounds,
+        episodes_per_burst=episodes_per_burst,
+    )
+
+
 @app.post("/api/v4/conversations/{conversation_id}/chat", response_model=StudioChatResponse)
 async def conversation_omni_chat(conversation_id: str, req: UnifiedConversationChatRequest):
     """Unified Codex-style omni-agent chat endpoint for continuous conversation at any stage."""
@@ -827,7 +903,6 @@ async def conversation_omni_chat(conversation_id: str, req: UnifiedConversationC
             ws_dir = global_store.base_dir / conversation_id
             env_file = ws_dir / "env_module.py"
             if env_file.exists():
-                env_cls = load_synthesized_env_class(env_file)
                 eps_per_burst = int(response.training_params.get("episodes_per_round") or bp.episodes_per_round or 200)
                 add_rounds = int(response.training_params.get("max_auto_tune_rounds") or bp.max_auto_tune_rounds or 5)
                 training_dataset = active_dataset or (
@@ -839,15 +914,15 @@ async def conversation_omni_chat(conversation_id: str, req: UnifiedConversationC
                 async def _run_training_background():
                     try:
                         trained_session = await asyncio.to_thread(
-                            global_controller.run_loop,
-                            session_id=conversation_id,
+                            run_training_task,
+                            conversation_id=conversation_id,
                             blueprint=bp,
-                            env_cls=env_cls,
+                            env_file=env_file,
                             dataset=training_dataset,
-                            on_event_callback=sync_broadcast,
                             max_rounds=add_rounds,
                             additional_rounds=add_rounds if prior_rounds else None,
                             episodes_per_burst=eps_per_burst,
+                            on_event=sync_broadcast,
                         )
                         c_store = get_conversation_store()
                         c_store.save_or_update(
@@ -946,6 +1021,12 @@ class InteractRequest(BaseModel):
         return base or self.payload
 
 
+# Interactive play still instantiates the generated environment in the API process (the sandboxed
+# serve worker is not implemented yet). Until it is, a hosted tenant must not be able to trigger it:
+# the local single-user studio keeps working, everything else is refused rather than silently exposed.
+SANDBOXED_INTERACT_AVAILABLE = False
+
+
 @app.post("/api/v4/sessions/{session_id}/interact")
 def session_interact(session_id: str, req: InteractRequest):
     """Executes live human play/inspection against the agent inside arena.html."""
@@ -953,6 +1034,15 @@ def session_interact(session_id: str, req: InteractRequest):
         raise HTTPException(
             status_code=409,
             detail="Training is currently mutating this session's policy; retry once the round completes.",
+        )
+    if not SANDBOXED_INTERACT_AVAILABLE and current_owner() != "local":
+        raise HTTPException(
+            status_code=501,
+            detail=(
+                "Interactive play is not available for hosted tenants yet: it requires running the "
+                "generated environment inside the sandbox worker, which is not implemented. "
+                "Scoring, export and the held-out scorecard are unaffected."
+            ),
         )
     env = global_store.get_env(session_id)
     model = global_store.get_model(session_id)

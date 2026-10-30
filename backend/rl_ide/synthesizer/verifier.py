@@ -378,18 +378,29 @@ class SandboxSmokeTester:
                 attempt_file = out_dir / f"env_module_try_{attempt}_{uuid.uuid4().hex[:6]}.py"
                 attempt_file.write_text(current_code, encoding="utf-8")
 
-                # 3. Dynamic Load
-                env_cls = load_synthesized_env_class(attempt_file)
-
-                # 4. Runtime Smoke Test
+                # 3+4. Dynamic load and runtime smoke test, inside the sandbox when possible so
+                # unverified model-generated code never executes in the API process.
                 records = dataset.df.to_dict(orient="records") if (dataset and hasattr(dataset, "df")) else None
-                res = self.run_smoke_test(
-                    env_cls,
-                    dataset_records=records,
-                    expected_state_keys=list(getattr(blueprint, "state_dict_schema", {}) or {}),
-                    expected_obs_dim=len(getattr(blueprint, "observation_features", []) or []) or None,
-                    expected_n_actions=len(getattr(blueprint, "action_labels", []) or []) or None,
+                expected_state_keys = list(getattr(blueprint, "state_dict_schema", {}) or {})
+                expected_obs_dim = len(getattr(blueprint, "observation_features", []) or []) or None
+                expected_n_actions = len(getattr(blueprint, "action_labels", []) or []) or None
+
+                res = self._smoke_in_sandbox(
+                    attempt_file,
+                    records=records,
+                    expected_state_keys=expected_state_keys,
+                    expected_obs_dim=expected_obs_dim,
+                    expected_n_actions=expected_n_actions,
                 )
+                if res is None:
+                    env_cls = load_synthesized_env_class(attempt_file)
+                    res = self.run_smoke_test(
+                        env_cls,
+                        dataset_records=records,
+                        expected_state_keys=expected_state_keys,
+                        expected_obs_dim=expected_obs_dim,
+                        expected_n_actions=expected_n_actions,
+                    )
 
                 # Canonicalize output file
                 canonical_file.write_text(current_code, encoding="utf-8")
@@ -422,6 +433,37 @@ class SandboxSmokeTester:
                 current_code = self._repair_code(current_code, str(exc), tb, blueprint, dataset)
 
         return False, current_code, repair_logs
+
+    def _smoke_in_sandbox(
+        self,
+        env_module: Path,
+        *,
+        records: list[dict[str, Any]] | None,
+        expected_state_keys: list[str],
+        expected_obs_dim: int | None,
+        expected_n_actions: int | None,
+    ) -> dict[str, Any] | None:
+        """Runs the smoke test in an isolated worker, or returns None when no isolation exists."""
+        try:
+            from rl_ide.autopilot.sandbox_runner import run_smoke_in_sandbox
+            from rl_ide.security import SandboxUnavailable
+        except Exception:
+            return None
+        try:
+            outcome = run_smoke_in_sandbox(
+                env_module,
+                records=records,
+                expected_state_keys=expected_state_keys,
+                expected_obs_dim=expected_obs_dim,
+                expected_n_actions=expected_n_actions,
+            )
+        except SandboxUnavailable:
+            return None
+        payload = outcome.get("smoke")
+        if not isinstance(payload, dict):
+            raise RuntimeError("Sandboxed smoke test returned no result")
+        self.last_warnings = list(outcome.get("warnings") or [])
+        return payload
 
     def _repair_code(
         self,

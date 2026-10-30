@@ -480,17 +480,29 @@ class PolicyExporter:
 
         real_obs_samples: list[list[float]] = []
         sample_env = None
+        records = load_records(Path(env_module_path).parent)
         try:
-            env_cls = load_synthesized_env_class(env_module_path)
-            sample_env = instantiate_env(env_cls, dataset_records=load_records(Path(env_module_path).parent))
-            for _ in range(5):
-                o, _ = sample_env.reset()
-                real_obs_samples.append([float(x) for x in o])
-                for _ in range(10):
-                    o, _, term, trunc, _ = sample_env.step(sample_env.action_space.sample())
+            # Sample in the sandbox first: exporting must not run generated code in the API process.
+            from rl_ide.autopilot.sandbox_runner import (
+                sample_observations_in_sandbox,
+            )
+            from rl_ide.security import SandboxUnavailable
+
+            try:
+                real_obs_samples = sample_observations_in_sandbox(
+                    env_module_path, records=records
+                )
+            except SandboxUnavailable:
+                env_cls = load_synthesized_env_class(env_module_path)
+                sample_env = instantiate_env(env_cls, dataset_records=records)
+                for _ in range(5):
+                    o, _ = sample_env.reset()
                     real_obs_samples.append([float(x) for x in o])
-                    if term or trunc:
-                        break
+                    for _ in range(10):
+                        o, _, term, trunc, _ = sample_env.step(sample_env.action_space.sample())
+                        real_obs_samples.append([float(x) for x in o])
+                        if term or trunc:
+                            break
         except Exception:
             real_obs_samples = []
 
@@ -511,13 +523,33 @@ class PolicyExporter:
         # 1b. Behavioural parity: the shipped artefact must behave like the trained policy,
         # not merely compute the same numbers on random observations.
         deployment: dict[str, Any] = {}
-        if sample_env is not None and model is not None:
+        if model is not None:
             try:
-                deployment = cls.verify_behavioural_parity(
-                    model=model, onnx_path=onnx_file, env=sample_env
-                )
+                from rl_ide.autopilot.sandbox_runner import behavioural_parity_in_sandbox
+                from rl_ide.security import SandboxUnavailable
+
+                parity_zip = bundle_dir / "_parity_model.zip"
+                try:
+                    model.save(str(parity_zip))
+                    deployment = behavioural_parity_in_sandbox(
+                        env_module_path,
+                        model_path=parity_zip,
+                        onnx_path=onnx_file,
+                        records=records,
+                    )
+                except SandboxUnavailable:
+                    env_cls = load_synthesized_env_class(env_module_path)
+                    sample_env = instantiate_env(env_cls, dataset_records=records)
+                    deployment = cls.verify_behavioural_parity(
+                        model=model, onnx_path=onnx_file, env=sample_env
+                    )
             except Exception as behaviour_err:
                 deployment = {"error": f"behavioural parity unavailable: {behaviour_err}"}
+            finally:
+                try:
+                    (bundle_dir / "_parity_model.zip").unlink(missing_ok=True)
+                except OSError:
+                    pass
 
         scorecard_payload: dict[str, Any] = dict(scorecard) if scorecard else {
             "version": 1,

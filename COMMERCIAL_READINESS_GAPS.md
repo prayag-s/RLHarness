@@ -13,7 +13,9 @@ and the test history (covered by [progress.md](./progress.md), §10).
 > **Remediation status (2026-10-30):** Phase **P0-A** is implemented and committed — **G1, G14 and
 > G16 are CLOSED** (see each entry, and `progress.md` §11). Phase **P0-B.1** is implemented and
 > committed — **G3, G4 (scoping) and G9 are CLOSED**, with real authentication still outstanding
-> under G4 (`progress.md` §12). **G2 (sandboxed execution)** and phase P1-C (G5–G8) remain open.
+> under G4 (`progress.md` §12). Phase **P0-B.2** is implemented and committed — **G2 is CLOSED for
+> training, verification and export**; interactive play still needs a persistent serve worker and is
+> refused (501) for hosted tenants (`progress.md` §13). Phase P1-C (G5–G8) remains open.
 
 ---
 
@@ -114,6 +116,16 @@ no confidence interval, and no per-segment breakdown.
   with the API's UID and filesystem, so it read the tenant database
   (`read_ok`, uid 1000) exactly like the parent. The same read inside `bwrap` failed with
   `FileNotFoundError`, and outbound sockets failed with `Network is unreachable`.
+- **Status: CLOSED (Phase P0-B.2) for training, verification and export; `/interact` pending.**
+  Generated modules are imported and exercised only inside a `bwrap` worker with a private case
+  directory, no network, no provider keys and a wall-clock timeout. Proven by tests that make the
+  module hostile at import time: reading `runs/conversations.db` fails with `FileNotFoundError`,
+  opening a socket fails with "Network is unreachable", and no `*KEY*`/`*TOKEN*` variable reaches the
+  worker. `unshare -rn` is deliberately **not** accepted as a substitute (it leaves the filesystem
+  readable). Training now emits `auto_tune_skipped` inside the sandbox because the LLM tuner has no
+  network there. **Residual:** interactive play needs a persistent serve worker; until it exists,
+  `/interact` and the env instantiation in `GET /conversations/{id}` are refused (501) for any owner
+  other than `local`.
 - **Fix:** keep the pipe-based worker design (hard wall-clock timeout, crash isolation, no shared
   memory with the API), and launch **that worker under `bwrap`**:
   `bwrap --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /lib64 /lib64 \
@@ -366,7 +378,7 @@ processes, that evaluation never consults `get_critical_actions()`, and that the
 scored under the same masking regime it will run under (today: none, with the illegal-action rate
 reported separately).
 
-**Phase P0-B — "safe to host" (≈3 days) — B.1 DONE (2026-10-30), B.2 in progress**
+**Phase P0-B — "safe to host" (≈3 days) — DONE (B.1 2026-10-30, B.2 2026-10-30)**
 G2 + G3 + G4 + G9.
 Acceptance: env modules execute in a `bwrap` (or `unshare -rn`) worker with a wall-clock timeout, no
 network, a read-only root and only the case directory visible; the multi-tenant path fails closed when
