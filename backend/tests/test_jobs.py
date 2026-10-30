@@ -222,3 +222,103 @@ def test_training_queue_runs_the_job_and_records_its_result(job_store, monkeypat
     assert finished["result"]["best_metric"] == 88.5
     assert calls and calls[0]["max_rounds"] == 2 and calls[0]["episodes_per_burst"] == 50
     assert get_job_store() is job_store
+
+
+# -----------------------------------------------------------------------------
+# Resuming an interrupted training run (G6 residual)
+# -----------------------------------------------------------------------------
+def test_resume_route_continues_from_saved_rounds(tmp_path, monkeypatch):
+    """An interrupted run must continue from its saved rounds, not start over."""
+    from rl_ide.api.server import app
+    from rl_ide.state.conversation_store import ConversationStore
+
+    store = ConversationStore(db_path=tmp_path / "c.db", workspaces_dir=tmp_path / "ws")
+    conv_id = "conv_resume"
+    store.create_conversation(conversation_id=conv_id, owner_id="local")
+    bp = {
+        "task_title": "Router",
+        "domain_summary": "route",
+        "data_source_type": "pure_simulation",
+        "observation_features": ["a", "b"],
+        "action_labels": ["x", "y"],
+        "arena_visual_description": "board",
+        "interactive_mode_description": "click",
+        "success_metric_name": "accuracy",
+        "target_metric_threshold": 80.0,
+        "max_auto_tune_rounds": 5,
+        "initial_reward_components": [],
+    }
+    store.save_or_update(
+        conv_id,
+        blueprint_spec=bp,
+        rounds_history=[{"round_num": 1, "metric": 60.0}, {"round_num": 2, "metric": 70.0}],
+        latest_model_zip_path=str(tmp_path / "model.zip"),
+    )
+    (tmp_path / "ws" / conv_id).mkdir(parents=True, exist_ok=True)
+    (tmp_path / "ws" / conv_id / "env_module.py").write_text("# env\n", encoding="utf-8")
+
+    import rl_ide.api.server as server
+
+    job_store = JobStore(db_path=tmp_path / "jobs.db")
+    monkeypatch.setattr(server, "get_conversation_store", lambda: store)
+    monkeypatch.setattr(server, "jobs", job_store)
+    monkeypatch.setattr(server, "global_store", type("S", (), {"base_dir": tmp_path / "ws"})())
+    monkeypatch.setattr(server, "_ensure_training_consumer", lambda: None)
+    monkeypatch.setattr(server, "_broadcast_threadsafe", lambda *a, **k: None)
+
+    client = TestClient(app)
+    resp = client.post(f"/api/v4/conversations/{conv_id}/training/resume", json={})
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["completed_rounds"] == 2
+    assert body["additional_rounds"] == 3, "only the rounds that are still missing"
+    assert body["warm_start"] is True
+
+    queued = job_store.get(body["job_id"])
+    assert queued["kind"] == "training"
+    assert queued["payload"]["additional_rounds"] == 3
+    assert queued["payload"]["resume_of_rounds"] == 2
+
+
+def test_resume_is_refused_when_nothing_can_be_resumed(tmp_path, monkeypatch):
+    from rl_ide.api.server import app
+    from rl_ide.state.conversation_store import ConversationStore
+
+    store = ConversationStore(db_path=tmp_path / "c2.db", workspaces_dir=tmp_path / "ws2")
+    import rl_ide.api.server as server
+
+    monkeypatch.setattr(server, "get_conversation_store", lambda: store)
+    monkeypatch.setattr(server, "global_store", type("S", (), {"base_dir": tmp_path / "ws2"})())
+    client = TestClient(app)
+
+    assert client.post("/api/v4/conversations/nope/training/resume", json={}).status_code == 404
+
+    store.create_conversation(conversation_id="conv_untrained", owner_id="local")
+    resp = client.post("/api/v4/conversations/conv_untrained/training/resume", json={})
+    assert resp.status_code == 409
+    assert "blueprint" in resp.json()["detail"]
+
+
+def test_a_failed_training_job_tells_the_client_how_to_resume(tmp_path, monkeypatch):
+    import rl_ide.api.server as server
+    from rl_ide.state.conversation_store import ConversationStore
+
+    store = ConversationStore(db_path=tmp_path / "c3.db", workspaces_dir=tmp_path / "ws3")
+    store.create_conversation(conversation_id="conv_hint", owner_id="local")
+    store.save_or_update("conv_hint", rounds_history=[{"round_num": 1, "metric": 55.0}])
+    monkeypatch.setattr(server, "get_conversation_store", lambda: store)
+
+    hint = server._resume_hint(
+        {"status": "failed", "kind": "training", "conversation_id": "conv_hint"}
+    )
+    assert hint and "training/resume" in hint and "1 round" in hint
+
+    none_saved = server._resume_hint(
+        {"status": "failed", "kind": "training", "conversation_id": "conv_missing"}
+    )
+    assert none_saved is None, "no conversation means no advice to give"
+
+    chat = server._resume_hint({"status": "failed", "kind": "chat", "conversation_id": "conv_hint"})
+    assert chat and "Re-send" in chat
+    assert server._resume_hint({"status": "succeeded", "kind": "chat"}) is None

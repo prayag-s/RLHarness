@@ -55,6 +55,10 @@ export const Header: React.FC<HeaderProps> = ({
         return { name: 'Claude 3.7 Sonnet', color: 'bg-amber-950/80 text-amber-300 border-amber-700/60' }
       case 'openai':
         return { name: 'GPT-4o', color: 'bg-emerald-950/80 text-emerald-300 border-emerald-700/60' }
+      case 'azure_openai':
+        return { name: 'Azure OpenAI', color: 'bg-sky-950/80 text-sky-300 border-sky-700/60' }
+      case 'openai_compatible':
+        return { name: 'Self-hosted LLM', color: 'bg-teal-950/80 text-teal-300 border-teal-700/60' }
       case 'ollama':
         return { name: 'Ollama (Local)', color: 'bg-purple-950/80 text-purple-300 border-purple-700/60' }
       case 'fallback':

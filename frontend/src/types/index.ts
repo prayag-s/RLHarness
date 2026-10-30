@@ -303,7 +303,14 @@ export interface BundleMetadata {
 }
 
 export interface LLMSettings {
-  provider: 'deepseek' | 'openai' | 'anthropic' | 'ollama' | 'fallback'
+  provider:
+    | 'deepseek'
+    | 'openai'
+    | 'azure_openai'
+    | 'openai_compatible'
+    | 'anthropic'
+    | 'ollama'
+    | 'fallback'
   apiKey?: string
   baseUrl?: string
   modelName?: string

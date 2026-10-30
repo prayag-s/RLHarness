@@ -259,6 +259,22 @@ export const App: React.FC = () => {
     refreshUsage(activeConversationId)
   }, [activeConversationId, refreshUsage])
 
+  // A hosted deployment refuses unauthenticated calls; ask for the tenant token instead of
+  // rendering an empty, broken studio.
+  useEffect(() => {
+    const onAuthRequired = () => {
+      setIsSettingsOpen(true)
+      addTimelineItem(
+        'Authentication Required 🔐',
+        'This deployment needs a tenant token. Add it under Settings → Tenant token.',
+        'info',
+        'warning',
+      )
+    }
+    window.addEventListener('rl:auth-required', onAuthRequired)
+    return () => window.removeEventListener('rl:auth-required', onAuthRequired)
+  }, [])
+
   /** Applies a drift snapshot from either the REST payload or a `drift_warning`/`drift` event. */
   const applyDrift = React.useCallback((snapshot?: DriftSnapshot | null, status?: string) => {
     const next = status || snapshot?.status

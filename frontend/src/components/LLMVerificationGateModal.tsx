@@ -31,7 +31,9 @@ export const LLMVerificationGateModal: React.FC<LLMVerificationGateModalProps> =
   canDismiss = false,
   onClose,
 }) => {
-  const [provider, setProvider] = useState<'deepseek' | 'openai' | 'anthropic' | 'ollama'>(
+  const [provider, setProvider] = useState<
+    'deepseek' | 'openai' | 'azure_openai' | 'openai_compatible' | 'anthropic' | 'ollama'
+  >(
     currentSettings.provider !== 'fallback' ? (currentSettings.provider as any) : 'deepseek',
   )
   const [apiKey, setApiKey] = useState<string>(currentSettings.apiKey || '')
@@ -74,14 +76,33 @@ export const LLMVerificationGateModal: React.FC<LLMVerificationGateModalProps> =
       keyPlaceholder: 'sk-ant-...',
     },
     {
+      id: 'azure_openai' as const,
+      name: 'Azure OpenAI',
+      defaultBaseUrl: 'https://<resource>.openai.azure.com/openai/deployments/<deployment>',
+      defaultModel: '<deployment-name>',
+      badge: 'Enterprise',
+      keyPlaceholder: 'Azure api-key',
+    },
+    {
+      id: 'openai_compatible' as const,
+      name: 'Self-hosted (vLLM / TGI)',
+      defaultBaseUrl: 'http://vllm.internal:8000/v1',
+      defaultModel: 'your-served-model',
+      badge: 'No egress',
+      keyPlaceholder: 'Optional bearer token',
+    },
+    {
       id: 'ollama' as const,
-      name: 'Ollama (Local / vLLM)',
+      name: 'Ollama (Local)',
       defaultBaseUrl: 'http://localhost:11434/v1',
       defaultModel: 'llama3.1',
       badge: 'Local Endpoint',
       keyPlaceholder: 'Optional for local Ollama',
     },
   ]
+
+  // Azure and self-hosted endpoints are frequently inside the customer's network without auth.
+  const keyOptional = provider === 'ollama' || provider === 'openai_compatible'
 
   const handleProviderSelect = (p: (typeof providers)[0]) => {
     setProvider(p.id)
@@ -94,7 +115,7 @@ export const LLMVerificationGateModal: React.FC<LLMVerificationGateModalProps> =
   const handleVerifyAndUnlock = async (e: React.FormEvent) => {
     e.preventDefault()
 
-    if (provider !== 'ollama' && !apiKey.trim()) {
+    if (!keyOptional && !apiKey.trim()) {
       setErrorMsg(`API Key is required for ${provider.toUpperCase()}.`)
       return
     }
@@ -180,7 +201,7 @@ export const LLMVerificationGateModal: React.FC<LLMVerificationGateModalProps> =
               <Sparkles className="h-3.5 w-3.5 text-indigo-400" />
               <span>Select LLM Provider:</span>
             </label>
-            <div className="grid grid-cols-2 gap-2.5">
+            <div className="grid grid-cols-3 gap-2">
               {providers.map((p) => {
                 const isSelected = provider === p.id
                 return (

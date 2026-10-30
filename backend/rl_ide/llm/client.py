@@ -17,7 +17,9 @@ from rl_ide.llm.metering import BudgetExceeded, capture_response, enforce_budget
 
 class LLMConfig(BaseModel):
     """Configuration for BYOK LLM connection."""
-    provider: str = Field(default="fallback")  # "deepseek" | "openai" | "anthropic" | "ollama" | "fallback" | "mock"
+    # "deepseek" | "openai" | "azure_openai" | "openai_compatible" | "anthropic" | "ollama"
+    # | "fallback" | "mock"
+    provider: str = Field(default="fallback")
     api_key: str | None = None
     base_url: str | None = None
     model_name: str | None = None
@@ -35,6 +37,20 @@ class LLMConfig(BaseModel):
                 self.model_name = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
             if not self.api_key:
                 self.api_key = os.environ.get("DEEPSEEK_API_KEY")
+        elif provider_lower in ("azure", "azure_openai", "azure-openai"):
+            if not self.base_url:
+                self.base_url = os.environ.get("AZURE_OPENAI_ENDPOINT")
+            if not self.model_name:
+                self.model_name = os.environ.get("AZURE_OPENAI_DEPLOYMENT")
+            if not self.api_key:
+                self.api_key = os.environ.get("AZURE_OPENAI_API_KEY")
+        elif provider_lower in ("openai_compatible", "openai-compatible", "vllm", "self_hosted", "self-hosted"):
+            if not self.base_url:
+                self.base_url = os.environ.get("OPENAI_COMPATIBLE_BASE_URL")
+            if not self.model_name:
+                self.model_name = os.environ.get("OPENAI_COMPATIBLE_MODEL")
+            if not self.api_key:
+                self.api_key = os.environ.get("OPENAI_COMPATIBLE_API_KEY")
         elif provider_lower == "openai":
             if not self.base_url:
                 self.base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
@@ -197,6 +213,96 @@ class OpenAILLMClient(BaseLLMClient):
             resp.raise_for_status()
             data = resp.json()
             capture_response("openai", self.config.model_name or "gpt-4o", data, started)
+            return data["choices"][0]["message"]["content"]
+
+
+class AzureOpenAILLMClient(BaseLLMClient):
+    """Azure OpenAI.
+
+    Azure differs from OpenAI in three ways that break a naive client: the deployment name replaces
+    the model in the path, the API version is a query parameter, and auth is an `api-key` header
+    rather than a bearer token. This is the provider most enterprise procurement asks for.
+    """
+
+    def generate(self, prompt: str, system_prompt: str | None = None, timeout: float | None = None) -> str:
+        api_key = self.config.api_key or os.environ.get("AZURE_OPENAI_API_KEY", "")
+        if not api_key:
+            raise ValueError("AZURE_OPENAI_API_KEY is not set or provided in LLMConfig.")
+        endpoint = (self.config.base_url or os.environ.get("AZURE_OPENAI_ENDPOINT", "")).rstrip("/")
+        if not endpoint:
+            raise ValueError(
+                "Azure OpenAI needs a resource endpoint, e.g. "
+                "https://<resource>.openai.azure.com/openai/deployments/<deployment>"
+            )
+        deployment = self.config.model_name or os.environ.get("AZURE_OPENAI_DEPLOYMENT", "")
+        if not deployment:
+            raise ValueError("Azure OpenAI needs a deployment name (model_name / AZURE_OPENAI_DEPLOYMENT).")
+        api_version = os.environ.get("AZURE_OPENAI_API_VERSION", "2024-10-21")
+
+        if "/deployments/" in endpoint:
+            url = f"{endpoint}/chat/completions?api-version={api_version}"
+        else:
+            url = f"{endpoint}/openai/deployments/{deployment}/chat/completions?api-version={api_version}"
+
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+        payload = {
+            "messages": messages,
+            "temperature": self.config.temperature,
+            "max_tokens": self.config.max_tokens,
+        }
+
+        req_timeout = timeout if timeout is not None else self.config.timeout
+        enforce_budget()
+        started = time.perf_counter()
+        with httpx.Client(timeout=req_timeout) as client:
+            resp = client.post(url, headers={"api-key": api_key, "Content-Type": "application/json"}, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+            capture_response("azure_openai", deployment, data, started)
+            return data["choices"][0]["message"]["content"]
+
+
+class OpenAICompatibleLLMClient(BaseLLMClient):
+    """Any self-hosted server that speaks the OpenAI chat-completions schema.
+
+    vLLM, TGI, LM Studio, llama.cpp and most gateways qualify. A key is optional because many of
+    these run inside the customer's network without auth — but if `api_key` is set it is sent.
+    """
+
+    def generate(self, prompt: str, system_prompt: str | None = None, timeout: float | None = None) -> str:
+        base_url = (self.config.base_url or "").rstrip("/")
+        if not base_url:
+            raise ValueError(
+                "A self-hosted OpenAI-compatible provider needs base_url, "
+                "e.g. http://vllm.internal:8000/v1"
+            )
+        api_key = self.config.api_key or os.environ.get("OPENAI_COMPATIBLE_API_KEY", "")
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+        payload = {
+            "model": self.config.model_name or "default",
+            "messages": messages,
+            "temperature": self.config.temperature,
+            "max_tokens": self.config.max_tokens,
+        }
+
+        req_timeout = timeout if timeout is not None else self.config.timeout
+        enforce_budget()
+        started = time.perf_counter()
+        with httpx.Client(timeout=req_timeout) as client:
+            resp = client.post(f"{base_url}/chat/completions", headers=headers, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+            capture_response("openai_compatible", self.config.model_name or "default", data, started)
             return data["choices"][0]["message"]["content"]
 
 
@@ -576,12 +682,19 @@ def create_llm_client(config: LLMConfig | None = None) -> BaseLLMClient:
         return OpenAILLMClient(config)
     elif p == "anthropic":
         return AnthropicLLMClient(config)
+    elif p in ("azure", "azure_openai", "azure-openai"):
+        return AzureOpenAILLMClient(config)
+    elif p in ("openai_compatible", "openai-compatible", "vllm", "self_hosted", "self-hosted"):
+        return OpenAICompatibleLLMClient(config)
     elif p == "ollama":
         return OllamaLLMClient(config)
     elif p in ("fallback", "mock"):
         return FallbackCodeSynthesizer(config)
     else:
-        raise ValueError(f"Unsupported LLM provider '{config.provider}'. Supported: deepseek, openai, anthropic, ollama, fallback.")
+        raise ValueError(
+            f"Unsupported LLM provider '{config.provider}'. Supported: deepseek, openai, azure_openai, "
+            "openai_compatible, anthropic, ollama, fallback."
+        )
 
 
 def validate_llm_connection(config: LLMConfig) -> dict[str, Any]:
@@ -605,9 +718,15 @@ def validate_llm_connection(config: LLMConfig) -> dict[str, Any]:
                 "error": "Deterministic fallback is not allowed. A verified API key for DeepSeek, OpenAI, Anthropic, or Ollama is mandatory.",
             }
 
-    # Check for missing API key
-    if p in ("deepseek", "openai", "anthropic") and not config.api_key:
-        env_var = f"{p.upper()}_API_KEY"
+    # Check for missing configuration before spending a network round trip on it.
+    required_env = {
+        "deepseek": "DEEPSEEK_API_KEY",
+        "openai": "OPENAI_API_KEY",
+        "anthropic": "ANTHROPIC_API_KEY",
+        "azure_openai": "AZURE_OPENAI_API_KEY",
+    }
+    if p in required_env and not config.api_key:
+        env_var = required_env[p]
         if not os.environ.get(env_var):
             return {
                 "success": False,
@@ -615,6 +734,20 @@ def validate_llm_connection(config: LLMConfig) -> dict[str, Any]:
                 "provider": config.provider,
                 "error": f"Missing API key for provider '{config.provider}'. Please set {env_var} or supply in config.",
             }
+    if p == "openai_compatible" and not config.base_url:
+        return {
+            "success": False,
+            "valid": False,
+            "provider": config.provider,
+            "error": "A self-hosted OpenAI-compatible provider needs a base URL (OPENAI_COMPATIBLE_BASE_URL).",
+        }
+    if p == "azure_openai" and not config.base_url:
+        return {
+            "success": False,
+            "valid": False,
+            "provider": config.provider,
+            "error": "Azure OpenAI needs a resource endpoint (AZURE_OPENAI_ENDPOINT).",
+        }
 
     start = time.perf_counter()
     try:

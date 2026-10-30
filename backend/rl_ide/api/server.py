@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import asyncio
 import atexit
+import hmac
 from contextvars import ContextVar
 import threading
 import time
@@ -66,6 +67,7 @@ from rl_ide.llm.client import (
 )
 from rl_ide.synthesizer.env_builder import JITEnvironmentSynthesizer, load_synthesized_env_class, instantiate_env
 from rl_ide.security import enforce_isolation_requirement, isolation_available
+from rl_ide.state.auth_store import get_token_store
 from rl_ide.state.dataset_store import get_dataset_store
 from rl_ide.state.job_store import (
     CANCELLED,
@@ -85,7 +87,18 @@ LLM_KEY_REQUIRED = "llm-key-required"
 
 logger = logging.getLogger(__name__)
 
+from contextlib import asynccontextmanager
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    """Start background work that must outlive a request but not a process."""
+    _start_retention()
+    yield
+
+
 app = FastAPI(
+    lifespan=_lifespan,
     title="RL-Native Agent Studio v4.0 API",
     description="Autonomous JIT Agent Synthesis, Conversational Architect & Closed-Loop Training",
     version="4.0.0",
@@ -192,8 +205,32 @@ def bind_usage_context(conversation_id: str | None = None) -> None:
     metering.current_owner_id.set(current_owner())
 
 
-# Optional shared-secret gate (enabled only when RL_IDE_API_TOKEN is set).
-_API_TOKEN = os.environ.get("RL_IDE_API_TOKEN", "").strip()
+# Deployment (not tenant) secret: may mint and revoke tenant tokens. Never scopes data itself.
+_ADMIN_TOKEN = (os.environ.get("RL_IDE_ADMIN_TOKEN") or os.environ.get("RL_IDE_API_TOKEN") or "").strip()
+_ADMIN_OWNER = "admin"
+
+
+def _auth_required() -> bool:
+    """True when this deployment must authenticate callers (G4).
+
+    An explicit `RL_IDE_REQUIRE_AUTH=1` is honoured immediately; otherwise the presence of issued
+    tenant tokens is itself a signal that the deployment is multi-tenant, so silently accepting an
+    owner header would be a downgrade. Callers are re-read on every request because a token may be
+    issued while the server runs.
+    """
+    if _AUTH_REQUIRED_ENV:
+        return True
+    # A test run must be hermetic: tokens issued by a developer's live instance must not make the
+    # suite demand credentials.
+    if is_test_mode():
+        return False
+    try:
+        return get_token_store().count() > 0
+    except Exception:
+        return False
+
+
+_AUTH_REQUIRED_ENV = (os.environ.get("RL_IDE_REQUIRE_AUTH", "") or "").strip().lower() in ("1", "true", "yes")
 
 # Strong references to background tasks so they are not garbage-collected mid-flight.
 _background_tasks: set[asyncio.Task] = set()
@@ -205,15 +242,67 @@ def _spawn_background(coro) -> None:
     task.add_done_callback(_background_tasks.discard)
 
 
+def _bearer_token(request) -> str:
+    header = request.headers.get("authorization") or ""
+    if header.lower().startswith("bearer "):
+        return header[7:].strip()
+    # Retained for existing scripts; a bearer token is the documented form.
+    return (request.headers.get("x-api-token") or "").strip()
+
+
+def _is_admin(token: str) -> bool:
+    return bool(_ADMIN_TOKEN) and hmac.compare_digest(token.encode(), _ADMIN_TOKEN.encode())
+
+
 @app.middleware("http")
-async def _optional_api_token(request, call_next):
-    if _API_TOKEN and request.url.path.startswith("/api/"):
-        supplied = request.headers.get("x-api-token", "")
-        if supplied != _API_TOKEN:
-            from fastapi.responses import JSONResponse
-            return JSONResponse({"detail": "Invalid or missing API token."}, status_code=401)
-    _owner_ctx.set((request.headers.get("x-owner-id") or "local").strip() or "local")
-    metering.current_owner_id.set(current_owner())
+async def _authenticate(request, call_next):
+    """Resolves the tenant for every API request.
+
+    Two modes, decided once at startup:
+
+    * **Hosted** (`RL_IDE_REQUIRE_AUTH=1`, or any tenant token exists): a bearer token is mandatory
+      and it alone decides the owner. `x-owner-id` is ignored, because a caller-supplied tenant label
+      is not a boundary.
+    * **Local single-user**: no token store is in use, so the studio stays usable exactly as before.
+
+    A deployment secret (`RL_IDE_ADMIN_TOKEN`) may create and revoke tokens; it is never itself a
+    tenant.
+    """
+    from fastapi.responses import JSONResponse
+
+    path = request.url.path
+    if not path.startswith("/api/"):
+        _owner_ctx.set("local")
+        return await call_next(request)
+
+    supplied = _bearer_token(request)
+    owner = None
+    if supplied:
+        if _is_admin(supplied):
+            owner = _ADMIN_OWNER
+        elif _auth_required():
+            owner = get_token_store().verify(supplied)
+            if owner is None:
+                return JSONResponse(
+                    {"detail": "Invalid, revoked or unknown API token."},
+                    status_code=401,
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+        else:
+            # A token was offered in local mode: honour it if it is real, ignore it otherwise.
+            owner = get_token_store().verify(supplied)
+
+    if owner is None:
+        if _auth_required():
+            return JSONResponse(
+                {"detail": "Authentication required: send `Authorization: Bearer <token>`."},
+                status_code=401,
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        owner = (request.headers.get("x-owner-id") or "local").strip() or "local"
+
+    _owner_ctx.set(owner)
+    metering.current_owner_id.set(owner)
     return await call_next(request)
 
 
@@ -994,9 +1083,36 @@ def job_public(job: dict[str, Any]) -> dict[str, Any]:
         "detail": job.get("detail"),
         "error": job.get("error"),
         "retryable": job.get("retryable", False),
+        "resume_hint": _resume_hint(job),
         "created_at": job.get("created_at"),
         "updated_at": job.get("updated_at"),
     }
+
+
+def _resume_hint(job: dict[str, Any]) -> str | None:
+    """Tells the client how to recover, from durable state rather than from memory.
+
+    A failed chat turn is simply re-sent. A failed *training* job can usually continue: the completed
+    rounds and the saved policy survived, so the remaining rounds can be queued instead of redoing
+    the work.
+    """
+    if job.get("status") != FAILED:
+        return None
+    if job.get("kind") != "training":
+        return "Re-send the message; nothing was charged for the failed step."
+    conv_id = job.get("conversation_id")
+    if not conv_id:
+        return None
+    conv = get_conversation_store().get_conversation(conv_id)
+    if not conv:
+        return None
+    done = len(conv.get("rounds_history") or [])
+    if done == 0:
+        return "No round completed; start training again from the arena."
+    return (
+        f"{done} round(s) were saved. Resume with "
+        f"POST /api/v4/conversations/{conv_id}/training/resume to continue from the saved policy."
+    )
 
 
 def _run_chat_job(job: dict[str, Any]) -> None:
@@ -1117,6 +1233,72 @@ def _enqueue_training_if_requested(
     return job
 
 
+class ResumeTrainingRequest(BaseModel):
+    additional_rounds: int | None = None
+    episodes_per_burst: int | None = None
+
+
+@app.post("/api/v4/conversations/{conversation_id}/training/resume")
+def resume_training(conversation_id: str, req: ResumeTrainingRequest = ResumeTrainingRequest()):
+    """Continues an interrupted training run instead of restarting it (G6 residual).
+
+    A restart used to lose whatever a training round had produced. The completed rounds and the
+    saved policy are already durable, and the loop supports warm-starting from a saved model, so a
+    resume only has to enqueue the *remaining* rounds. Which rounds remain comes from the
+    conversation, not from the client's memory of what it asked for.
+    """
+    conv_store = get_conversation_store()
+    conv = conv_store.get_conversation(conversation_id, owner_id=current_owner())
+    if not conv:
+        raise HTTPException(status_code=404, detail=f"Conversation '{conversation_id}' not found.")
+    if not conv.get("blueprint_spec"):
+        raise HTTPException(status_code=409, detail="This conversation has no trained blueprint yet.")
+    if not (global_store.base_dir / conversation_id / "env_module.py").exists():
+        raise HTTPException(status_code=409, detail="The generated environment is missing; retrain from scratch.")
+
+    active = jobs.active_job(conversation_id, kind="training")
+    if active:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Training job '{active['job_id']}' is already {active['status']}.",
+        )
+
+    blueprint = AgentBlueprintSpec.model_validate(conv["blueprint_spec"])
+    done = len(conv.get("rounds_history") or [])
+    target = int(blueprint.max_auto_tune_rounds or 5)
+    remaining = req.additional_rounds or max(1, target - done)
+
+    payload = {
+        "dataset_id": conv.get("dataset_id"),
+        "max_rounds": target,
+        "additional_rounds": remaining,
+        "episodes_per_burst": int(req.episodes_per_burst or blueprint.episodes_per_round or 200),
+        "resume_of_rounds": done,
+    }
+    job = jobs.create(
+        kind="training", conversation_id=conversation_id, owner_id=current_owner(), payload=payload
+    )
+    _ensure_training_consumer()
+    _broadcast_threadsafe(
+        conversation_id,
+        {
+            "event": "job_queued",
+            "job_id": job["job_id"],
+            "kind": "training",
+            "stage": "queued",
+            "resume_of_rounds": done,
+        },
+    )
+    return {
+        "job_id": job["job_id"],
+        "status": job["status"],
+        "stage": job["stage"],
+        "completed_rounds": done,
+        "additional_rounds": remaining,
+        "warm_start": bool(conv.get("latest_model_zip_path")),
+    }
+
+
 def _run_training_job(job: dict[str, Any]) -> None:
     """Trains one conversation from its queued job record."""
     job_id = job["job_id"]
@@ -1193,6 +1375,93 @@ def _drain_training_jobs() -> None:
             continue
         idle_polls = 0
         _run_training_job(job)
+
+
+# ---------------------------------------------------------------------------
+# Retention (G9): data nobody has touched is erased on a schedule, not on request.
+# ---------------------------------------------------------------------------
+_retention_thread: threading.Thread | None = None
+_retention_lock = threading.Lock()
+
+
+def _retention_sweeper() -> Any:
+    from rl_ide.export.registry import RunBundleRegistry
+    from rl_ide.state.retention import RetentionPolicy, RetentionSweeper
+
+    return RetentionSweeper(
+        RetentionPolicy.from_env(),
+        conversation_store_factory=get_conversation_store,
+        dataset_store_factory=lambda: dataset_store,
+        registry_factory=lambda: _global_registry(),
+    )
+
+
+def _global_registry():
+    return global_registry
+
+
+def _retention_loop() -> None:
+    from rl_ide.state.retention import RetentionPolicy
+
+    while True:
+        policy = RetentionPolicy.from_env()
+        interval = max(60, int(policy.sweep_interval_seconds))
+        try:
+            if policy.enabled:
+                report = _retention_sweeper().sweep()
+                if report.total or report.errors:
+                    logger.info("retention sweep: %s", report.as_dict())
+        except Exception as exc:  # a sweep must never kill the thread
+            logger.warning("retention sweep failed: %s", exc)
+        time.sleep(interval)
+
+
+def _ensure_retention_worker() -> None:
+    """Starts the scheduled sweep once, and only when a policy is configured."""
+    from rl_ide.state.retention import RetentionPolicy
+
+    if is_test_mode() or not RetentionPolicy.from_env().enabled:
+        return
+    global _retention_thread
+    with _retention_lock:
+        if _retention_thread is not None and _retention_thread.is_alive():
+            return
+        _retention_thread = threading.Thread(
+            target=_retention_loop, name="rl-retention", daemon=True
+        )
+        _retention_thread.start()
+
+
+def _start_retention() -> None:
+    """Called from the lifespan handler below, once the app is starting."""
+    _ensure_retention_worker()
+
+
+@app.get("/api/v4/admin/retention")
+def get_retention_policy():
+    """The active retention policy, and what a sweep would remove right now."""
+    from rl_ide.state.retention import RetentionPolicy
+
+    policy = RetentionPolicy.from_env()
+    preview = _retention_sweeper().sweep(dry_run=True) if policy.enabled else None
+    return {
+        "policy": policy.describe(),
+        "would_delete": preview.as_dict() if preview else None,
+    }
+
+
+@app.post("/api/v4/admin/retention/sweep")
+def run_retention_sweep(dry_run: bool = Query(default=True)):
+    """Runs the policy now. Defaults to a dry run so an armed policy can be inspected first."""
+    from rl_ide.state.retention import RetentionPolicy
+
+    policy = RetentionPolicy.from_env()
+    if not policy.enabled:
+        raise HTTPException(
+            status_code=409,
+            detail="No retention policy configured (set RL_IDE_RETENTION_DAYS or the per-artefact vars).",
+        )
+    return _retention_sweeper().sweep(dry_run=dry_run).as_dict()
 
 
 def _ensure_training_consumer() -> None:
@@ -1937,6 +2206,53 @@ def validate_settings(config: LLMConfig):
     return res
 
 
+class TokenIssueRequest(BaseModel):
+    owner_id: str
+    label: str = ""
+
+
+def _require_admin(request: Request) -> None:
+    """Token management is a deployment action, not a tenant action."""
+    token = _bearer_token(request)
+    if not _is_admin(token):
+        raise HTTPException(
+            status_code=403,
+            detail="Token administration requires the deployment admin token (RL_IDE_ADMIN_TOKEN).",
+        )
+
+
+@app.post("/api/v4/admin/tokens")
+def issue_token(req: TokenIssueRequest, request: Request):
+    """Mints a tenant token. The plaintext is returned once and never stored."""
+    _require_admin(request)
+    try:
+        issued = get_token_store().create(owner_id=req.owner_id, label=req.label)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return issued
+
+
+@app.get("/api/v4/admin/tokens")
+def list_tokens(request: Request, owner_id: str | None = Query(default=None)):
+    """Metadata for issued tokens; never the token or its hash."""
+    _require_admin(request)
+    return get_token_store().list(owner_id=owner_id)
+
+
+@app.delete("/api/v4/admin/tokens/{token_id}")
+def revoke_token(token_id: str, request: Request):
+    _require_admin(request)
+    if not get_token_store().revoke(token_id):
+        raise HTTPException(status_code=404, detail=f"Token '{token_id}' not found.")
+    return {"token_id": token_id, "revoked": True}
+
+
+@app.get("/api/v4/whoami")
+def whoami():
+    """The tenant this request is scoped to — what a client should display and log."""
+    return {"owner_id": current_owner(), "authenticated": _auth_required()}
+
+
 @app.get("/api/v4/capabilities")
 def get_capabilities():
     """What this deployment can do right now, and what still needs a model.
@@ -1968,6 +2284,11 @@ def get_capabilities():
             "arena_preview",
             "export_onnx",
         ],
+        "auth": {
+            "required": _auth_required(),
+            "tenant_tokens": (get_token_store().count() if _auth_required() else 0),
+            "admin_token_configured": bool(_ADMIN_TOKEN),
+        },
         "isolation": {
             "sandboxed_execution": bool(isolation_available()),
             "required": os.environ.get("RL_IDE_REQUIRE_ISOLATION", "").lower() in ("1", "true", "yes"),
@@ -2039,7 +2360,24 @@ def get_usage(
 
 @app.websocket("/ws/v4/{session_id}")
 async def websocket_telemetry(websocket: WebSocket, session_id: str):
-    """Streams live training frames, round metrics, job stages and auto-tuner events."""
+    """Streams live training frames, round metrics, job stages and auto-tuner events.
+
+    A websocket carries no HTTP middleware, so the tenant boundary is enforced here too: in an
+    authenticated deployment the token arrives as a query parameter (browsers cannot set headers on
+    a socket) and the socket may only follow a session the caller owns.
+    """
+    owner = "local"
+    if _auth_required():
+        supplied = (websocket.query_params.get("token") or "").strip()
+        owner = (_ADMIN_OWNER if _is_admin(supplied) else get_token_store().verify(supplied)) or ""
+        if not owner:
+            await websocket.close(code=4401)
+            return
+        conv = get_conversation_store().get_conversation(session_id, owner_id=owner)
+        if conv is None:
+            await websocket.close(code=4403)
+            return
+    _owner_ctx.set(owner)
     await manager.connect(session_id, websocket)
     try:
         while True:

@@ -21,6 +21,43 @@ const API_V4 = '/api/v4'
 /** The backend marks model-backed routes with this reason so the UI need not parse prose. */
 export const LLM_KEY_REQUIRED = 'llm-key-required'
 
+const TOKEN_STORAGE_KEY = 'rl_ide_api_token'
+
+/** The tenant token for this browser, or empty in the single-user local studio. */
+export function getApiToken(): string {
+  try {
+    return localStorage.getItem(TOKEN_STORAGE_KEY) || ''
+  } catch {
+    return ''
+  }
+}
+
+export function setApiToken(token: string): void {
+  try {
+    if (token) localStorage.setItem(TOKEN_STORAGE_KEY, token)
+    else localStorage.removeItem(TOKEN_STORAGE_KEY)
+  } catch {
+    // A blocked storage API must not break the studio; requests will simply be unauthenticated.
+  }
+}
+
+/** Every API call goes through here, so no request can forget the tenant token. */
+async function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  const merged = authHeaders((init.headers as Record<string, string>) || {})
+  const res = await fetch(`${API_V4}${path}`, { ...init, headers: merged })
+  if (res.status === 401) {
+    // The app listens for this and asks for a tenant token instead of showing a broken studio.
+    window.dispatchEvent(new CustomEvent('rl:auth-required'))
+  }
+  return res
+}
+
+/** Headers every request carries: the tenant token when one is configured. */
+export function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
+  const token = getApiToken()
+  return token ? { ...extra, Authorization: `Bearer ${token}` } : { ...extra }
+}
+
 export class ApiError extends Error {
   readonly status: number
   readonly reason: string | null
@@ -54,7 +91,7 @@ export async function uploadDatasetFile(
   formData.append('file', file)
   formData.append('role', role)
 
-  const res = await fetch(`${API_V4}/ingest/upload`, {
+  const res = await apiFetch(`/ingest/upload`, {
     method: 'POST',
     body: formData,
   })
@@ -71,7 +108,7 @@ export async function ingestSQLDataset(
   query: string,
   name: string = 'sql_dataset',
 ): Promise<IngestedDatasetSummary> {
-  const res = await fetch(`${API_V4}/ingest/sql`, {
+  const res = await apiFetch(`/ingest/sql`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -106,7 +143,7 @@ export interface ArchitectChatParams {
 export async function chatWithArchitect(
   params: ArchitectChatParams,
 ): Promise<IntakeResponse> {
-  const res = await fetch(`${API_V4}/architect/chat`, {
+  const res = await apiFetch(`/architect/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(params),
@@ -161,7 +198,7 @@ export interface StudioChatParams {
 }
 
 export async function getJob(jobId: string): Promise<JobStatus> {
-  const res = await fetch(`${API_V4}/jobs/${jobId}`)
+  const res = await apiFetch(`/jobs/${jobId}`)
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: 'Job lookup failed' }))
     throw new Error(err.detail || 'Job lookup failed')
@@ -170,7 +207,7 @@ export async function getJob(jobId: string): Promise<JobStatus> {
 }
 
 export async function cancelJob(jobId: string): Promise<void> {
-  await fetch(`${API_V4}/jobs/${jobId}/cancel`, { method: 'POST' })
+  await apiFetch(`/jobs/${jobId}/cancel`, { method: 'POST' })
 }
 
 // Synthesis takes minutes: poll the job so the UI can show its stage instead of a dead spinner.
@@ -201,7 +238,7 @@ export async function chatWithStudioOmni(
   params: StudioChatParams,
   onStage?: (stage: string, detail?: string | null) => void,
 ): Promise<StudioChatResponse> {
-  const res = await fetch(`${API_V4}/conversations/${params.conversation_id}/chat`, {
+  const res = await apiFetch(`/conversations/${params.conversation_id}/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Prefer: 'respond-async' },
     body: JSON.stringify({
@@ -240,7 +277,7 @@ export async function updateArenaLook(
   conversationId: string,
   userVisualRequest: string,
 ): Promise<ArenaUpdateResult> {
-  const res = await fetch(`${API_V4}/conversations/${conversationId}/arena/update`, {
+  const res = await apiFetch(`/conversations/${conversationId}/arena/update`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ user_visual_request: userVisualRequest }),
@@ -257,7 +294,7 @@ export async function lockConversationArena(
   conversationId: string,
   locked: boolean = true,
 ): Promise<{ conversation_id: string; arena_locked: boolean }> {
-  const res = await fetch(`${API_V4}/conversations/${conversationId}/arena/lock`, {
+  const res = await apiFetch(`/conversations/${conversationId}/arena/lock`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ locked }),
@@ -276,7 +313,7 @@ export async function lockConversationArena(
 // -----------------------------------------------------------------------------
 
 export async function fetchConversations(): Promise<ConversationSummary[]> {
-  const res = await fetch(`${API_V4}/conversations`)
+  const res = await apiFetch(`/conversations`)
   if (!res.ok) {
     throw new Error('Failed to fetch conversations')
   }
@@ -288,7 +325,7 @@ export async function createConversation(
   datasetId?: string | null,
   trainingParams?: TrainingParams,
 ): Promise<ConversationDetail> {
-  const res = await fetch(`${API_V4}/conversations`, {
+  const res = await apiFetch(`/conversations`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -304,7 +341,7 @@ export async function createConversation(
 }
 
 export async function fetchConversation(conversationId: string): Promise<ConversationDetail> {
-  const res = await fetch(`${API_V4}/conversations/${conversationId}`)
+  const res = await apiFetch(`/conversations/${conversationId}`)
   if (!res.ok) {
     throw new Error(`Failed to load conversation ${conversationId}`)
   }
@@ -315,7 +352,7 @@ export async function updateConversationParams(
   conversationId: string,
   params: TrainingParams,
 ): Promise<any> {
-  const res = await fetch(`${API_V4}/conversations/${conversationId}/params`, {
+  const res = await apiFetch(`/conversations/${conversationId}/params`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(params),
@@ -327,7 +364,7 @@ export async function updateConversationParams(
 }
 
 export async function clearAllConversations(): Promise<{ success: boolean; deleted_count: number }> {
-  const res = await fetch(`${API_V4}/conversations`, {
+  const res = await apiFetch(`/conversations`, {
     method: 'DELETE',
   })
   if (!res.ok) {
@@ -337,7 +374,7 @@ export async function clearAllConversations(): Promise<{ success: boolean; delet
 }
 
 export async function deleteConversation(conversationId: string): Promise<any> {
-  const res = await fetch(`${API_V4}/conversations/${conversationId}`, {
+  const res = await apiFetch(`/conversations/${conversationId}`, {
     method: 'DELETE',
   })
   if (!res.ok) {
@@ -360,7 +397,7 @@ export interface StartSessionParams {
 export async function startSynthesisSession(
   params: StartSessionParams,
 ): Promise<{ session_id: string; status: string; message?: string }> {
-  const res = await fetch(`${API_V4}/sessions/start`, {
+  const res = await apiFetch(`/sessions/start`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(params),
@@ -374,7 +411,7 @@ export async function startSynthesisSession(
 }
 
 export async function fetchSession(sessionId: string): Promise<SessionState> {
-  const res = await fetch(`${API_V4}/sessions/${sessionId}`)
+  const res = await apiFetch(`/sessions/${sessionId}`)
   if (!res.ok) {
     throw new Error(`Failed to fetch session ${sessionId}`)
   }
@@ -389,7 +426,7 @@ export async function interactSession(
   sessionId: string,
   payload: Record<string, any>,
 ): Promise<any> {
-  const res = await fetch(`${API_V4}/sessions/${sessionId}/interact`, {
+  const res = await apiFetch(`/sessions/${sessionId}/interact`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ payload }),
@@ -407,7 +444,7 @@ export async function nudgeSession(
   sessionId: string,
   feedback: string,
 ): Promise<TuningResult> {
-  const res = await fetch(`${API_V4}/sessions/${sessionId}/nudge`, {
+  const res = await apiFetch(`/sessions/${sessionId}/nudge`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ feedback }),
@@ -424,7 +461,7 @@ export async function rollbackSession(
   sessionId: string,
   roundNum: number,
 ): Promise<{ session_id: string; status: string; restored_round: number; restored_metric: number }> {
-  const res = await fetch(`${API_V4}/sessions/${sessionId}/rollback`, {
+  const res = await apiFetch(`/sessions/${sessionId}/rollback`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ round_num: roundNum }),
@@ -451,7 +488,7 @@ export interface ExportResult {
 }
 
 export async function exportSessionPolicy(sessionId: string): Promise<ExportResult> {
-  const res = await fetch(`${API_V4}/sessions/${sessionId}/export`, {
+  const res = await apiFetch(`/sessions/${sessionId}/export`, {
     method: 'POST',
   })
 
@@ -464,7 +501,7 @@ export async function exportSessionPolicy(sessionId: string): Promise<ExportResu
 }
 
 export async function fetchBundles(): Promise<BundleMetadata[]> {
-  const res = await fetch(`${API_V4}/bundles`)
+  const res = await apiFetch(`/bundles`)
   if (!res.ok) {
     throw new Error('Failed to fetch bundles')
   }
@@ -476,7 +513,7 @@ export async function fetchBundles(): Promise<BundleMetadata[]> {
 // -----------------------------------------------------------------------------
 
 export async function getLLMStatus(): Promise<LLMStatusResponse> {
-  const res = await fetch(`${API_V4}/settings/llm`)
+  const res = await apiFetch(`/settings/llm`)
   if (!res.ok) {
     throw new Error('Failed to retrieve LLM status')
   }
@@ -495,7 +532,7 @@ export async function saveAndVerifyLLMSettings(
   error?: string
   latency_ms?: number
 }> {
-  const res = await fetch(`${API_V4}/settings/llm`, {
+  const res = await apiFetch(`/settings/llm`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -524,7 +561,7 @@ export async function saveAndVerifyLLMSettings(
 export async function validateLLMSettings(
   settings: LLMSettings,
 ): Promise<{ valid: boolean; success: boolean; provider: string; message: string; error?: string }> {
-  const res = await fetch(`${API_V4}/settings/validate`, {
+  const res = await apiFetch(`/settings/validate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -560,7 +597,8 @@ export function connectTelemetryWebSocket(
 ): WebSocket {
   const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
   const host = window.location.host
-  const wsUrl = `${proto}//${host}/ws/v4/${sessionId}`
+  const token = getApiToken()
+  const wsUrl = `${proto}//${host}/ws/v4/${sessionId}${token ? `?token=${encodeURIComponent(token)}` : ''}`
 
   const ws = new WebSocket(wsUrl)
 
@@ -596,7 +634,7 @@ export function connectTelemetryWebSocket(
 
 export async function getUsage(conversationId?: string): Promise<UsageReport> {
   const query = conversationId ? `?conversation_id=${encodeURIComponent(conversationId)}` : ''
-  const res = await fetch(`${API_V4}/usage${query}`)
+  const res = await apiFetch(`/usage${query}`)
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: 'Usage lookup failed' }))
     throw new Error(err.detail || 'Usage lookup failed')

@@ -189,6 +189,16 @@ no confidence interval, and no per-segment breakdown.
 
 ### P1 — cannot operate or bill it
 
+- **Status (authentication): CLOSED in Phase P2-C.** Ownership is now proven, not declared. A tenant
+  token (`rlt_…`, 32 random bytes) is stored only as `sha256`, verified in constant time, and is the
+  sole source of the owner: `x-owner-id` is ignored as soon as authentication is on. A deployment
+  secret (`RL_IDE_ADMIN_TOKEN`) mints and revokes tokens but is never itself a tenant. Authentication
+  turns on when `RL_IDE_REQUIRE_AUTH=1` **or** any token has been issued, so a hosted deployment
+  cannot silently fall back to header-scoped tenancy, while the desktop single-user studio keeps
+  working with no credentials. The websocket enforces the same boundary (token in the query string,
+  and the socket may only follow a session the caller owns). `GET /api/v4/whoami` reports the tenant;
+  `GET /api/v4/capabilities` reports the auth mode.
+
 #### G5. Synthesis is a blocking HTTP POST with no job identity
 - **Evidence:** `POST /api/v4/conversations/{id}/chat` awaits
   `asyncio.to_thread(global_omni_agent.process_message, …)` and only afterwards may spawn background
@@ -219,6 +229,12 @@ no confidence interval, and no per-segment breakdown.
   environment instances and the loop's training lock are still per-process, so several Uvicorn workers
   with shared training state and resuming an interrupted round are not supported yet — an interrupted
   job fails with a retry hint (`progress.md` §15.2).
+- **Status (resume): CLOSED in Phase P2-C.** An interrupted training run no longer discards its
+  completed rounds. `POST /api/v4/conversations/{id}/training/resume` queues only the *remaining*
+  rounds — derived from `rounds_history`, not from what the client remembers asking for — and
+  warm-starts from the saved policy; a failed training job carries a `resume_hint` naming that
+  endpoint. A *mid-round* checkpoint is still out of scope: the round in flight is redone, the
+  completed ones are not.
 - **Fix:** move job/run state into the database, make training a worker consuming a queue (even a
   SQLite/Postgres table is enough), and let the API be stateless. This is the prerequisite for G5 as
   well.
@@ -275,6 +291,13 @@ no confidence interval, and no per-segment breakdown.
   53 897 free pages before this change). `DELETE /api/v4/datasets/{id}` removes the payload file and
   compacts. 609 stale `temp_verify_*` directories were cleaned from the checkout. **Residual:** no
   scheduled retention window yet — deletion is explicit, not time-based.
+- **Status: the retention window is CLOSED in Phase P2-C.** `RetentionPolicy` reads
+  `RL_IDE_RETENTION_DAYS` (or per-artefact overrides) and a scheduled sweeper erases expired
+  conversations, datasets and bundles, plus orphan workspace directories whose row is already gone.
+  It is **disabled by default** — a desktop studio must never delete a user's work — and
+  `POST /api/v4/admin/retention/sweep` defaults to a dry run so a policy can be inspected against real
+  data before it is armed; `GET /api/v4/admin/retention` reports the active policy and what it would
+  remove right now.
 
 ### P2 — depth and sales friction
 
@@ -349,7 +372,10 @@ no confidence interval, and no per-segment breakdown.
   (`synthesize_environment`, `architect_chat`, `train`, `restyle_arena`) refuse. The refusal carries
   an `X-RL-Reason: llm-key-required` header so the UI opens the setup dialog instead of
   string-matching prose, and `GET /api/v4/capabilities` publishes exactly what needs a model. The
-  enterprise provider targets (Azure OpenAI, self-hosted) remain open.
+  enterprise provider targets are CLOSED in Phase P2-C: `azure_openai` (deployment in the path,
+  `api-key` header, `api-version` query) and `openai_compatible` for self-hosted vLLM/TGI or an
+  internal gateway (`base_url` required, key optional). Both are selectable in the UI and both name
+  the missing setting when misconfigured.
 
 #### G14. Only the first 120 rows of a file are ever used
 - **Evidence:** `records_from_frame(df, limit=MAX_ROWS)` with `MAX_ROWS = 120` and `df.head(limit)`
@@ -473,6 +499,13 @@ Acceptance: a policy fed inputs it never saw during training is reported as drif
 number of live interactions, unchanged traffic stays quiet, the verdict survives a restart, and an
 exported bundle's drift verdict is real rather than a constant.
 All met; the wiring also uncovered two silent defects in the existing detector (see G11).
+
+**Phase P2-C — "sell it to a bank" (≈2 days) — DONE (2026-10-30)**
+G4 (authentication) + G9 (retention window) + G13 (enterprise providers) + G6 (resumable training).
+Acceptance: a caller must prove which tenant it is, and the old `x-owner-id` header cannot change that
+answer; expired data disappears on a schedule that is off by default and inspectable before arming;
+Azure OpenAI and a self-hosted OpenAI-compatible endpoint both work; an interrupted training run
+continues from its saved rounds. All met.
 
 Only after these does G10 (sequential tasks) make sense — it is a value upgrade, not a
 trust-building one.

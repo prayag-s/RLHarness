@@ -1478,3 +1478,74 @@ judgements, erasing a real verdict on the next click.
 - Gates: **`pytest -q` → 163 passed, 2 skipped, 0 failed in 10:05**; fast gate
   (`-m "not slow and not live_llm"`) → **99 passed, 2 skipped**; frontend `tsc --noEmit` +
   `vite build` clean.
+
+---
+
+## 18. v5.3 — Phase P2-C: sell it to a bank (G4, G6 resume, G9 window, G13 providers)
+
+Four residuals that each individually block a purchase: an unprovable tenant, data that outlives its
+policy, no Azure/self-hosted model, and a training run that restarts from zero after a crash.
+
+### 18.1 G4 — authentication: ownership is proven, not declared
+
+`x-owner-id` was a label any caller could set. Now:
+
+- **[auth_store.py](./backend/rl_ide/state/auth_store.py)** issues `rlt_…` tokens (32 random bytes)
+  and stores **only `sha256`**; verification is a hash lookup plus a constant-time compare, and the
+  plaintext is returned exactly once. Revocation takes effect on the next request.
+- **The token decides the tenant.** As soon as authentication is on, `x-owner-id` is ignored — the
+  boundary cannot be self-declared.
+- **Two modes, decided at request time:** hosted (`RL_IDE_REQUIRE_AUTH=1`, or any tenant token has
+  been issued) requires a bearer token; the desktop single-user studio keeps working with no
+  credentials. A hosted deployment therefore cannot silently fall back to header-scoped tenancy.
+- **The deployment secret is not a tenant.** `RL_IDE_ADMIN_TOKEN` may `POST/GET/DELETE
+  /api/v4/admin/tokens` but never reads anyone's data.
+- **The websocket enforces the same boundary**: the token arrives as a query parameter (browsers
+  cannot set socket headers) and the socket may only follow a session the caller owns.
+- `GET /api/v4/whoami` reports the tenant; `GET /api/v4/capabilities` reports the auth mode; the SPA
+  sends the token on every request through a single `apiFetch`, prompts once on a 401, and stores the
+  token under Settings → *Tenant token*.
+
+Verified live on a provider-less instance started with `RL_IDE_REQUIRE_AUTH=1`: no token → `401`;
+acme's token → `200`; beta reading acme's conversation → `404`; revoked token → `401`; websocket with
+no / wrong / other-tenant token → refused, owner connects. In the browser the SPA showed the auth
+prompt, accepted the token, and then listed the tenant's 9 agents — matching the API exactly.
+
+### 18.2 G9 — the retention window
+
+`RetentionPolicy` (`RL_IDE_RETENTION_DAYS`, plus per-artefact overrides) drives a scheduled sweep of
+expired conversations, datasets and bundles, and removes orphan workspace directories whose database
+row is already gone. Three properties matter more than the code:
+
+- **Off by default.** A desktop studio must never delete a user's work.
+- **Dry run is the default for the manual trigger**, so an operator can compare the policy against
+  real data before arming it (`GET /api/v4/admin/retention` shows what would go right now).
+- **One failure does not abort the sweep** — a locked workspace is logged and the rest continues.
+
+### 18.3 G13 — Azure OpenAI and self-hosted endpoints
+
+- **`azure_openai`**: deployment in the path, `api-key` header, `api-version` query — three things that
+  break a naive OpenAI client. Accepts either a resource endpoint or a full deployment URL.
+- **`openai_compatible`** (vLLM, TGI, LM Studio, an internal gateway): `base_url` required, bearer
+  token optional because many run inside the customer's network without auth.
+- Both are in the provider picker (now three columns, six providers) and both name the missing
+  setting (`AZURE_OPENAI_API_KEY`, `OPENAI_COMPATIBLE_BASE_URL`) instead of failing at request time.
+
+### 18.4 G6 — resuming an interrupted training run
+
+`POST /api/v4/conversations/{id}/training/resume` queues only the rounds that are still missing
+(derived from `rounds_history`) and warm-starts from the saved policy; a failed training job now
+carries a `resume_hint` naming that endpoint. A *mid-round* checkpoint is still out of scope — the
+round in flight is redone, the completed ones are not.
+
+### 18.5 Verification
+
+- New tests: `test_auth.py` (10), `test_retention.py` (8), `test_llm_providers.py` (13), plus 3 in
+  `test_jobs.py` for resume.
+- Two defects the tests caught, both mine: the token store used a **hardcoded** `runs/conversations.db`
+  so a developer's live tokens made the whole suite demand credentials (fixed by binding tokens to the
+  conversation store's path, and by ignoring issued tokens in test mode); and the resume test polluted
+  a shared job store, which is exactly the "already queued" refusal working correctly.
+- Frontend: `tsc --noEmit` clean; `vite build` clean. One real bug found by reading the code rather
+  than by any tool: wrapping all fetches in `apiFetch` made it call itself (infinite recursion), which
+  type-checks and builds perfectly.

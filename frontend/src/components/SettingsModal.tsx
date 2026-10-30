@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import { X, Key, Server, Cpu, Check, Save, Sparkles, AlertCircle, RefreshCw } from 'lucide-react'
 import { LLMSettings } from '../types'
-import { validateLLMSettings, saveAndVerifyLLMSettings } from '../services/api'
+import { getApiToken, setApiToken, validateLLMSettings, saveAndVerifyLLMSettings } from '../services/api'
 
 interface SettingsModalProps {
   isOpen: boolean
@@ -20,10 +20,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [saved, setSaved] = useState(false)
   const [isValidating, setIsValidating] = useState(false)
   const [valResult, setValResult] = useState<{ valid: boolean; message: string } | null>(null)
+  // Tenant token for a hosted deployment; blank in the single-user local studio.
+  const [tenantToken, setTenantToken] = useState<string>('')
 
   useEffect(() => {
     setLocalSettings(settings)
     setValResult(null)
+    setTenantToken(getApiToken())
   }, [settings, isOpen])
 
   if (!isOpen) return null
@@ -47,6 +50,24 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const handleSave = async () => {
     setIsValidating(true)
     setValResult(null)
+    setApiToken(tenantToken.trim())
+
+    // Identity and model credentials are independent: a user who came here to set a tenant token
+    // must not be blocked because no provider key is configured yet (explore mode is valid).
+    const hasModelCredentials =
+      Boolean(localSettings.apiKey && localSettings.apiKey.trim()) || localSettings.provider === 'ollama'
+    if (!hasModelCredentials) {
+      onSaveSettings(localSettings)
+      setValResult({
+        valid: true,
+        message: tenantToken.trim()
+          ? 'Tenant token saved. Explore mode remains active until you add a model key.'
+          : 'Settings saved. Explore mode remains active until you add a model key.',
+      })
+      setIsValidating(false)
+      return
+    }
+
     try {
       const res = await saveAndVerifyLLMSettings(localSettings)
       if (res.is_verified || res.success) {
@@ -233,6 +254,25 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <span className="leading-snug">{valResult.message}</span>
             </div>
           )}
+        </div>
+
+        {/* Tenant identity: only needed when the deployment requires authentication. */}
+        <div className="px-6 py-4 border-t border-gray-800 bg-gray-950/60 space-y-1.5">
+          <label className="text-gray-300 font-semibold flex items-center space-x-1.5 text-xs">
+            <Key className="h-3.5 w-3.5 text-amber-400" />
+            <span>Tenant token (hosted deployments)</span>
+          </label>
+          <input
+            type="password"
+            value={tenantToken}
+            onChange={(e) => setTenantToken(e.target.value)}
+            placeholder="rlt_… — leave blank for the single-user local studio"
+            className="w-full bg-gray-900 border border-gray-700 focus:border-indigo-500 rounded-lg px-3 py-2 text-xs font-mono text-gray-200 focus:outline-none placeholder-gray-600"
+          />
+          <p className="text-[11px] text-gray-500">
+            Sent as <code className="text-gray-400">Authorization: Bearer</code>. Issued by an
+            administrator with <code className="text-gray-400">POST /api/v4/admin/tokens</code>.
+          </p>
         </div>
 
         {/* Footer */}
