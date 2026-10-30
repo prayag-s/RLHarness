@@ -8,6 +8,7 @@ Eliminates all domain-specific branches, rover fallbacks, and hardcoded template
 from __future__ import annotations
 import html as html_lib
 import json
+import logging
 import os
 import re
 import subprocess
@@ -18,6 +19,23 @@ from typing import Any
 from rl_ide.architect.models import AgentBlueprintSpec, DynamicTaskBlueprint
 from rl_ide.llm.client import BaseLLMClient, FallbackCodeSynthesizer, get_active_llm_client
 from rl_ide.llm.prompts import ARENA_SYNTHESIZER_SYSTEM_PROMPT, ARENA_BUILDER_SYSTEM_PROMPT
+
+logger = logging.getLogger(__name__)
+
+# A full bespoke arena is a single ~30KB HTML document, so generation routinely needs several
+# minutes on high-latency providers. Short timeouts silently degrade the arena to the generic
+# text fallback, so this is a floor rather than a default.
+ARENA_GENERATION_TIMEOUT_S = 240.0
+
+
+def _arena_generation_timeout(client: BaseLLMClient) -> float:
+    """Returns the arena synthesis timeout, never below the client's configured request timeout."""
+    configured = getattr(getattr(client, "config", None), "timeout", None)
+    try:
+        configured = float(configured)
+    except (TypeError, ValueError):
+        configured = 0.0
+    return max(ARENA_GENERATION_TIMEOUT_S, configured)
 
 
 def extract_html_code(raw: str) -> str:
@@ -133,14 +151,29 @@ def synthesize_universal_arena_html(
                 f"6. Support `ARENA_UPDATE`, `SET_ARENA_MODE`, and postMessage bridges.\n"
                 f"7. Return ONLY valid HTML inside ```html ... ```."
             )
-            raw = active_client.generate(prompt, system_prompt=ARENA_BUILDER_SYSTEM_PROMPT, timeout=35.0)
+            raw = active_client.generate(
+                prompt,
+                system_prompt=ARENA_BUILDER_SYSTEM_PROMPT,
+                timeout=_arena_generation_timeout(active_client),
+            )
             html = extract_html_code(raw)
             if html and "ARENA_UPDATE" in html and "startMockAnimationLoop" in html and ("<html" in html.lower() or "<!doctype html" in html.lower()):
                 healed = heal_arena_html_scripts(html)
                 if validate_arena_html_scripts(healed):
                     return healed
-        except Exception:
-            pass
+                logger.warning(
+                    "LLM arena HTML failed JavaScript validation; falling back to the generic arena preview."
+                )
+            else:
+                logger.warning(
+                    "LLM arena HTML is missing the required preview hooks; falling back to the generic arena preview."
+                )
+        except Exception as exc:
+            logger.warning(
+                "LLM arena synthesis failed (%s: %s); falling back to the generic arena preview.",
+                type(exc).__name__,
+                exc,
+            )
 
     # 2. Universal Schema-Driven Arena Generator
     synthesizer = JITArenaSynthesizer(active_client)
@@ -203,7 +236,11 @@ class JITArenaSynthesizer:
                     f"2. PRESERVE `startMockAnimationLoop()`, `SET_ARENA_MODE`, `ARENA_UPDATE`, and `ARENA_INTERACT` functionality.\n"
                     f"3. Return ONLY valid HTML inside ```html ... ```."
                 )
-                raw = self.client.generate(prompt, system_prompt=ARENA_SYNTHESIZER_SYSTEM_PROMPT, timeout=30.0)
+                raw = self.client.generate(
+                    prompt,
+                    system_prompt=ARENA_SYNTHESIZER_SYSTEM_PROMPT,
+                    timeout=_arena_generation_timeout(self.client),
+                )
                 extracted = extract_html_code(raw)
                 if (
                     extracted
@@ -217,8 +254,19 @@ class JITArenaSynthesizer:
                         if workspace_dir:
                             (Path(workspace_dir) / "arena.html").write_text(healed, encoding="utf-8")
                         return healed
-            except Exception:
-                pass
+                    logger.warning(
+                        "Restyled arena HTML failed JavaScript validation; falling back to the generic arena preview."
+                    )
+                else:
+                    logger.warning(
+                        "Restyled arena HTML is missing the required preview hooks; falling back to the generic arena preview."
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "LLM arena restyle failed (%s: %s); falling back to the generic arena preview.",
+                    type(exc).__name__,
+                    exc,
+                )
 
         updated = self._generate_deterministic_arena_html(
             blueprint=bp_spec,
@@ -322,6 +370,9 @@ class JITArenaSynthesizer:
         action_labels_json = json.dumps([str(x) for x in action_labels]).replace("</", "<\\/")
         safe_title = html_lib.escape(str(task_title))
         safe_metaphor = html_lib.escape(str(blueprint.arena_visual_description or task_title))
+        # The generic preview cannot draw the bespoke metaphor, so keep it as a one-line caption
+        # instead of letting the prose dominate the stage.
+        caption_metaphor = safe_metaphor if len(safe_metaphor) <= 110 else safe_metaphor[:107].rstrip() + "…"
 
         return f"""<!DOCTYPE html>
 <html lang="en">
@@ -383,7 +434,7 @@ class JITArenaSynthesizer:
 
     <div class="flex-1 flex flex-col items-center justify-center bg-slate-900/60 border border-slate-800 rounded-2xl p-4 {stage_size} w-full shadow-2xl relative overflow-hidden">
       <div id="visual-stage-container" class="w-full flex-1 flex flex-col items-center justify-center gap-3">
-        <div id="visual-metaphor-header" class="text-xs font-mono text-slate-400 uppercase tracking-widest text-center">{safe_metaphor}</div>
+        <div id="visual-metaphor-header" class="text-[10px] font-mono text-slate-500 uppercase tracking-widest text-center max-w-md truncate" title="{safe_metaphor}">{caption_metaphor}</div>
         <div id="dynamic-state-grid" class="flex flex-wrap items-center justify-center gap-2 max-w-lg w-full"></div>
         <div id="status-badge" class="px-3 py-1 bg-slate-800 border border-slate-700 rounded-full text-xs font-mono text-slate-300">Ready</div>
       </div>
