@@ -18,6 +18,9 @@ complete. All audit issues F1–F36 are closed or explicitly accepted in
   terminal outcome; generic placeholder environments report **0 %** and are flagged.
 - **Known residuals:** see §6 of the audit document (no built-in auth, sample rows in exported
   bundles for offline execution, advisory surgical instructions, drift monitoring not wired).
+- **Commercial gaps:** the residuals above plus the operational layer (in-sample metrics, unsandboxed
+  env execution, blocking synthesis, no tenancy/metering/CI) are tracked with evidence and effort
+  estimates in [COMMERCIAL_READINESS_GAPS.md](./COMMERCIAL_READINESS_GAPS.md).
 
 > Historical sections below (v4.0–v4.4) are retained as an append-only log. Where they conflict with
 > the v4.5 status above (e.g. “all static domain routing eliminated”, “100 % mastery”, “53/53 tests”),
