@@ -509,6 +509,7 @@ class StudioOmniAgent:
         run_sync: bool = False,
         progress_callback: Callable[[str, str | None], None] | None = None,
         should_cancel: Callable[[], bool] | None = None,
+        owner_id: str | None = None,
     ) -> StudioChatResponse:
         """Single unified entrypoint for continuous conversational studio interaction.
 
@@ -522,13 +523,14 @@ class StudioOmniAgent:
                 progress_callback(stage, detail)
             if should_cancel and should_cancel():
                 raise JobCancelled(f"cancelled during {stage}")
-        conv = self.conv_store.get_conversation(conversation_id)
+        conv = self.conv_store.get_conversation(conversation_id, owner_id=owner_id)
         if not conv:
             conv = self.conv_store.create_conversation(
                 conversation_id=conversation_id,
                 title=generate_title_from_prompt(user_message),
                 training_params=training_params,
                 dataset_id=dataset_id,
+                owner_id=owner_id or "local",
             )
 
         ws_dir = self.conv_store.workspaces_dir / conversation_id

@@ -1008,6 +1008,7 @@ def _run_chat_job(job: dict[str, Any]) -> None:
             run_sync=bool(payload.get("run_sync")),
             progress_callback=progress,
             should_cancel=cancelled,
+            owner_id=job.get("owner_id") or "local",
         )
 
         result = response.model_dump(mode="json")

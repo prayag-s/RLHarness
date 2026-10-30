@@ -194,3 +194,31 @@ def test_verification_leaves_no_workspace_behind(tmp_path, monkeypatch):
     assert ok is True, str(repair_logs)[-800:]
     assert after <= before, "verification must not leak a temporary workspace"
     assert not list((tmp_path / "workspaces").glob("temp_verify_*"))
+
+def test_hosted_chat_owns_the_conversation_it_creates():
+    """A turn from tenant 'acme' must create acme's conversation, not the local user's.
+
+    Found live: the omni agent created every conversation with the default owner, so a hosted
+    tenant's own conversation 404'd for itself while remaining readable by `local`.
+    """
+    import uuid
+
+    client = TestClient(app)
+    conv_id = f"tenant_chat_{uuid.uuid4().hex[:8]}"
+
+    resp = client.post(
+        f"/api/v4/conversations/{conv_id}/chat",
+        json={"user_message": "Train an agent to triage support tickets"},
+        headers={"x-owner-id": "acme"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["conversation_id"] == conv_id
+
+    assert client.get(f"/api/v4/conversations/{conv_id}", headers={"x-owner-id": "acme"}).status_code == 200
+    assert client.get(f"/api/v4/conversations/{conv_id}", headers={"x-owner-id": "globex"}).status_code == 404
+    assert client.get(f"/api/v4/conversations/{conv_id}").status_code == 404, "the local user must not see it"
+
+    usage = client.get(
+        "/api/v4/usage", params={"conversation_id": conv_id}, headers={"x-owner-id": "acme"}
+    )
+    assert usage.status_code == 200
