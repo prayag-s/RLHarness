@@ -20,9 +20,9 @@ from typing import Any
 import numpy as np
 import torch
 from stable_baselines3 import PPO
-from fastapi import FastAPI, File, UploadFile, WebSocket, WebSocketDisconnect, HTTPException, Query
+from fastapi import FastAPI, File, Request, UploadFile, WebSocket, WebSocketDisconnect, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from rl_ide.architect.models import AgentBlueprintSpec, IntakeResponse
@@ -65,6 +65,15 @@ from rl_ide.llm.client import (
 from rl_ide.synthesizer.env_builder import JITEnvironmentSynthesizer, load_synthesized_env_class, instantiate_env
 from rl_ide.security import isolation_available
 from rl_ide.state.dataset_store import get_dataset_store
+from rl_ide.state.job_store import (
+    CANCELLED,
+    FAILED,
+    QUEUED,
+    RUNNING,
+    SUCCEEDED,
+    JobCancelled,
+    get_job_store,
+)
 from rl_ide.state.records_store import load_records, save_records
 from rl_ide.synthesizer.verifier import SandboxSmokeTester
 from rl_ide.synthesizer.arena_builder import JITArenaSynthesizer
@@ -178,30 +187,57 @@ async def _optional_api_token(request, call_next):
 
 # WebSocket Connection Manager
 class ConnectionManager:
+    """Delivers events to a session's sockets without the producer needing an event loop.
+
+    Training and synthesis run in worker threads; the loop that served the request that started
+    them may already be gone (a reload, a shutdown, or TestClient's per-request loop). So producers
+    publish into a bounded queue and the websocket drains it, which also covers a client that
+    reconnects mid-run.
+    """
+
+    _MAX_PENDING = 200
+
     def __init__(self):
         self.active_connections: dict[str, list[WebSocket]] = {}
+        self._pending: dict[str, list[dict[str, Any]]] = {}
+        self._lock = threading.Lock()
 
     async def connect(self, session_id: str, websocket: WebSocket):
         await websocket.accept()
-        if session_id not in self.active_connections:
-            self.active_connections[session_id] = []
-        self.active_connections[session_id].append(websocket)
+        with self._lock:
+            self.active_connections.setdefault(session_id, []).append(websocket)
 
     def disconnect(self, session_id: str, websocket: WebSocket):
-        if session_id in self.active_connections:
-            if websocket in self.active_connections[session_id]:
-                self.active_connections[session_id].remove(websocket)
+        with self._lock:
+            sockets = self.active_connections.get(session_id)
+            if sockets and websocket in sockets:
+                sockets.remove(websocket)
+
+    def publish(self, session_id: str, message: dict[str, Any]) -> None:
+        """Thread-safe, loop-free emit; safe to call from any worker."""
+        with self._lock:
+            pending = self._pending.setdefault(session_id, [])
+            pending.append(message)
+            if len(pending) > self._MAX_PENDING:
+                del pending[: len(pending) - self._MAX_PENDING]
+
+    def take_pending(self, session_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            pending = self._pending.pop(session_id, [])
+        return pending
 
     async def broadcast(self, session_id: str, message: dict[str, Any]):
-        if session_id in self.active_connections:
-            dead_sockets = []
-            for connection in self.active_connections[session_id]:
-                try:
-                    await connection.send_json(message)
-                except Exception:
-                    dead_sockets.append(connection)
-            for dead in dead_sockets:
-                self.disconnect(session_id, dead)
+        """Sends immediately to connected sockets; used when the caller is already on the loop."""
+        with self._lock:
+            sockets = list(self.active_connections.get(session_id, []))
+        dead_sockets = []
+        for connection in sockets:
+            try:
+                await connection.send_json(message)
+            except Exception:
+                dead_sockets.append(connection)
+        for dead in dead_sockets:
+            self.disconnect(session_id, dead)
 
 
 manager = ConnectionManager()
@@ -470,13 +506,8 @@ async def start_session(req: SessionStartRequest):
         )
 
     # Event emitter helper
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = asyncio.get_event_loop()
-
     def sync_event_emitter(event_data: dict[str, Any]):
-        asyncio.run_coroutine_threadsafe(manager.broadcast(sid, event_data), loop)
+        manager.publish(sid, event_data)
         if event_data.get("event") in ("round_evaluated", "target_achieved", "budget_exhausted", "auto_tuned"):
             sess = global_store.get_session(sid)
             if sess:
@@ -876,96 +907,312 @@ def run_training_task(
     )
 
 
+# ---------------------------------------------------------------------------
+# Durable jobs (G5/G6)
+#
+# A studio turn is 2-3 minutes of synthesis. Before this, it existed only as an in-process coroutine:
+# no identity to poll, no cancel, and a restart erased it silently. Every turn is now a row in
+# `jobs`, training is claimed from the same table by a worker, and a restart turns whatever was
+# running into an explicit, retryable failure.
+# ---------------------------------------------------------------------------
+jobs = get_job_store()
+
+_jobs_lock = threading.RLock()
+_training_consumer: threading.Thread | None = None
+
+
+def _remember_loop() -> None:
+    """Fails work a previous process could not finish, so a restart never leaves a silent spinner."""
+    if not is_test_mode():
+        interrupted = jobs.reconcile_interrupted()
+        if interrupted:
+            print(f"[jobs] marked {interrupted} interrupted job(s) as failed after restart")
+
+
+def _broadcast_threadsafe(conversation_id: str, event: dict[str, Any]) -> None:
+    """Publishes an event for the session's sockets; callable from any thread, no loop required."""
+    if conversation_id:
+        manager.publish(conversation_id, event)
+
+
+def job_public(job: dict[str, Any]) -> dict[str, Any]:
+    """Client-facing view of a job (no internal payload echoed back)."""
+    return {
+        "job_id": job["job_id"],
+        "conversation_id": job.get("conversation_id"),
+        "kind": job.get("kind"),
+        "status": job.get("status"),
+        "stage": job.get("stage"),
+        "detail": job.get("detail"),
+        "error": job.get("error"),
+        "retryable": job.get("retryable", False),
+        "created_at": job.get("created_at"),
+        "updated_at": job.get("updated_at"),
+    }
+
+
+def _run_chat_job(job: dict[str, Any]) -> None:
+    """Executes one studio turn and records its outcome. Runs off the request thread."""
+    job_id = job["job_id"]
+    conversation_id = job.get("conversation_id") or ""
+    payload = job.get("payload") or {}
+    store = get_job_store()
+
+    # A fresh thread does not inherit context vars: attribute spend to the right tenant.
+    metering.current_owner_id.set(job.get("owner_id") or "local")
+    metering.current_conversation_id.set(conversation_id or None)
+
+    def progress(stage: str, detail: str | None = None) -> None:
+        store.set_stage(job_id, stage, detail)
+        _broadcast_threadsafe(
+            conversation_id,
+            {"event": "job_stage", "job_id": job_id, "stage": stage, "detail": detail},
+        )
+
+    def cancelled() -> bool:
+        return store.is_cancel_requested(job_id)
+
+    try:
+        progress("intake", "Reading the request and planning changes")
+        dataset_id = payload.get("dataset_id")
+        dataset = dataset_store.get(dataset_id, job.get("owner_id") or "local") if dataset_id else None
+        force_action = payload.get("force_action")
+
+        response = global_omni_agent.process_message(
+            conversation_id=conversation_id,
+            user_message=payload.get("message") or "",
+            dataset=dataset,
+            dataset_id=dataset_id,
+            selected_options=payload.get("answers") or {},
+            training_params=payload.get("training_params"),
+            force_action=StudioActionType(force_action) if force_action else None,
+            broadcast_callback=lambda event: _broadcast_threadsafe(conversation_id, event),
+            run_sync=bool(payload.get("run_sync")),
+            progress_callback=progress,
+            should_cancel=cancelled,
+        )
+
+        result = response.model_dump(mode="json")
+        store.finish(job_id, status=SUCCEEDED, result=result)
+        _broadcast_threadsafe(
+            conversation_id,
+            {
+                "event": "job_completed",
+                "job_id": job_id,
+                "status": response.status,
+                "action_types": [a.value for a in response.action_types],
+            },
+        )
+
+        if not payload.get("run_sync"):
+            _enqueue_training_if_requested(
+                conversation_id=conversation_id,
+                response=response,
+                owner_id=job.get("owner_id") or "local",
+                dataset=dataset,
+            )
+    except JobCancelled:
+        store.finish(job_id, status=CANCELLED, error="Cancelled by the user.")
+        _broadcast_threadsafe(conversation_id, {"event": "job_cancelled", "job_id": job_id})
+    except TrainingInProgressError as exc:
+        store.finish(job_id, status=FAILED, error=f"TrainingInProgressError: {exc}")
+    except Exception as exc:  # noqa: BLE001 - surfaced to the client, never silently swallowed
+        store.finish(job_id, status=FAILED, error=f"{type(exc).__name__}: {exc}")
+        _broadcast_threadsafe(
+            conversation_id, {"event": "job_failed", "job_id": job_id, "message": str(exc)}
+        )
+
+
+def _enqueue_training_if_requested(
+    *,
+    conversation_id: str,
+    response: Any,
+    owner_id: str,
+    dataset: Any,
+) -> dict[str, Any] | None:
+    """Queues a training job instead of holding a coroutine in this process's memory."""
+    if StudioActionType.RUN_OR_CONTINUE_TRAINING not in (response.action_types or []):
+        return None
+
+    conv = get_conversation_store().get_conversation(conversation_id)
+    if not conv or not conv.get("blueprint_spec"):
+        return None
+    if not (global_store.base_dir / conversation_id / "env_module.py").exists():
+        return None
+
+    bp = AgentBlueprintSpec.model_validate(conv["blueprint_spec"])
+    session = global_store.get_session(conversation_id)
+    prior_rounds = len(session.rounds_history) if session else 0
+    add_rounds = int(
+        (response.training_params or {}).get("max_auto_tune_rounds") or bp.max_auto_tune_rounds or 5
+    )
+
+    job = jobs.create(
+        kind="training",
+        conversation_id=conversation_id,
+        owner_id=owner_id,
+        payload={
+            "dataset_id": bp.dataset_id or getattr(dataset, "dataset_id", None),
+            "max_rounds": add_rounds,
+            "additional_rounds": add_rounds if prior_rounds else None,
+            "episodes_per_burst": int(
+                (response.training_params or {}).get("episodes_per_round") or bp.episodes_per_round or 200
+            ),
+        },
+    )
+    _ensure_training_consumer()
+    _broadcast_threadsafe(
+        conversation_id,
+        {"event": "job_queued", "job_id": job["job_id"], "kind": "training", "stage": "queued"},
+    )
+    return job
+
+
+def _run_training_job(job: dict[str, Any]) -> None:
+    """Trains one conversation from its queued job record."""
+    job_id = job["job_id"]
+    conversation_id = job.get("conversation_id") or ""
+    payload = job.get("payload") or {}
+    store = get_job_store()
+
+    metering.current_owner_id.set(job.get("owner_id") or "local")
+    metering.current_conversation_id.set(conversation_id or None)
+
+    if store.is_cancel_requested(job_id):
+        store.finish(job_id, status=CANCELLED, error="Cancelled before it started.")
+        return
+
+    conv = get_conversation_store().get_conversation(conversation_id)
+    if not conv or not conv.get("blueprint_spec"):
+        store.finish(job_id, status=FAILED, error="Conversation or blueprint disappeared before training.")
+        return
+
+    try:
+        store.set_stage(job_id, "training", "Training in the sandbox")
+        blueprint = AgentBlueprintSpec.model_validate(conv["blueprint_spec"])
+        dataset_id = payload.get("dataset_id")
+        trained = run_training_task(
+            conversation_id=conversation_id,
+            blueprint=blueprint,
+            env_file=global_store.base_dir / conversation_id / "env_module.py",
+            dataset=dataset_store.get(dataset_id, job.get("owner_id") or "local") if dataset_id else None,
+            max_rounds=int(payload.get("max_rounds") or 1),
+            additional_rounds=payload.get("additional_rounds"),
+            episodes_per_burst=int(payload.get("episodes_per_burst") or 200),
+            on_event=lambda event: _broadcast_threadsafe(conversation_id, event),
+        )
+        get_conversation_store().save_or_update(
+            conversation_id=conversation_id,
+            status=trained.status,
+            current_round=trained.current_round,
+            best_metric=trained.current_metric,
+            rounds_history=[r.model_dump() for r in trained.rounds_history],
+            episodes=trained.episodes,
+            latest_model_zip_path=trained.latest_model_zip_path,
+        )
+        store.finish(
+            job_id,
+            status=SUCCEEDED,
+            result={
+                "status": trained.status,
+                "current_round": trained.current_round,
+                "best_metric": trained.current_metric,
+            },
+        )
+        _broadcast_threadsafe(
+            conversation_id,
+            {"event": "job_completed", "job_id": job_id, "status": trained.status},
+        )
+    except TrainingInProgressError as exc:
+        store.finish(job_id, status=FAILED, error=f"TrainingInProgressError: {exc}")
+    except Exception as exc:  # noqa: BLE001
+        store.finish(job_id, status=FAILED, error=f"{type(exc).__name__}: {exc}")
+        _broadcast_threadsafe(
+            conversation_id, {"event": "job_failed", "job_id": job_id, "message": str(exc)}
+        )
+
+
+def _drain_training_jobs() -> None:
+    """Consumes queued training jobs, then exits: the queue lives in SQLite, not in this thread."""
+    store = get_job_store()
+    idle_polls = 0
+    while idle_polls < 3:
+        job = store.claim_next("training")
+        if job is None:
+            idle_polls += 1
+            time.sleep(0.2)
+            continue
+        idle_polls = 0
+        _run_training_job(job)
+
+
+def _ensure_training_consumer() -> None:
+    global _training_consumer
+    with _jobs_lock:
+        if _training_consumer is not None and _training_consumer.is_alive():
+            return
+        _training_consumer = threading.Thread(
+            target=_drain_training_jobs, name="rl-training-jobs", daemon=True
+        )
+        _training_consumer.start()
+
+
 @app.post("/api/v4/conversations/{conversation_id}/chat", response_model=StudioChatResponse)
-async def conversation_omni_chat(conversation_id: str, req: UnifiedConversationChatRequest):
-    """Unified Codex-style omni-agent chat endpoint for continuous conversation at any stage."""
+async def conversation_omni_chat(
+    conversation_id: str,
+    req: UnifiedConversationChatRequest,
+    request: Request,
+):
+    """Unified Codex-style omni-agent chat endpoint for continuous conversation at any stage.
+
+    Send ``Prefer: respond-async`` to get a ``202 {job_id, stage}`` back immediately and poll
+    ``GET /api/v4/jobs/{job_id}``. Without it the call blocks until the turn finishes, which is what
+    simple API clients and the test suite expect.
+    """
     require_verified_llm()
     bind_usage_context(conversation_id)
     msg = req.get_effective_message()
     if not msg.strip():
         raise HTTPException(status_code=400, detail="User message cannot be empty.")
 
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = asyncio.get_event_loop()
-
-    def sync_broadcast(event_data: dict[str, Any]):
-        asyncio.run_coroutine_threadsafe(manager.broadcast(conversation_id, event_data), loop)
+    _remember_loop()
 
     conv_store = get_conversation_store()
     existing_conv = conv_store.get_conversation(conversation_id)
-    effective_ds_id = req.dataset_id or (existing_conv.get("dataset_id") if existing_conv else None)
-    active_dataset = (
-        dataset_store.get(effective_ds_id, existing_conv.get("owner_id") if existing_conv else current_owner())
-        if effective_ds_id
-        else None
+    payload = {
+        "message": msg,
+        "dataset_id": req.dataset_id or (existing_conv.get("dataset_id") if existing_conv else None),
+        "answers": req.get_effective_answers(),
+        "training_params": req.training_params,
+        "force_action": req.force_action.value if req.force_action else None,
+        "run_sync": req.run_sync,
+    }
+    job = jobs.create(
+        kind="chat",
+        conversation_id=conversation_id,
+        owner_id=current_owner(),
+        payload=payload,
     )
 
-    try:
-        response = await asyncio.to_thread(
-            global_omni_agent.process_message,
-            conversation_id=conversation_id,
-            user_message=msg,
-            dataset=active_dataset,
-            dataset_id=effective_ds_id,
-            selected_options=req.get_effective_answers(),
-            training_params=req.training_params,
-            force_action=req.force_action,
-            broadcast_callback=sync_broadcast,
-            run_sync=req.run_sync,
-        )
-    except TrainingInProgressError as exc:
-        raise HTTPException(status_code=409, detail=str(exc))
+    if "respond-async" in (request.headers.get("prefer") or "").lower():
+        threading.Thread(target=_run_chat_job, args=(job,), name=f"rl-chat-{job['job_id']}", daemon=True).start()
+        return JSONResponse(status_code=202, content=job_public(jobs.get(job["job_id"])))
 
-    # Launch asynchronous background training if training action was triggered
-    if StudioActionType.RUN_OR_CONTINUE_TRAINING in response.action_types and not req.run_sync:
-        conv = conv_store.get_conversation(conversation_id)
-        if conv and conv.get("blueprint_spec"):
-            bp = AgentBlueprintSpec.model_validate(conv["blueprint_spec"])
-            ws_dir = global_store.base_dir / conversation_id
-            env_file = ws_dir / "env_module.py"
-            if env_file.exists():
-                eps_per_burst = int(response.training_params.get("episodes_per_round") or bp.episodes_per_round or 200)
-                add_rounds = int(response.training_params.get("max_auto_tune_rounds") or bp.max_auto_tune_rounds or 5)
-                training_dataset = active_dataset or (
-                    dataset_store.get(bp.dataset_id, current_owner()) if bp.dataset_id else None
-                )
+    await asyncio.to_thread(_run_chat_job, job)
+    finished = jobs.get(job["job_id"]) or job
 
-                prior_rounds = len(global_store.get_session(conversation_id).rounds_history) if global_store.get_session(conversation_id) else 0
+    if finished["status"] == CANCELLED:
+        raise HTTPException(status_code=409, detail=finished.get("error") or "Job cancelled.")
+    if finished["status"] == FAILED:
+        error = finished.get("error") or "Studio chat failed."
+        if error.startswith("TrainingInProgressError: "):
+            raise HTTPException(status_code=409, detail=error.split(": ", 1)[1])
+        raise HTTPException(status_code=500, detail=error)
 
-                async def _run_training_background():
-                    try:
-                        trained_session = await asyncio.to_thread(
-                            run_training_task,
-                            conversation_id=conversation_id,
-                            blueprint=bp,
-                            env_file=env_file,
-                            dataset=training_dataset,
-                            max_rounds=add_rounds,
-                            additional_rounds=add_rounds if prior_rounds else None,
-                            episodes_per_burst=eps_per_burst,
-                            on_event=sync_broadcast,
-                        )
-                        c_store = get_conversation_store()
-                        c_store.save_or_update(
-                            conversation_id=conversation_id,
-                            status=trained_session.status,
-                            current_round=trained_session.current_round,
-                            best_metric=trained_session.current_metric,
-                            rounds_history=[r.model_dump() for r in trained_session.rounds_history],
-                            episodes=trained_session.episodes,
-                            latest_model_zip_path=trained_session.latest_model_zip_path,
-                        )
-                    except TrainingInProgressError as e:
-                        sync_broadcast({"event": "training_conflict", "message": str(e)})
-                    except Exception as e:
-                        print(f"Error in continuous background training: {e}")
-                        sync_broadcast({"event": "error", "message": str(e)})
-
-                _spawn_background(_run_training_background())
-
-    return response
+    result = finished.get("result")
+    if not result:
+        raise HTTPException(status_code=500, detail="Studio chat produced no result.")
+    return StudioChatResponse.model_validate(result)
 
 
 @app.post("/api/v4/conversations/{conversation_id}/arena/update")
@@ -1461,6 +1708,53 @@ def validate_settings(config: LLMConfig):
     return res
 
 
+@app.get("/api/v4/jobs")
+def list_jobs(
+    conversation_id: str | None = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=100),
+):
+    """Recent jobs for this tenant (optionally one conversation), newest first."""
+    return [
+        job_public(job)
+        for job in jobs.list_jobs(
+            conversation_id=conversation_id, owner_id=current_owner(), limit=limit
+        )
+    ]
+
+
+@app.get("/api/v4/jobs/{job_id}")
+def get_job(job_id: str):
+    """Poll a job: its stage while it runs, its result once it succeeds, its retry hint on failure."""
+    job = jobs.get(job_id)
+    if not job or job.get("owner_id") != current_owner():
+        raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
+    view = job_public(job)
+    if job.get("status") == SUCCEEDED:
+        view["result"] = job.get("result")
+    return view
+
+
+@app.post("/api/v4/jobs/{job_id}/cancel")
+def cancel_job(job_id: str):
+    """Cooperative cancel: the job stops at the next stage boundary, never mid-write."""
+    job = jobs.get(job_id)
+    if not job or job.get("owner_id") != current_owner():
+        raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
+    if job.get("status") in (SUCCEEDED, FAILED, CANCELLED):
+        raise HTTPException(status_code=409, detail=f"Job already {job['status']}.")
+    accepted = jobs.request_cancel(job_id)
+    return {
+        "job_id": job_id,
+        "cancel_requested": True,
+        "accepted": accepted,
+        "detail": (
+            "Cancellation requested; the job stops at the next stage boundary."
+            if accepted
+            else "The job already finished before the request arrived."
+        ),
+    }
+
+
 @app.get("/api/v4/usage")
 def get_usage(
     conversation_id: str | None = Query(default=None),
@@ -1478,17 +1772,21 @@ def get_usage(
 
 @app.websocket("/ws/v4/{session_id}")
 async def websocket_telemetry(websocket: WebSocket, session_id: str):
-    """Streams live training frames, round metrics, and auto-tuner events."""
+    """Streams live training frames, round metrics, job stages and auto-tuner events."""
     await manager.connect(session_id, websocket)
     try:
         while True:
-            # Keep alive and listen for client commands
-            data = await websocket.receive_text()
+            for event in manager.take_pending(session_id):
+                await websocket.send_json(event)
+            try:
+                data = await asyncio.wait_for(websocket.receive_text(), timeout=0.2)
+            except asyncio.TimeoutError:
+                continue
             try:
                 msg = json.loads(data)
                 if msg.get("action") == "ping":
                     await websocket.send_json({"event": "pong", "session_id": session_id})
             except Exception:
                 pass
-    except WebSocketDisconnect:
+    except (WebSocketDisconnect, RuntimeError):
         manager.disconnect(session_id, websocket)

@@ -337,3 +337,17 @@ export interface UsageReport {
     remaining_usd: number | null
   }
 }
+
+export interface JobStatus {
+  job_id: string
+  conversation_id: string | null
+  kind: string
+  status: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
+  stage: string
+  detail?: string | null
+  error?: string | null
+  retryable?: boolean
+  created_at: string
+  updated_at: string
+  result?: StudioChatResponse
+}

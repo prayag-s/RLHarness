@@ -15,8 +15,8 @@ and the test history (covered by [progress.md](./progress.md), §10).
 > committed — **G3, G4 (scoping) and G9 are CLOSED**, with real authentication still outstanding
 > under G4 (`progress.md` §12). Phase **P0-B.2** is implemented and committed — **G2 is CLOSED**:
 > training, verification, export and interactive play all execute generated code only inside a
-> `bwrap` worker (`progress.md` §13). Phase **P1-C** is in progress: **G7 is CLOSED** (`progress.md`
-> §15.1); G5, G6 and G8 remain open.
+> `bwrap` worker (`progress.md` §13). Phase **P1-C** is in progress: **G5, G6 and G7 are CLOSED**
+> (`progress.md` §15.1–§15.2); G8 remains open.
 
 ---
 
@@ -197,6 +197,11 @@ no confidence interval, and no per-segment breakdown.
   client timeout had to be raised to 240 s to stop silent fallbacks.
 - **Why it blocks revenue:** a three-minute spinner with no progress, no cancel and no recovery is the
   single most common reason a trial user bounces. It also makes the API unusable for automation.
+- **Status: CLOSED (Phase P1-C.2).** `POST /chat` with `Prefer: respond-async` returns
+  `202 {job_id, stage}` in ~60 ms; `intake → env_synthesis → verification → arena → ready` are
+  persisted and published as `job_stage` events on `/ws/v4/{session_id}`; `GET /jobs/{id}` polls,
+  `POST /jobs/{id}/cancel` cancels at a stage boundary, and a restart fails the job with a retry hint
+  (`progress.md` §15.2). The synchronous form is preserved for simple clients.
 - **Fix:** `POST /chat` returns `202 {job_id, stage}` immediately; synthesis runs as a tracked job;
   stage events (`intake`, `env_synthesis`, `verification`, `arena`, `ready`) stream over the existing
   `/ws/v4/{session_id}`; add `POST /jobs/{job_id}/cancel` and refetch-on-reconnect semantics.
@@ -208,6 +213,12 @@ no confidence interval, and no per-segment breakdown.
   is SQLite behind a single file ([conversation_store.py](./backend/rl_ide/state/conversation_store.py) L44).
 - **Why it blocks revenue:** you cannot run two Uvicorn workers, cannot restart during a training run
   without losing it, and cannot scale past one machine.
+- **Status: CLOSED (Phase P1-C.2) for job and queue state.** Jobs live in a `jobs` table with atomic
+  claims; training is enqueued and run by a queue consumer, not by a coroutine in the request
+  process; both stores run SQLite in WAL mode so processes can share the file. **Residual:** SB3 models,
+  environment instances and the loop's training lock are still per-process, so several Uvicorn workers
+  with shared training state and resuming an interrupted round are not supported yet — an interrupted
+  job fails with a retry hint (`progress.md` §15.2).
 - **Fix:** move job/run state into the database, make training a worker consuming a queue (even a
   SQLite/Postgres table is enough), and let the API be stateless. This is the prerequisite for G5 as
   well.

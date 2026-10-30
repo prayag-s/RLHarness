@@ -494,13 +494,23 @@ export const App: React.FC = () => {
     )
 
     try {
-      const resp = await chatWithStudioOmni({
-        conversation_id: cid,
-        user_message: message,
-        dataset_id: attachedDataset?.dataset_id,
-        selected_options: answers || {},
-        training_params: explicitParams || trainingParams,
-      })
+      const resp = await chatWithStudioOmni(
+        {
+          conversation_id: cid,
+          user_message: message,
+          dataset_id: attachedDataset?.dataset_id,
+          selected_options: answers || {},
+          training_params: explicitParams || trainingParams,
+        },
+        (stage, detail) => {
+          addTimelineItem(
+            `Job stage: ${stage.replace(/_/g, ' ')}`,
+            detail || 'Working…',
+            'synthesis',
+            'info',
+          )
+        },
+      )
 
       if (resp.conversation_id) {
         setActiveConversationId(resp.conversation_id)

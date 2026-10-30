@@ -1146,3 +1146,50 @@ Verification (`tests/test_usage_metering.py`, 5 tests): a 1000/2000-token DeepSe
 and priced at $0.00027 + $0.0022; an unlisted model records 12 tokens at $0; a tenant at $5.00 with a
 $1.00 cap raises before the network call (`network_calls == []`); the endpoint is owner-scoped and
 returns 404 for another tenant's conversation.
+
+### 15.2 G5 + G6 — every studio turn is a durable job; training is a queue worker
+
+A turn took 2–3 minutes inside one HTTP request, and its work existed only as a coroutine: no id to
+poll, no cancel, and a restart erased it without a trace. Models, locks and sessions also lived only
+in `AutonomousLoopController` dicts.
+
+- **`jobs` table** ([job_store.py](./backend/rl_ide/state/job_store.py)) — `job_id`, conversation,
+  owner, kind, `status` (`queued|running|succeeded|failed|cancelled`), `stage`, `payload`, `result`,
+  `error`, `cancel_requested`. `claim_next()` takes a job atomically (`UPDATE … WHERE status='queued'`)
+  so two API processes cannot run the same one. Both stores now open SQLite in WAL mode with a
+  30 s busy timeout, which is what makes several processes share the file safely.
+- **`POST /chat` with `Prefer: respond-async`** returns `202 {job_id, stage}` in ~60 ms and runs the
+  turn on a worker thread. Without the header the call still blocks and returns the full response,
+  so existing clients and the test suite keep their contract.
+- **Progress is real.** `process_message` gained `progress_callback(stage, detail)` and
+  `should_cancel()`, reported at `intake → env_synthesis → verification → arena → ready`, checked at
+  the same boundaries so a cancel never interrupts a write. Stages are persisted on the job and
+  published to the websocket as `job_stage` events.
+- **`GET /jobs/{id}`, `GET /jobs?conversation_id=`, `POST /jobs/{id}/cancel`** — owner-scoped; a
+  cancel request flips a flag and the job stops at the next boundary.
+- **Training is claimed from the same table.** A turn that triggers training enqueues a `training`
+  job; `_drain_training_jobs()` claims and runs it (then exits — the queue is the database, not a
+  thread). The old in-process `_spawn_background` coroutine is gone from this path.
+- **Restart semantics.** `reconcile_interrupted()` fails any `queued|running` row with
+  *"Interrupted: the API restarted while this job was running… retry it."* and `retryable: true`, so
+  the UI can offer a retry instead of spinning forever.
+- **Delivery no longer needs the request's loop.** `ConnectionManager.publish()` is a thread-safe,
+  bounded queue that the websocket drains. The old code did `run_coroutine_threadsafe(…, loop)` with
+  a loop captured from the request — dead after a reload, and provably broken under TestClient
+  (`_UnixSelectorEventLoop … closed=True`), which is how the gap was found.
+
+Verification (`tests/test_jobs.py`, 9 tests): a queued job is claimed exactly once; a restart turns
+`running` into `failed`+retry; cancel is cooperative and refuses finished jobs; the runner stops at a
+stage boundary; the async endpoint answers in < 2 s and reaches `succeeded` with an arena; stages
+arrive over the websocket in order with the right `job_id`; the sync path still returns the full
+response and records a job; jobs are 404 for another tenant; the training consumer runs a queued job
+and stores `best_metric`.
+
+Frontend: `chatWithStudioOmni` now sends `Prefer: respond-async` and polls the job, surfacing each
+stage in the timeline; a 15-minute deadline replaces the silent hang.
+
+**Residual:** the SB3 model objects, env instances and the loop's training lock are still
+per-process (`global_store`, `AutonomousLoopController`). Job *state* is durable and training is
+queue-backed, but running two Uvicorn workers with shared training state, or resuming an in-flight
+training round after a restart, is still out of scope — the job fails cleanly instead. The legacy
+`POST /sessions/start` path still spawns its training in-process.

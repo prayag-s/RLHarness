@@ -35,6 +35,7 @@ from rl_ide.synthesizer.arena_builder import JITArenaSynthesizer
 from rl_ide.synthesizer.env_builder import JITEnvironmentSynthesizer, load_synthesized_env_class, instantiate_env
 from rl_ide.synthesizer.verifier import SandboxSmokeTester
 from rl_ide.state.records_store import save_records
+from rl_ide.state.job_store import JobCancelled
 from rl_ide.state.conversation_store import (
     ConversationStore,
     get_conversation_store,
@@ -506,8 +507,21 @@ class StudioOmniAgent:
         force_action: StudioActionType | None = None,
         broadcast_callback: Callable[[dict[str, Any]], None] | None = None,
         run_sync: bool = False,
+        progress_callback: Callable[[str, str | None], None] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> StudioChatResponse:
-        """Single unified entrypoint for continuous conversational studio interaction."""
+        """Single unified entrypoint for continuous conversational studio interaction.
+
+        ``progress_callback(stage, detail)`` reports the turn's stage so a long synthesis can be
+        polled instead of guessed at; ``should_cancel()`` is checked at the same boundaries and
+        raises :class:`JobCancelled`, so nothing is interrupted mid-write.
+        """
+
+        def report(stage: str, detail: str | None = None) -> None:
+            if progress_callback:
+                progress_callback(stage, detail)
+            if should_cancel and should_cancel():
+                raise JobCancelled(f"cancelled during {stage}")
         conv = self.conv_store.get_conversation(conversation_id)
         if not conv:
             conv = self.conv_store.create_conversation(
@@ -636,6 +650,7 @@ class StudioOmniAgent:
         # CASE 1: FIRST TURN — synthesize the environment, then its arena
         # ------------------------------------------------------------------
         if not current_arena_html or not blueprint:
+            report("intake", "Interviewing for the task spec")
             intake_agent = IntakeArchitectAgent(self._llm_client)
 
             intake_resp = intake_agent.interview(
@@ -677,6 +692,7 @@ class StudioOmniAgent:
                 save_records(ws_dir, active_dataset.df.to_dict(orient="records"))
 
             if blueprint:
+                report("env_synthesis", f"Writing the environment for {blueprint.task_title}")
                 try:
                     code_str, _, env_cls = self.env_synthesizer.synthesize(
                         blueprint=blueprint,
@@ -684,6 +700,7 @@ class StudioOmniAgent:
                         workspace_dir=ws_dir,
                     )
                     current_env_code = code_str
+                    report("verification", "Verifying the generated environment")
                     sample_state = self._render_sample_state(env_cls, active_dataset)
                     synthesis_warnings = list(getattr(self.env_synthesizer, "last_warnings", []) or [])
                 except Exception as ex:
@@ -718,6 +735,7 @@ class StudioOmniAgent:
                     action_plan=action_plan,
                 )
 
+            report("arena", "Designing the arena")
             arena_html_str, _ = self.arena_synthesizer.synthesize(
                 blueprint=blueprint,
                 sample_arena_state=sample_state,
@@ -802,6 +820,7 @@ class StudioOmniAgent:
                     if "episodes_per_round" in t_params:
                         blueprint.episodes_per_round = int(t_params["episodes_per_round"])
 
+                report("env_synthesis", "Re-anchoring the environment to the new task")
                 code_str, _, env_cls = self.env_synthesizer.synthesize(
                     blueprint=blueprint,
                     dataset=active_dataset,
@@ -811,6 +830,7 @@ class StudioOmniAgent:
                 # A new task invalidates the previous policy.
                 self.session_store.delete_model(conversation_id)
                 sample_state = self._render_sample_state(env_cls, active_dataset)
+                report("arena", "Rebuilding the arena for the new task")
                 current_arena_html, _ = self.arena_synthesizer.synthesize(
                     blueprint=blueprint,
                     sample_arena_state=sample_state,
@@ -825,6 +845,7 @@ class StudioOmniAgent:
 
         # Layer 1: environment mechanics
         if ExecutionTarget.ENV_SIM_MECHANICS in action_plan.targets and blueprint is not None:
+            report("env_synthesis", "Applying the requested mechanics change")
             try:
                 blueprint.pending_directive = user_message
                 code_str, _, env_cls = self.env_synthesizer.synthesize(
@@ -947,6 +968,7 @@ class StudioOmniAgent:
 
         # Layer 4: arena visuals
         if ExecutionTarget.ARENA_VISUAL_UI in action_plan.targets and blueprint is not None:
+            report("arena", "Restyling the arena")
             sample_state = None
             try:
                 if current_env_code and env_file.exists():
@@ -1080,6 +1102,7 @@ class StudioOmniAgent:
             if act and act not in effective_actions:
                 effective_actions.append(act)
 
+        report("ready")
         return StudioChatResponse(
             conversation_id=conversation_id,
             status=status,

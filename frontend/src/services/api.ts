@@ -12,6 +12,7 @@ import {
   ConversationDetail,
   TrainingParams,
   StudioChatResponse,
+  JobStatus,
   UsageReport,
 } from '../types'
 
@@ -137,12 +138,50 @@ export interface StudioChatParams {
   run_sync?: boolean
 }
 
+export async function getJob(jobId: string): Promise<JobStatus> {
+  const res = await fetch(`${API_V4}/jobs/${jobId}`)
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Job lookup failed' }))
+    throw new Error(err.detail || 'Job lookup failed')
+  }
+  return res.json()
+}
+
+export async function cancelJob(jobId: string): Promise<void> {
+  await fetch(`${API_V4}/jobs/${jobId}/cancel`, { method: 'POST' })
+}
+
+// Synthesis takes minutes: poll the job so the UI can show its stage instead of a dead spinner.
+async function waitForJob(
+  jobId: string,
+  onStage?: (stage: string, detail?: string | null) => void,
+): Promise<StudioChatResponse> {
+  const deadline = Date.now() + 15 * 60 * 1000
+  let lastStage = ''
+  for (;;) {
+    const job = await getJob(jobId)
+    if (job.stage !== lastStage) {
+      lastStage = job.stage
+      onStage?.(job.stage, job.detail)
+    }
+    if (job.status === 'succeeded') {
+      if (!job.result) throw new Error('Job finished without a result')
+      return job.result
+    }
+    if (job.status === 'failed') throw new Error(job.error || 'Studio job failed')
+    if (job.status === 'cancelled') throw new Error(job.error || 'Studio job cancelled')
+    if (Date.now() > deadline) throw new Error('Studio job exceeded 15 minutes; check GET /api/v4/jobs')
+    await new Promise((resolve) => setTimeout(resolve, 1200))
+  }
+}
+
 export async function chatWithStudioOmni(
   params: StudioChatParams,
+  onStage?: (stage: string, detail?: string | null) => void,
 ): Promise<StudioChatResponse> {
   const res = await fetch(`${API_V4}/conversations/${params.conversation_id}/chat`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', Prefer: 'respond-async' },
     body: JSON.stringify({
       user_message: params.user_message,
       dataset_id: params.dataset_id,
@@ -151,6 +190,12 @@ export async function chatWithStudioOmni(
       run_sync: params.run_sync ?? false,
     }),
   })
+
+  if (res.status === 202) {
+    const job = await res.json()
+    onStage?.(job.stage, job.detail)
+    return waitForJob(job.job_id, onStage)
+  }
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: 'Omni chat failed' }))
