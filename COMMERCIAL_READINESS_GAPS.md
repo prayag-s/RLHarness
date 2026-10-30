@@ -181,7 +181,7 @@ no confidence interval, and no per-segment breakdown.
   `(owner_id, dataset_id)`, persisted rather than held in a dict; scope every query by the caller;
   keep `RL_IDE_API_TOKEN` working as the single-user fallback so local usage does not regress.
 - **Effort:** ~2 days.
-- **Status: CLOSED for scoping in Phase P0-B.1 (authentication still open).** `conversations.owner_id`
+- **Status: CLOSED for scoping in Phase P0-B.1; authentication closed in Phase P2-C (below).** `conversations.owner_id`
   with a migration, owner-scoped list/get/delete, and a durable `DatasetStore` (`runs/datasets.db` +
   gzipped rows) that fixes uploads vanishing on restart. Cross-owner reads and deletes return 404.
   **Residual:** the owner is read from a trusted `x-owner-id` header — that is tenancy plumbing, not
