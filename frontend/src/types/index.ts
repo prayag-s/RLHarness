@@ -305,3 +305,35 @@ export interface ActivityTimelineItem {
   status: 'pending' | 'success' | 'warning' | 'info'
   data?: any
 }
+
+export interface UsageReport {
+  totals: {
+    calls: number
+    input_tokens: number
+    output_tokens: number
+    cost_usd: number
+  }
+  by_model: Array<{
+    provider: string
+    model: string
+    calls: number
+    input_tokens: number
+    output_tokens: number
+    cost_usd: number
+  }>
+  recent: Array<{
+    conversation_id: string | null
+    provider: string
+    model: string
+    input_tokens: number
+    output_tokens: number
+    cost_usd: number
+    latency_ms: number
+    created_at: string
+  }>
+  budget: {
+    cap_usd: number | null
+    spent_usd: number
+    remaining_usd: number | null
+  }
+}

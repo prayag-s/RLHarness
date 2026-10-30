@@ -51,6 +51,7 @@ from rl_ide.export.exporter import PolicyExporter
 from rl_ide.export.registry import RunBundleRegistry, BundleMetadata, BundleDetails
 from rl_ide.ingest.loader import IngestedDataset, load_bytes
 from rl_ide.ingest.sql_connector import test_sql_connection, load_sql_dataset
+from rl_ide.llm import metering
 from rl_ide.llm.client import (
     LLMConfig,
     validate_llm_connection,
@@ -144,6 +145,12 @@ def require_verified_llm() -> None:
         )
 
 
+def bind_usage_context(conversation_id: str | None = None) -> None:
+    """Attributes LLM spend made while answering this request to a conversation and tenant."""
+    metering.current_conversation_id.set(conversation_id)
+    metering.current_owner_id.set(current_owner())
+
+
 # Optional shared-secret gate (enabled only when RL_IDE_API_TOKEN is set).
 _API_TOKEN = os.environ.get("RL_IDE_API_TOKEN", "").strip()
 
@@ -165,6 +172,7 @@ async def _optional_api_token(request, call_next):
             from fastapi.responses import JSONResponse
             return JSONResponse({"detail": "Invalid or missing API token."}, status_code=401)
     _owner_ctx.set((request.headers.get("x-owner-id") or "local").strip() or "local")
+    metering.current_owner_id.set(current_owner())
     return await call_next(request)
 
 
@@ -278,6 +286,7 @@ class ArchitectChatRequest(BaseModel):
 def architect_chat(req: ArchitectChatRequest):
     """Conversational Intake interview evaluating user intent across the 5 Pillars."""
     require_verified_llm()
+    bind_usage_context(req.conversation_id)
     dataset = dataset_store.get(req.dataset_id, current_owner()) if req.dataset_id else None
     architect = IntakeArchitectAgent()
     resp = architect.interview(
@@ -370,6 +379,7 @@ class SessionStartRequest(BaseModel):
 async def start_session(req: SessionStartRequest):
     """Synthesizes env_module.py + arena.html, verifies via smoke tester, and runs autonomous loop."""
     require_verified_llm()
+    bind_usage_context(req.session_id)
     import uuid
     sid = req.session_id or f"sess_{uuid.uuid4().hex[:8]}"
     ws_dir = global_store.base_dir / sid
@@ -870,6 +880,7 @@ def run_training_task(
 async def conversation_omni_chat(conversation_id: str, req: UnifiedConversationChatRequest):
     """Unified Codex-style omni-agent chat endpoint for continuous conversation at any stage."""
     require_verified_llm()
+    bind_usage_context(conversation_id)
     msg = req.get_effective_message()
     if not msg.strip():
         raise HTTPException(status_code=400, detail="User message cannot be empty.")
@@ -1448,6 +1459,21 @@ def validate_settings(config: LLMConfig):
     res = validate_llm_connection(config)
     res["valid"] = res.get("success", False)
     return res
+
+
+@app.get("/api/v4/usage")
+def get_usage(
+    conversation_id: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=500),
+):
+    """What this conversation, or this tenant, has cost: tokens, priced spend and the budget cap."""
+    if conversation_id:
+        conv = get_conversation_store().get_conversation(conversation_id, owner_id=current_owner())
+        if not conv:
+            raise HTTPException(status_code=404, detail=f"Conversation '{conversation_id}' not found.")
+    return metering.usage_report(
+        conversation_id=conversation_id, owner_id=current_owner(), limit=limit
+    )
 
 
 @app.websocket("/ws/v4/{session_id}")

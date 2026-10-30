@@ -1115,3 +1115,34 @@ ps -> bwrap ... python -m rl_ide.security.worker --mode serve   (180 MB RSS)
   verification are to be rebuilt as a separate, cost-bounded harness.
 - `RL_IDE_LIVE_LLM=1` is inherited by child processes; a live run therefore also disables the
   offline-fallback safety net for any nested pytest invocation.
+
+---
+
+## 15. v5.0 — Phase P1-C: operable (2026-10-30)
+
+### 15.1 G7 — usage metering and a tenant budget cap
+
+`llm/client.py` recorded nothing about tokens or spend, so the product could not invoice, could not
+cap a runaway customer, and could not tell a buyer what a run costs.
+
+- **Capture at the provider boundary.** Every `generate()` on DeepSeek/OpenAI/Anthropic/Ollama now
+  times the call and reads the `usage` block the provider returns
+  ([metering.py](./backend/rl_ide/llm/metering.py)). Anthropic's `input_tokens`/`output_tokens` and
+  the OpenAI-style `prompt_tokens`/`completion_tokens` are both understood.
+- **Price locally.** A per-1M-token table prices each call (`deepseek-chat` 0.27/1.10, `gpt-4o`
+  2.50/10.00, `claude-3-5-sonnet` 3.00/15.00, local Ollama 0), overridable per contract with
+  `RL_IDE_LLM_PRICES`. An unlisted model is still recorded, with tokens and zero cost.
+- **Persist, per conversation and per tenant.** New `llm_usage` table in the existing
+  `runs/conversations.db` ([conversation_store.py](./backend/rl_ide/state/conversation_store.py)),
+  written with request-scoped attribution (`bind_usage_context`), so spend follows the conversation
+  and the `x-owner-id` tenant even though the provider call happens in a worker thread.
+- **Cap before spending.** `RL_IDE_OWNER_BUDGET_USD` makes `enforce_budget()` raise
+  `BudgetExceeded` *before* the HTTP call, so a capped tenant fails cleanly instead of finishing the
+  month in debt.
+- **Expose it.** `GET /api/v4/usage[?conversation_id=]` returns totals, a per-model split, the last
+  50 calls and the remaining budget; the header shows `$spent` for the active conversation.
+
+Verification (`tests/test_usage_metering.py`, 5 tests): a 1000/2000-token DeepSeek call is recorded
+and priced at $0.00027 + $0.0022; an unlisted model records 12 tokens at $0; a tenant at $5.00 with a
+$1.00 cap raises before the network call (`network_calls == []`); the endpoint is owner-scoped and
+returns 404 for another tenant's conversation.

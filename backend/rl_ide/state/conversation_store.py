@@ -98,7 +98,125 @@ class ConversationStore:
                     )
                 except Exception:
                     pass
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS llm_usage (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    conversation_id TEXT,
+                    owner_id TEXT NOT NULL DEFAULT 'local',
+                    provider TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    input_tokens INTEGER NOT NULL DEFAULT 0,
+                    output_tokens INTEGER NOT NULL DEFAULT 0,
+                    cost_usd REAL NOT NULL DEFAULT 0,
+                    latency_ms REAL NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL
+                );
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_llm_usage_conversation ON llm_usage(conversation_id);"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_llm_usage_owner ON llm_usage(owner_id, created_at);"
+            )
             conn.commit()
+
+    def record_usage(
+        self,
+        *,
+        provider: str,
+        model: str,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        cost_usd: float = 0.0,
+        latency_ms: float = 0.0,
+        conversation_id: str | None = None,
+        owner_id: str = "local",
+    ) -> None:
+        """Records one provider call so a run can be invoiced, capped and explained."""
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO llm_usage
+                    (conversation_id, owner_id, provider, model, input_tokens, output_tokens,
+                     cost_usd, latency_ms, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """,
+                (
+                    conversation_id,
+                    owner_id,
+                    provider,
+                    model,
+                    int(input_tokens),
+                    int(output_tokens),
+                    float(cost_usd),
+                    float(latency_ms),
+                    utc_now_iso(),
+                ),
+            )
+            conn.commit()
+
+    def usage_summary(
+        self,
+        *,
+        conversation_id: str | None = None,
+        owner_id: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Aggregates recorded calls, scoped by conversation and/or owner."""
+        clauses, params = [], []
+        if conversation_id:
+            clauses.append("conversation_id = ?")
+            params.append(conversation_id)
+        if owner_id:
+            clauses.append("owner_id = ?")
+            params.append(owner_id)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+
+        with self._get_connection() as conn:
+            totals = conn.execute(
+                f"""
+                SELECT COUNT(*) AS calls,
+                       COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                       COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                       COALESCE(SUM(cost_usd), 0.0) AS cost_usd
+                FROM llm_usage {where};
+                """,
+                params,
+            ).fetchone()
+            by_model = conn.execute(
+                f"""
+                SELECT provider, model, COUNT(*) AS calls,
+                       COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                       COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                       COALESCE(SUM(cost_usd), 0.0) AS cost_usd
+                FROM llm_usage {where}
+                GROUP BY provider, model
+                ORDER BY cost_usd DESC;
+                """,
+                params,
+            ).fetchall()
+            recent = conn.execute(
+                f"""
+                SELECT conversation_id, provider, model, input_tokens, output_tokens,
+                       cost_usd, latency_ms, created_at
+                FROM llm_usage {where}
+                ORDER BY id DESC LIMIT ?;
+                """,
+                [*params, int(limit)],
+            ).fetchall()
+
+        return {
+            "totals": {
+                "calls": int(totals["calls"]),
+                "input_tokens": int(totals["input_tokens"]),
+                "output_tokens": int(totals["output_tokens"]),
+                "cost_usd": round(float(totals["cost_usd"]), 6),
+            },
+            "by_model": [dict(row) for row in by_model],
+            "recent": [dict(row) for row in recent],
+        }
 
     def create_conversation(
         self,

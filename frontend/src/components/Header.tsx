@@ -24,6 +24,8 @@ interface HeaderProps {
   driftStatus?: string
   onOpenConversations: () => void
   conversationCount?: number
+  usageCostUsd?: number
+  usageCalls?: number
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -38,6 +40,8 @@ export const Header: React.FC<HeaderProps> = ({
   driftStatus = 'healthy',
   onOpenConversations,
   conversationCount = 0,
+  usageCostUsd = 0,
+  usageCalls = 0,
 }) => {
   const getProviderLabel = () => {
     switch (llmSettings.provider) {
@@ -95,6 +99,19 @@ export const Header: React.FC<HeaderProps> = ({
             </span>
           )}
         </button>
+        {/* Spend so far: what this run has cost in provider tokens */}
+        {usageCalls > 0 && (
+          <div
+            className="flex items-center space-x-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border bg-gray-900 border-gray-700 text-gray-300"
+            title={`${usageCalls} provider call${usageCalls === 1 ? '' : 's'} recorded for this conversation`}
+          >
+            <span className="font-mono">
+              ${usageCostUsd < 0.01 ? usageCostUsd.toFixed(4) : usageCostUsd.toFixed(2)}
+            </span>
+            <span className="text-gray-500 text-[10px]">spent</span>
+          </div>
+        )}
+
         {/* Drift Status Indicator */}
         <div
           className={`flex items-center space-x-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border ${

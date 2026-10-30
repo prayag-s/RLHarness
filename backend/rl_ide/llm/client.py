@@ -12,6 +12,8 @@ from typing import Any
 import httpx
 from pydantic import BaseModel, Field
 
+from rl_ide.llm.metering import BudgetExceeded, capture_response, enforce_budget
+
 
 class LLMConfig(BaseModel):
     """Configuration for BYOK LLM connection."""
@@ -140,10 +142,13 @@ class DeepSeekLLMClient(BaseLLMClient):
         }
 
         req_timeout = timeout if timeout is not None else self.config.timeout
+        enforce_budget()
+        started = time.perf_counter()
         with httpx.Client(timeout=req_timeout) as client:
             resp = client.post(endpoint, headers=headers, json=payload)
             resp.raise_for_status()
             data = resp.json()
+            capture_response("deepseek", model_name, data, started)
             choice = data["choices"][0]
             msg = choice.get("message", {})
             content = msg.get("content") or ""
@@ -185,10 +190,13 @@ class OpenAILLMClient(BaseLLMClient):
         }
 
         req_timeout = timeout if timeout is not None else self.config.timeout
+        enforce_budget()
+        started = time.perf_counter()
         with httpx.Client(timeout=req_timeout) as client:
             resp = client.post(endpoint, headers=headers, json=payload)
             resp.raise_for_status()
             data = resp.json()
+            capture_response("openai", self.config.model_name or "gpt-4o", data, started)
             return data["choices"][0]["message"]["content"]
 
 
@@ -218,10 +226,15 @@ class AnthropicLLMClient(BaseLLMClient):
             payload["system"] = system_prompt
 
         req_timeout = timeout if timeout is not None else self.config.timeout
+        enforce_budget()
+        started = time.perf_counter()
         with httpx.Client(timeout=req_timeout) as client:
             resp = client.post(endpoint, headers=headers, json=payload)
             resp.raise_for_status()
             data = resp.json()
+            capture_response(
+                "anthropic", self.config.model_name or "claude-3-5-sonnet-20241022", data, started
+            )
             return data["content"][0]["text"]
 
 
@@ -248,10 +261,12 @@ class OllamaLLMClient(BaseLLMClient):
         }
 
         req_timeout = timeout if timeout is not None else self.config.timeout
+        started = time.perf_counter()
         with httpx.Client(timeout=req_timeout) as client:
             resp = client.post(endpoint, headers=headers, json=payload)
             resp.raise_for_status()
             data = resp.json()
+            capture_response("ollama", self.config.model_name or "llama3.1", data, started)
             return data["choices"][0]["message"]["content"]
 
 

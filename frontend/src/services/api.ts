@@ -12,6 +12,7 @@ import {
   ConversationDetail,
   TrainingParams,
   StudioChatResponse,
+  UsageReport,
 } from '../types'
 
 const API_V4 = '/api/v4'
@@ -515,4 +516,18 @@ export function connectTelemetryWebSocket(
   }
 
   return ws
+}
+
+// -----------------------------------------------------------------------------
+// Usage & cost accounting (G7)
+// -----------------------------------------------------------------------------
+
+export async function getUsage(conversationId?: string): Promise<UsageReport> {
+  const query = conversationId ? `?conversation_id=${encodeURIComponent(conversationId)}` : ''
+  const res = await fetch(`${API_V4}/usage${query}`)
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Usage lookup failed' }))
+    throw new Error(err.detail || 'Usage lookup failed')
+  }
+  return res.json()
 }

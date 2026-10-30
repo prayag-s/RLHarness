@@ -29,6 +29,7 @@ import {
 import {
   chatWithArchitect,
   chatWithStudioOmni,
+  getUsage,
   lockConversationArena,
   updateArenaLook,
   startSynthesisSession,
@@ -95,6 +96,7 @@ export const App: React.FC = () => {
   const [isCodeInspectorOpen, setIsCodeInspectorOpen] = useState(false)
   const [isSQLModalOpen, setIsSQLModalOpen] = useState(false)
   const [registryCount, setRegistryCount] = useState(0)
+  const [usage, setUsage] = useState<{ calls: number; cost_usd: number }>({ calls: 0, cost_usd: 0 })
 
   // Mandatory LLM Verification State
   const [isLLMVerified, setIsLLMVerified] = useState<boolean>(false)
@@ -224,6 +226,20 @@ export const App: React.FC = () => {
   useEffect(() => {
     loadConversationsList()
   }, [])
+
+  // Spend is per conversation: refresh when it changes and after every studio turn.
+  const refreshUsage = React.useCallback(async (cid: string | null | undefined) => {
+    try {
+      const report = await getUsage(cid || undefined)
+      setUsage({ calls: report.totals.calls, cost_usd: report.totals.cost_usd })
+    } catch {
+      // usage is informational; never block the studio on it
+    }
+  }, [])
+
+  useEffect(() => {
+    refreshUsage(activeConversationId)
+  }, [activeConversationId, refreshUsage])
 
   const handleSelectConversation = async (cid: string) => {
     try {
@@ -557,6 +573,7 @@ export const App: React.FC = () => {
       }
 
       loadConversationsList()
+      refreshUsage(cid)
       return resp
     } catch (err: any) {
       if (err.message && (err.message.includes('verified') || err.message.includes('mandatory') || err.message.includes('403'))) {
@@ -954,6 +971,8 @@ export const App: React.FC = () => {
         driftStatus={driftStatus}
         onOpenConversations={() => setIsConversationsOpen(true)}
         conversationCount={conversations.length}
+        usageCostUsd={usage.cost_usd}
+        usageCalls={usage.calls}
       />
 
       {/* Main Studio 3-Panel Workspace */}

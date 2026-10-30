@@ -15,7 +15,8 @@ and the test history (covered by [progress.md](./progress.md), §10).
 > committed — **G3, G4 (scoping) and G9 are CLOSED**, with real authentication still outstanding
 > under G4 (`progress.md` §12). Phase **P0-B.2** is implemented and committed — **G2 is CLOSED**:
 > training, verification, export and interactive play all execute generated code only inside a
-> `bwrap` worker (`progress.md` §13). Phase P1-C (G5–G8) remains open.
+> `bwrap` worker (`progress.md` §13). Phase **P1-C** is in progress: **G7 is CLOSED** (`progress.md`
+> §15.1); G5, G6 and G8 remain open.
 
 ---
 
@@ -217,6 +218,10 @@ no confidence interval, and no per-segment breakdown.
   no quota, no budget, no per-tenant accounting.
 - **Why it blocks revenue:** you cannot invoice, cannot cap a runaway customer, cannot tell an
   enterprise buyer what a run costs, and cannot detect that synthesis on a large file is burning money.
+- **Status: CLOSED (Phase P1-C.1).** Every provider call records `(conversation_id, owner_id,
+  provider, model, input_tokens, output_tokens, cost_usd, latency_ms)` in the `llm_usage` table,
+  `GET /api/v4/usage` exposes totals, a per-model split and the remaining budget, and
+  `RL_IDE_OWNER_BUDGET_USD` fails the call *before* it is made (`progress.md` §15.1).
 - **Fix:** capture `usage` from each provider response, persist `(conversation_id, provider, model,
   input_tokens, output_tokens, cost_estimate, latency_ms)`, expose it per conversation and in
   aggregate; add an optional per-tenant budget that fails the job cleanly.
