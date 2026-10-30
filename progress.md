@@ -1380,3 +1380,101 @@ zero bytes, that 200 sequential writes never accumulate one, and that a delete r
 - **G13 is the gate only.** Enterprise provider targets (Azure OpenAI, self-hosted) are still open,
   and `x-owner-id` is still plumbing rather than authentication (G4).
 
+
+---
+
+## 17. v5.2 — Phase P2-B: the scorecard does not go stale (G11)
+
+The scorecard proves a policy *was* good on held-out rows. Nothing checked that it still is. Drift
+detection had existed since v4.0 and was imported by exactly one module, so the header badge was a
+hardcoded `unmonitored` — honest about the gap, and the gap was real.
+
+### 17.1 What is now wired
+
+- **The observation the policy actually saw** is attached to every interaction: `serve` mode records
+  it in `predict()` and returns it as `obs_vector`; the legacy in-process path captures it in
+  `policy_predict`. Generated code never had to expose anything.
+- **[live.py](./backend/rl_ide/drift/live.py)** — `DriftMonitor` keeps a rolling window of
+  observations and action probabilities and scores it with the existing `DriftDetector`;
+  `fit_baseline_from_episodes` builds the baseline from the conversation's own stored episodes;
+  `DriftStatusStore` persists the verdict beside the conversation.
+- **`/interact` scores every step** and returns a `drift` block; a confirmed crossing broadcasts
+  `drift_warning` over the websocket. Monitoring can never break play: a missing baseline, a garbage
+  observation or an exception in scoring is swallowed with a warning and the step still returns.
+- **Training refits the baseline** (`_refresh_drift_baseline`) and drops the in-memory monitor, so a
+  retrained policy is not judged against the policy it replaced. Deleting a conversation forgets its
+  state.
+- **The header badge is real**: `GET /conversations/{id}` returns `drift` + `drift_status`
+  (`unmonitored` / `warming_up` / `healthy` / `drifted`) and the badge shows the sample count and the
+  reasons as its tooltip.
+
+### 17.2 Two defects the wiring exposed
+
+**The only existing caller was broken.** `exporter.py` called `detector.detect_drift(...)` and read
+`sig.drift_detected` and `sig.feature_psi_max`. `DriftDetector` exposes `check_drift` returning
+`DriftReport` with `is_drifted` / `max_psi`, and `DriftBaseline.load()` was being handed a mapping
+where it required a path. Both sat inside a bare `except: pass`, so **every exported `.runbundle`
+reported `healthy` for any input at all** — the most dangerous kind of monitoring bug. It now uses
+the real API and reports `unmonitored` plus the error when it genuinely cannot judge.
+
+**PSI was unusable at live sample sizes.** Empty live bins were clipped to `1e-4` and then dominated
+the sum: twenty in-distribution observations scored PSI **1.78** against their own baseline, i.e.
+every small batch looked like an incident. Three changes, each measured:
+
+| Change | Effect on unchanged traffic (30 seeds) |
+|---|---|
+| continuity correction (½ sample per bin) on both histograms | PSI 1.78 → 0.43 at n=20 |
+| coarser bins for live windows (deciles → 5) | median PSI 0.43 → 0.22 at n=20, 0.05 at n=100 |
+| live threshold 0.5 (textbook 0.25 assumes thousands of rows) + two consecutive windows |
+
+Shipped defaults are `window=50, stride=5, confirmations=2, bins=5, psi=0.5`
+(`RL_IDE_DRIFT_WINDOW` / `RL_IDE_DRIFT_STRIDE` override the first two). Measured over 100 healthy
+sessions of 200 interactions each: **2 flagged (2 %), both from the action-rate signal, none from
+PSI**. Genuinely shifted traffic is confirmed after **55 interactions**, every time.
+
+### 17.3 Verification
+
+- `backend/tests/test_drift_live.py` — 20 tests: healthy traffic stays quiet, shifted inputs are
+  reported with the PSI reason, a too-small window says `warming_up` instead of guessing, a transient
+  spike clears, a single crossing is *not* an incident, missing probabilities do not fabricate
+  confidence, garbage observations are ignored, status survives a restart, a baseline fits from
+  stored episodes and is `None` when there are none, `DriftBaseline.load` accepts a mapping, the
+  report exposes the real field names (guarding the exporter contract), `/interact` scores and
+  broadcasts, a missing baseline leaves the step untouched, a baseline without policy probabilities
+  monitors inputs only, an observation is captured even when the policy is never called, and the last
+  verdict stands between judgements. Two calibration tests pin both bounds in both configurations:
+  with a full policy baseline (≤1 of 20 healthy sessions flagged) and with the production
+  input-only baseline (**0 of 50** healthy sessions flagged, drift confirmed by interaction 100).
+- Live validation on a real trained session (`deepseek-flash`, tenant `acme`, 100 episodes, real
+  bwrap serve worker):
+
+```text
+GET /conversations/{id}                     -> drift_status: warming_up   (baseline fitted from the
+                                               100 stored episodes, no click required)
+POST /sessions/{id}/interact   x50          -> step 1  warming_up, samples=1
+                                               ...samples accumulate from the environment itself,
+                                               even though a human click never calls the policy
+                                               step 50 first window: PSI 0.530 on state_var_2 > 0.5
+                                                       status healthy, confirmed=False  (one crossing
+                                                       is not an incident)
+                                               step 55 second window: PSI 0.423 -> healthy
+GET /conversations/{id}                     -> drift_status: healthy, samples: 50
+```
+
+**Three defects this live run caught that the unit tests did not:**
+1. `_refresh_drift_baseline` called `model_dump()` on `SessionState.episodes`, which are dicts — it
+   failed a training job *after* training had succeeded. Fixed, and the whole refresh is now wrapped
+   so an advisory baseline can never fail a run.
+2. The baseline never appeared at all, because stored episodes use the API shape
+   (`{"obs": [...], "action": 2}`) rather than the `EpisodeLog` contract. `fit_baseline_from_episodes`
+   now reads both, and the header went from `unmonitored` to `warming_up` on a trained session.
+3. No observation was reaching the monitor: `interactive_step` does not call the policy when the
+   human supplies the action, so `predict()` never ran. Observations are now captured by wrapping
+   `env.step`/`env.reset`, which works however the generated module drives itself.
+
+A fourth was cosmetic but visible: the status flipped back to `warming_up` on every step between
+judgements, erasing a real verdict on the next click.
+
+- Gates: **`pytest -q` → 163 passed, 2 skipped, 0 failed in 10:05**; fast gate
+  (`-m "not slow and not live_llm"`) → **99 passed, 2 skipped**; frontend `tsc --noEmit` +
+  `vite build` clean.

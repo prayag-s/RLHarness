@@ -296,6 +296,28 @@ no confidence interval, and no per-segment breakdown.
 - **Fix:** score each live `/interact` observation against the stored baseline, broadcast a
   `drift_warning` event when the quantile boundary is crossed, and show the status in the header.
 - **Effort:** ~1 day.
+- **Status: CLOSED in Phase P2-B.** Every `/interact` now reports the observation the policy saw
+  (from the serve worker, or captured in `policy_predict` on the legacy path), `DriftMonitor` scores
+  a rolling window against the baseline fitted from that conversation's own training episodes
+  (refitted on every retrain), `drift_warning` is broadcast when a crossing is *confirmed*, and
+  `GET /conversations/{id}` returns `drift` / `drift_status` so the header badge reflects reality
+  instead of a hardcoded `unmonitored`. The status is persisted beside the conversation, so a
+  restart cannot quietly reset a drifting policy to "unmonitored".
+- **Two defects found while wiring it:**
+  1. The one caller that existed was broken. `exporter.py` called `detector.detect_drift(...)` and
+     read `sig.drift_detected` / `sig.feature_psi_max` — none of which exist — and
+     `DriftBaseline.load()` was given a mapping where it required a path. All of it sat inside a bare
+     `except: pass`, so **every exported bundle reported `healthy` for any input**. Fixed to the real
+     API, and a failure now reports `unmonitored` with the error instead of a false all-clear.
+  2. The PSI estimator was unusable on small batches: an empty live bin was clipped to `1e-4` and
+     dominated the sum, so twenty in-distribution observations scored PSI **1.78** against their own
+     baseline. A continuity correction, coarser bins for live windows, and a live-specific threshold
+     bring measured false positives to **0 of 50 healthy 200-interaction sessions** (input-only
+     baseline, the production case) while genuine drift is confirmed after **55 interactions**.
+     The numbers and the calibration tests are in `backend/tests/test_drift_live.py`.
+- **Status: also requires the observation to reach the monitor.** A human click supplies the action,
+  so `interactive_step` never called the policy and nothing was scored. Observations are captured by
+  wrapping `env.step`/`env.reset`, which works however the generated module drives itself.
 
 #### G12. LLM-authored control tasks are not reliably learnable
 - **Evidence:** the same inventory prompt produced 100 %, 62 %, 18 %, 6 % and 100 % success across
@@ -444,6 +466,13 @@ the four model-backed actions refuse, in a machine-readable way; the arena is vi
 before the bespoke canvas exists and is labelled honestly if that canvas fails; an environment whose
 success criteria can never fire is repaired and re-verified rather than trained against.
 All met, with a live measurement in `progress.md` §16.
+
+**Phase P2-B — "the scorecard does not go stale" (≈1 day) — DONE (2026-10-30)**
+G11.
+Acceptance: a policy fed inputs it never saw during training is reported as drifting within a bounded
+number of live interactions, unchanged traffic stays quiet, the verdict survives a restart, and an
+exported bundle's drift verdict is real rather than a constant.
+All met; the wiring also uncovered two silent defects in the existing detector (see G11).
 
 Only after these does G10 (sequential tasks) make sense — it is a value upgrade, not a
 trust-building one.

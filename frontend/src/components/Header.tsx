@@ -22,6 +22,8 @@ interface HeaderProps {
   isExporting: boolean
   hasActivePolicy: boolean
   driftStatus?: string
+  driftDetail?: string
+  driftSamples?: number
   onOpenConversations: () => void
   conversationCount?: number
   usageCostUsd?: number
@@ -37,7 +39,9 @@ export const Header: React.FC<HeaderProps> = ({
   onExport,
   isExporting,
   hasActivePolicy,
-  driftStatus = 'healthy',
+  driftStatus = 'unmonitored',
+  driftDetail,
+  driftSamples = 0,
   onOpenConversations,
   conversationCount = 0,
   usageCostUsd = 0,
@@ -60,6 +64,16 @@ export const Header: React.FC<HeaderProps> = ({
   }
 
   const provider = getProviderLabel()
+
+  const driftTitle =
+    driftDetail ||
+    (driftStatus === 'healthy'
+      ? 'Drift monitor: live observations still match the training baseline'
+      : driftStatus === 'unmonitored'
+        ? 'No training baseline yet — train the policy to monitor drift'
+        : driftStatus === 'warming_up'
+          ? 'Collecting live observations before judging drift'
+          : 'Drift detected: the live inputs or actions moved away from the training baseline')
 
   return (
     <header className="h-14 border-b border-gray-800 bg-gray-950/95 backdrop-blur px-4 flex items-center justify-between z-20">
@@ -112,31 +126,32 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
         )}
 
-        {/* Drift Status Indicator */}
+        {/* Drift Status Indicator: scored live against the training baseline on every interact. */}
         <div
           className={`flex items-center space-x-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border ${
             driftStatus === 'healthy'
               ? 'bg-emerald-950/40 border-emerald-800/50 text-emerald-400'
               : driftStatus === 'unmonitored'
                 ? 'bg-slate-900 border-slate-700 text-slate-400'
-                : 'bg-amber-950/40 border-amber-800/50 text-amber-400'
+                : driftStatus === 'warming_up'
+                  ? 'bg-slate-900 border-slate-700 text-slate-300'
+                  : 'bg-amber-950/40 border-amber-800/50 text-amber-300'
           }`}
-          title={
-            driftStatus === 'healthy'
-              ? 'Drift monitor: policy aligned'
-              : driftStatus === 'unmonitored'
-                ? 'Drift monitoring has not reported a baseline for this session'
-                : 'Drift detected: re-tuning suggested'
-          }
+          title={driftTitle}
         >
           {driftStatus === 'healthy' ? (
             <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
           ) : driftStatus === 'unmonitored' ? (
             <Activity className="h-3.5 w-3.5 text-slate-500" />
+          ) : driftStatus === 'warming_up' ? (
+            <Activity className="h-3.5 w-3.5 text-slate-400 animate-pulse" />
           ) : (
             <AlertTriangle className="h-3.5 w-3.5 text-amber-400" />
           )}
-          <span className="capitalize font-mono">{driftStatus}</span>
+          <span className="capitalize font-mono">{driftStatus.replace('_', ' ')}</span>
+          {driftSamples > 0 && driftStatus !== 'unmonitored' && (
+            <span className="text-[10px] text-gray-500 font-mono">{driftSamples}</span>
+          )}
         </div>
 
         {/* LLM Engine Badge + Settings Button */}

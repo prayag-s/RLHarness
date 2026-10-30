@@ -83,8 +83,12 @@ def run_serve(job: dict[str, Any]) -> dict[str, Any]:
     """Long-lived interactive session: holds the env (and policy) and answers requests on stdin."""
     from rl_ide.synthesizer.env_builder import instantiate_env, load_synthesized_env_class
 
+    from rl_ide.drift.live import capture_observations
+
     env_cls = load_synthesized_env_class(job["env_module"])
     env = instantiate_env(env_cls, dataset_records=_load_records(job.get("records_path")))
+    # Captured from the environment itself: a human click may never call the policy.
+    last_obs = capture_observations(env)
 
     model = None
     if job.get("model_path") and Path(job["model_path"]).exists():
@@ -97,11 +101,12 @@ def run_serve(job: dict[str, Any]) -> dict[str, Any]:
 
     # The deployed policy chooses greedily with no mask, exactly like the scorecard.
     def predict(obs):
+        import numpy as np
+
         if model is None:
             n_actions = int(getattr(env.action_space, "n", 1))
             return 0, [1.0 / max(1, n_actions)] * max(1, n_actions)
         # Imported lazily: a session without a policy should not pay torch's ~5 s start-up.
-        import numpy as np
         import torch
 
         obs_t = torch.tensor(np.asarray(obs, dtype="float32").reshape(1, -1))
@@ -127,11 +132,14 @@ def run_serve(job: dict[str, Any]) -> dict[str, Any]:
                 print("RESULT " + json.dumps({"ok": True, "result": {"closed": True}}), flush=True)
                 return {"closed": True}
             if command == "interact":
+                last_obs.clear()
                 result = env.interactive_step(
                     request.get("payload") or {},
                     predict,
                     request.get("mode") or "agent_vs_env",
                 )
+                if isinstance(result, dict) and last_obs:
+                    result = {**result, "obs_vector": list(last_obs)}
             elif command == "reset":
                 obs, info = env.reset(**(request.get("reset_kwargs") or {}))
                 result = {"obs": [float(x) for x in obs], "info": info}

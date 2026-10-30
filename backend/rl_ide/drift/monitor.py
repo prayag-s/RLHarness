@@ -19,6 +19,7 @@ class DriftReport(BaseModel):
     current_entropy: float
     action_shift_zscore: float
     current_action_dist: dict[str, float] = Field(default_factory=dict)
+    signals: list[str] = Field(default_factory=lambda: ["psi"])
     reasons: list[str] = Field(default_factory=list)
     recommendation: str = "Policy confident, no drift detected."
 
@@ -32,15 +33,26 @@ class DriftBaseline(BaseModel):
     entropy_std: float
     action_distribution: dict[str, float]
     n_samples: int
+    # False when the baseline was fitted without the policy's own action probabilities (e.g. from
+    # stored episodes, which keep the chosen action only). Entropy and action-rate checks need a real
+    # policy distribution; comparing against a fabricated one invents drift.
+    policy_signals: bool = False
 
     def save(self, file_path: str | Path) -> None:
         p = Path(file_path)
         p.write_text(json.dumps(self.model_dump(), indent=2), encoding="utf-8")
 
     @classmethod
-    def load(cls, file_path: str | Path) -> DriftBaseline:
-        p = Path(file_path)
-        data = json.loads(p.read_text(encoding="utf-8"))
+    def load(cls, source: str | Path | dict[str, Any]) -> DriftBaseline:
+        """Loads a baseline from a JSON file *or* an already-parsed mapping.
+
+        The exporter and the bundle registry both hold the parsed contents, and the original
+        path-only signature meant every drifted-bundle check raised `TypeError` inside a bare
+        `except` — so exported policies reported "healthy" no matter what they were fed.
+        """
+        if isinstance(source, dict):
+            return cls.model_validate(source)
+        data = json.loads(Path(source).read_text(encoding="utf-8"))
         return cls.model_validate(data)
 
 
@@ -94,8 +106,8 @@ class DriftDetector:
             entropy_mean = float(np.mean(ent_vals))
             entropy_std = float(max(np.std(ent_vals), 0.05))
         else:
-            entropy_mean = 0.25
-            entropy_std = 0.08
+            entropy_mean = 0.0
+            entropy_std = 0.0
 
         # 3. Baseline action distribution
         action_dist: dict[str, float] = {}
@@ -111,14 +123,23 @@ class DriftDetector:
             entropy_std=entropy_std,
             action_distribution=action_dist,
             n_samples=n_samples,
+            policy_signals=bool(action_probs is not None and len(action_probs) > 0),
         )
 
     def check_drift(
         self,
         obs_batch: np.ndarray | list[list[float]],
         action_probs_batch: np.ndarray | list[list[float]],
+        max_bins: int | None = None,
+        psi_threshold: float = 0.25,
     ) -> DriftReport:
-        """Inspects live batch for Population Stability Index, entropy shifts, and action rate shifts."""
+        """Inspects live batch for Population Stability Index, entropy shifts, and action rate shifts.
+
+        ``max_bins`` merges the baseline's deciles into coarser bins. A decile histogram needs roughly
+        ten samples per bin before its PSI is stable; a live window holds tens of samples in total, so
+        scoring it at decile resolution reports drift for in-distribution traffic (measured: 15 % false
+        positives at 100 samples, 95 % at 20). Bundle batches keep the full resolution.
+        """
         obs_arr = np.array(obs_batch, dtype=np.float32)
         probs_arr = np.array(action_probs_batch, dtype=np.float32)
         n_samples = len(obs_arr)
@@ -127,8 +148,12 @@ class DriftDetector:
         is_drifted = False
 
         # 1. Input Feature PSI: sum((P_i - Q_i) * ln(P_i / Q_i))
+        #
+        # Both histograms get a continuity correction (half a sample per bin). Without it an empty
+        # live bin is clipped to 1e-4 and dominates the sum: twenty in-distribution observations
+        # scored PSI 1.78 against their own baseline, i.e. every small batch looked like an incident.
         psi_per_feature: dict[str, float] = {}
-        eps = 1e-4
+        alpha = 0.5
 
         for f_idx, fname in enumerate(self.baseline.feature_names):
             if f_idx >= obs_arr.shape[1]:
@@ -140,6 +165,8 @@ class DriftDetector:
             q_expected = np.array(self.baseline.expected_proportions.get(fname, []))
             if len(edges) < 3 or len(q_expected) != (len(edges) - 1):
                 continue
+            if max_bins and len(q_expected) > max_bins:
+                edges, q_expected = _coarsen_bins(edges, q_expected, max_bins)
 
             col = obs_arr[:, f_idx]
             bin_edges = np.copy(edges)
@@ -147,36 +174,48 @@ class DriftDetector:
             bin_edges[-1] = np.inf
 
             counts, _ = np.histogram(col, bins=bin_edges)
-            proportions = np.maximum(counts / max(1, n_samples), eps)
-            proportions = proportions / np.sum(proportions)
+            k = len(counts)
+            live_n = max(1, n_samples)
+            base_n = max(1, self.baseline.n_samples)
+            proportions = (counts + alpha) / (live_n + alpha * k)
+            base_counts = q_expected * base_n
+            expected = (base_counts + alpha) / (base_n + alpha * k)
 
-            q_smoothed = np.maximum(q_expected, eps)
-            q_smoothed = q_smoothed / np.sum(q_smoothed)
-
-            psi = float(np.sum((proportions - q_smoothed) * np.log(proportions / q_smoothed)))
+            psi = float(np.sum((proportions - expected) * np.log(proportions / expected)))
             psi_per_feature[fname] = psi
 
         max_psi = max(psi_per_feature.values()) if psi_per_feature else 0.0
-        if max_psi > 0.25:
+        if max_psi > psi_threshold:
             is_drifted = True
-            high_features = [k for k, v in psi_per_feature.items() if v > 0.25]
-            reasons.append(f"Input PSI drift detected on {high_features} (max PSI: {max_psi:.3f} > 0.25)")
+            high_features = [k for k, v in psi_per_feature.items() if v > psi_threshold]
+            reasons.append(
+                f"Input PSI drift detected on {high_features} "
+                f"(max PSI: {max_psi:.3f} > {psi_threshold:g})"
+            )
 
-        # 2. Entropy Shift: rolling mean entropy shifts by > 2.5 sigma
-        ent_vals = -np.sum(probs_arr * np.log(np.maximum(probs_arr, 1e-8)), axis=-1)
-        mean_entropy = float(np.mean(ent_vals))
-        entropy_zscore = float(abs(mean_entropy - self.baseline.entropy_mean) / max(self.baseline.entropy_std, 1e-4))
-
-        if entropy_zscore > 2.5:
-            is_drifted = True
-            reasons.append(f"Policy entropy uncertainty drift (Z-score: {entropy_zscore:.2f} > 2.5)")
+        signals = ["psi"]
+        mean_entropy = 0.0
+        entropy_zscore = 0.0
+        if self.baseline.policy_signals:
+            # 2. Entropy Shift: rolling mean entropy shifts by > 2.5 sigma
+            signals.append("entropy")
+            ent_vals = -np.sum(probs_arr * np.log(np.maximum(probs_arr, 1e-8)), axis=-1)
+            mean_entropy = float(np.mean(ent_vals))
+            entropy_zscore = float(
+                abs(mean_entropy - self.baseline.entropy_mean) / max(self.baseline.entropy_std, 1e-4)
+            )
+            if entropy_zscore > 2.5:
+                is_drifted = True
+                reasons.append(f"Policy entropy uncertainty drift (Z-score: {entropy_zscore:.2f} > 2.5)")
 
         # 3. Action-Rate Distribution Shift: Z-score > 3.0
         pred_actions = np.argmax(probs_arr, axis=-1)
         current_action_dist: dict[str, float] = {}
         max_action_shift_zscore = 0.0
 
-        for act_str, base_rate in self.baseline.action_distribution.items():
+        for act_str, base_rate in (
+            self.baseline.action_distribution.items() if self.baseline.policy_signals else ()
+        ):
             act_int = int(act_str)
             live_count = np.sum(pred_actions == act_int)
             live_rate = float(live_count / max(1, n_samples))
@@ -186,6 +225,8 @@ class DriftDetector:
             z_score = float(abs(live_rate - base_rate) / max(std_err, 1e-4))
             max_action_shift_zscore = max(max_action_shift_zscore, z_score)
 
+        if self.baseline.action_distribution and self.baseline.policy_signals:
+            signals.append("action_rate")
         if max_action_shift_zscore > 3.0:
             is_drifted = True
             reasons.append(f"Action rate distribution shift (Z-score: {max_action_shift_zscore:.2f} > 3.0)")
@@ -204,6 +245,22 @@ class DriftDetector:
             current_entropy=mean_entropy,
             action_shift_zscore=max_action_shift_zscore,
             current_action_dist=current_action_dist,
+            signals=signals,
             reasons=reasons,
             recommendation=recommendation,
         )
+
+
+def _coarsen_bins(edges: np.ndarray, proportions: np.ndarray, max_bins: int) -> tuple[np.ndarray, np.ndarray]:
+    """Merges adjacent quantile bins so a small batch is judged at a resolution it can support."""
+    n_bins = len(proportions)
+    if n_bins <= max_bins:
+        return edges, proportions
+    step = int(np.ceil(n_bins / max_bins))
+    kept_edges = [edges[0]]
+    merged: list[float] = []
+    for start in range(0, n_bins, step):
+        merged.append(float(np.sum(proportions[start:start + step])))
+        end = min(start + step, n_bins)
+        kept_edges.append(edges[end])
+    return np.array(kept_edges), np.array(merged)

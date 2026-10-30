@@ -6,6 +6,8 @@ mid-flight feedback nudges, and ONNX .runbundle packaging.
 """
 
 from __future__ import annotations
+
+import logging
 import asyncio
 import atexit
 from contextvars import ContextVar
@@ -80,6 +82,8 @@ from rl_ide.synthesizer.arena_builder import JITArenaSynthesizer
 
 # Marker the UI switches on when a model-backed route is called without a verified provider.
 LLM_KEY_REQUIRED = "llm-key-required"
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="RL-Native Agent Studio v4.0 API",
@@ -745,6 +749,9 @@ def get_conversation(conversation_id: str):
             print(f"Warning: Failed to reconstruct SessionState: {s_err}")
 
     conv["scorecard"] = load_session_scorecard(conversation_id)
+    # The header used to hardcode "unmonitored"; report what live scoring actually knows.
+    conv["drift"] = drift_snapshot(conversation_id)
+    conv["drift_status"] = conv["drift"].get("status", "unmonitored")
     # A reload mid-synthesis must still say "the bespoke canvas is on its way": the pending flag is
     # derived from the durable job row, so it can never go stale after a crash or restart.
     active = get_job_store().active_job(conversation_id)
@@ -793,6 +800,7 @@ def clear_all_conversations():
         cid = summary["conversation_id"]
         conv_store.delete(cid, owner_id=owner)
         close_interact_session(cid)
+        forget_drift_state(cid)
         global_store.delete_session(cid)
     for dataset in dataset_store.list(owner_id=owner):
         dataset_store.delete(dataset["dataset_id"], owner_id=owner)
@@ -809,6 +817,7 @@ def delete_conversation(conversation_id: str):
         raise HTTPException(status_code=404, detail=f"Conversation '{conversation_id}' not found.")
     conv_store.delete(conversation_id, owner_id=owner)
     close_interact_session(conversation_id)
+    forget_drift_state(conversation_id)
     global_store.delete_session(conversation_id)
     ds_id = conv.get("dataset_id")
     if ds_id:
@@ -915,6 +924,7 @@ def run_training_task(
                 session.arena_html = arena_path.read_text(encoding="utf-8")
             session.scorecard = load_session_scorecard(conversation_id)
             global_store.set_session(session)
+            _refresh_drift_baseline(conversation_id, session, blueprint)
             return session
         except SandboxUnavailable as exc:
             on_event({"event": "sandbox_unavailable", "conversation_id": conversation_id,
@@ -931,7 +941,7 @@ def run_training_task(
     on_event({"event": "sandbox_bypassed", "conversation_id": conversation_id,
               "message": "Training runs in the API process (single-user mode, no isolation)."})
     env_cls = load_synthesized_env_class(env_file)
-    return global_controller.run_loop(
+    trained = global_controller.run_loop(
         session_id=conversation_id,
         blueprint=blueprint,
         env_cls=env_cls,
@@ -941,6 +951,8 @@ def run_training_task(
         additional_rounds=additional_rounds,
         episodes_per_burst=episodes_per_burst,
     )
+    _refresh_drift_baseline(conversation_id, trained, blueprint)
+    return trained
 
 
 # ---------------------------------------------------------------------------
@@ -1361,6 +1373,138 @@ _INTERACT_IDLE_SECONDS = float(os.environ.get("RL_IDE_INTERACT_IDLE_SECONDS", "9
 _MAX_INTERACT_SESSIONS = int(os.environ.get("RL_IDE_MAX_INTERACT_SESSIONS", "8"))
 
 
+# -----------------------------------------------------------------------------
+# Live drift scoring: the scorecard proves the policy was good, this proves it still is.
+# -----------------------------------------------------------------------------
+_drift_monitors: dict[str, Any] = {}
+_drift_lock = threading.RLock()
+# Calibrated in rl_ide/drift/live.py: 50 observations is the smallest window whose PSI is stable,
+# and two consecutive crossings are required before an alert. Do not lower these without re-running
+# the calibration test, or unchanged traffic will be reported as drifting.
+_DRIFT_WINDOW = int(os.environ.get("RL_IDE_DRIFT_WINDOW", "50"))
+_DRIFT_STRIDE = int(os.environ.get("RL_IDE_DRIFT_STRIDE", "5"))
+
+
+def _drift_workspace(session_id: str) -> Path:
+    return global_store.base_dir / session_id
+
+
+def _baseline_for(session_id: str):
+    """Returns this conversation's drift baseline, fitting one from its episodes when absent."""
+    from rl_ide.drift import DriftBaseline, fit_baseline_from_episodes
+
+    ws = _drift_workspace(session_id)
+    path = ws / "drift_baseline.json"
+    if path.exists():
+        try:
+            return DriftBaseline.load(path)
+        except Exception:
+            pass
+
+    conv = get_conversation_store().get_conversation(session_id) or {}
+    blueprint = conv.get("blueprint_spec") or {}
+    baseline = fit_baseline_from_episodes(conv.get("episodes") or [], blueprint.get("observation_features") or [])
+    if baseline is not None:
+        try:
+            ws.mkdir(parents=True, exist_ok=True)
+            baseline.save(path)
+        except Exception:
+            pass
+    return baseline
+
+
+def _drift_monitor(session_id: str):
+    """Lazily builds the monitor so a conversation that never trains costs nothing."""
+    from rl_ide.drift import DriftMonitor
+
+    with _drift_lock:
+        monitor = _drift_monitors.get(session_id)
+        if monitor is not None:
+            return monitor
+        baseline = _baseline_for(session_id)
+        if baseline is None:
+            return None
+        monitor = DriftMonitor(baseline, window=_DRIFT_WINDOW, stride=_DRIFT_STRIDE)
+        _drift_monitors[session_id] = monitor
+        return monitor
+
+
+def drift_snapshot(session_id: str) -> dict[str, Any]:
+    """Current drift state for a conversation, as the API and the header report it."""
+    from rl_ide.drift import DriftStatusStore, UNMONITORED
+
+    store = DriftStatusStore()
+    with _drift_lock:
+        monitor = _drift_monitors.get(session_id)
+    if monitor is not None:
+        return monitor.snapshot()
+    persisted = store.load(_drift_workspace(session_id))
+    if persisted.get("status") and persisted.get("status") != UNMONITORED:
+        return persisted
+    # Fitting from the stored episodes writes the baseline once, so later reads are a file stat.
+    # Without this the header said "unmonitored" for a trained policy until someone clicked.
+    if _baseline_for(session_id) is None:
+        return {"status": UNMONITORED, "samples_seen": 0, "window": _DRIFT_WINDOW}
+    return {"status": "warming_up", "samples_seen": 0, "window": _DRIFT_WINDOW}
+
+
+def score_live_drift(session_id: str, result: dict[str, Any]) -> dict[str, Any] | None:
+    """Scores one live interaction. Returns the report-shaped payload when a window was judged."""
+    monitor = _drift_monitor(session_id)
+    if monitor is None or not isinstance(result, dict):
+        return None
+    try:
+        report = monitor.observe(
+            result.get("obs_vector"),
+            result.get("action_probs"),
+            len(result.get("action_probs") or []) or None,
+        )
+    except Exception as exc:  # monitoring must never break play
+        logger.warning("drift scoring failed for %s: %s", session_id, exc)
+        return None
+
+    # A warming-up window still reports its progress: the UI must be able to say "collecting
+    # samples" instead of showing nothing until the first verdict.
+    snapshot = monitor.snapshot()
+    if report is None:
+        return snapshot
+    from rl_ide.drift import DriftStatusStore
+
+    DriftStatusStore().save(_drift_workspace(session_id), snapshot)
+    return snapshot
+
+
+def _refresh_drift_baseline(conversation_id: str, session: Any, blueprint: AgentBlueprintSpec) -> None:
+    """Refits the live-drift baseline from the episodes training just produced.
+
+    A retrained policy distributes its actions differently, so keeping the old baseline would flag
+    the new policy as drifting against the old one.
+    """
+    from rl_ide.drift import fit_baseline_from_episodes
+
+    forget_drift_state(conversation_id)
+    # A baseline is advisory: nothing here may fail a training run that already succeeded.
+    try:
+        episodes = [
+            ep.model_dump(mode="json") if hasattr(ep, "model_dump") else ep
+            for ep in getattr(session, "episodes", []) or []
+        ]
+        baseline = fit_baseline_from_episodes(episodes, list(blueprint.observation_features or []))
+        if baseline is None:
+            return
+        ws = _drift_workspace(conversation_id)
+        ws.mkdir(parents=True, exist_ok=True)
+        baseline.save(ws / "drift_baseline.json")
+    except Exception as exc:
+        logger.warning("could not build drift baseline for %s: %s", conversation_id, exc)
+
+
+def forget_drift_state(session_id: str) -> None:
+    """Drops in-memory drift state for a conversation that is being deleted or retrained."""
+    with _drift_lock:
+        _drift_monitors.pop(session_id, None)
+
+
 def _resolve_model_zip(session_id: str) -> Path | None:
     conv = get_conversation_store().get_conversation(session_id)
     candidates = [
@@ -1483,6 +1627,23 @@ def close_interact_session(session_id: str) -> None:
             pass
 
 
+def _with_drift(session_id: str, result: Any) -> Any:
+    """Attaches the live drift state to an interaction and warns the UI when it crosses over."""
+    snapshot = score_live_drift(session_id, result if isinstance(result, dict) else {})
+    if snapshot is None or not isinstance(result, dict):
+        return result
+    if snapshot.get("is_drifted"):
+        _broadcast_threadsafe(
+            session_id,
+            {
+                "event": "drift_warning",
+                "message": snapshot.get("recommendation"),
+                "drift": snapshot,
+            },
+        )
+    return {**result, "drift": snapshot}
+
+
 @app.post("/api/v4/sessions/{session_id}/interact")
 def session_interact(session_id: str, req: InteractRequest):
     """Executes live human play/inspection against the agent inside arena.html."""
@@ -1493,11 +1654,12 @@ def session_interact(session_id: str, req: InteractRequest):
         )
     if SANDBOXED_INTERACT_AVAILABLE:
         try:
-            return get_interact_session(session_id).interact(req.get_effective_payload())
+            result = get_interact_session(session_id).interact(req.get_effective_payload())
         except HTTPException:
             raise
         except Exception as exc:
             raise HTTPException(status_code=400, detail=f"Interactive step failed: {exc}")
+        return _with_drift(session_id, result)
 
     if current_owner() != "local":
         raise HTTPException(
@@ -1573,6 +1735,12 @@ def session_interact(session_id: str, req: InteractRequest):
         global_store.delete_model(session_id)
         model = None
 
+    # Captured from the environment, because a human click specifies the action and the policy is
+    # not always consulted.
+    from rl_ide.drift.live import capture_observations
+
+    seen_obs = capture_observations(env)
+
     def policy_predict(obs):
         if model:
             obs_t = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
@@ -1588,9 +1756,12 @@ def session_interact(session_id: str, req: InteractRequest):
             return 0, [1.0 / n_acts] * n_acts
 
     try:
-        return env.interactive_step(req.get_effective_payload(), policy_predict)
+        result = env.interactive_step(req.get_effective_payload(), policy_predict)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Interactive step failed: {exc}")
+    if isinstance(result, dict) and seen_obs:
+        result = {**result, "obs_vector": list(seen_obs)}
+    return _with_drift(session_id, result)
 
 
 class NudgeRequest(BaseModel):

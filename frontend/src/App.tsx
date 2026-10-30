@@ -25,6 +25,7 @@ import {
   StudioChatResponse,
   Scorecard,
   ArenaSource,
+  DriftSnapshot,
 } from './types'
 
 import {
@@ -86,7 +87,10 @@ export const App: React.FC = () => {
   const [maxRounds, setMaxRounds] = useState<number>(4)
   const [roundHistory, setRoundHistory] = useState<RoundSnapshot[]>([])
   const [scorecard, setScorecard] = useState<Scorecard | null>(null)
-  const [driftStatus] = useState<string>('unmonitored')
+  // Live drift, scored by the backend on every /interact against the training baseline.
+  const [driftStatus, setDriftStatus] = useState<string>('unmonitored')
+  const [driftDetail, setDriftDetail] = useState<string>('')
+  const [driftSamples, setDriftSamples] = useState<number>(0)
 
   // Dataset & Timeline
   const [attachedDataset, setAttachedDataset] = useState<IngestedDatasetSummary | null>(null)
@@ -255,6 +259,20 @@ export const App: React.FC = () => {
     refreshUsage(activeConversationId)
   }, [activeConversationId, refreshUsage])
 
+  /** Applies a drift snapshot from either the REST payload or a `drift_warning`/`drift` event. */
+  const applyDrift = React.useCallback((snapshot?: DriftSnapshot | null, status?: string) => {
+    const next = status || snapshot?.status
+    if (next) setDriftStatus(next)
+    if (snapshot) {
+      setDriftSamples(snapshot.samples_seen ?? 0)
+      const detail =
+        snapshot.reasons && snapshot.reasons.length > 0
+          ? snapshot.reasons.join(' · ')
+          : snapshot.recommendation || ''
+      setDriftDetail(detail)
+    }
+  }, [])
+
   const handleSelectConversation = async (cid: string) => {
     try {
       const conv = await fetchConversation(cid)
@@ -270,6 +288,7 @@ export const App: React.FC = () => {
       setEnvModuleCode(conv.env_code || '')
       setEpisodes(conv.episodes || [])
       setScorecard(conv.scorecard || null)
+      applyDrift(conv.drift, conv.drift_status)
       if (conv.best_metric !== undefined) setCurrentMetric(conv.best_metric)
       if (conv.current_round !== undefined) setCurrentRound(conv.current_round)
       if (conv.training_params) {
@@ -343,6 +362,9 @@ export const App: React.FC = () => {
     setArenaHtml('')
     setArenaLocked(false)
     setArenaSource(null)
+    setDriftStatus('unmonitored')
+    setDriftDetail('')
+    setDriftSamples(0)
     setArenaPending(false)
     setArenaError(null)
     setArenaStage('')
@@ -800,7 +822,15 @@ export const App: React.FC = () => {
   const handleWebSocketEvent = (event: any) => {
     const eventType = event.event
 
-    if (eventType === 'scorecard_ready') {
+    if (eventType === 'drift_warning') {
+      applyDrift(event.drift as DriftSnapshot, 'drifted')
+      addTimelineItem(
+        'Drift Warning ⚠️',
+        (event.drift as DriftSnapshot)?.recommendation || event.message || 'Live inputs moved away from the training baseline.',
+        'round',
+        'warning',
+      )
+    } else if (eventType === 'scorecard_ready') {
       setScorecard(event.scorecard || null)
       addTimelineItem(
         'Held-Out Scorecard 🎯',
@@ -1060,6 +1090,8 @@ export const App: React.FC = () => {
         isExporting={isExporting}
         hasActivePolicy={!!activeSession}
         driftStatus={driftStatus}
+        driftDetail={driftDetail}
+        driftSamples={driftSamples}
         onOpenConversations={() => setIsConversationsOpen(true)}
         conversationCount={conversations.length}
         usageCostUsd={usage.cost_usd}

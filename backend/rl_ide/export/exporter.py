@@ -120,20 +120,25 @@ def execute_inference(
             "probabilities": [float(val) for val in p],
         })
 
-    # Basic drift check on inference batch
-    drift_report = {"drift_detected": False, "psi_max": 0.0, "status": "healthy"}
-    if baseline_data and "quantile_boundaries" in baseline_data:
+    # Drift check on the inference batch. This used to call a `detect_drift` method that does not
+    # exist, inside a bare `except`, so an exported policy reported "healthy" for any input.
+    drift_report = {"drift_detected": False, "psi_max": 0.0, "status": "unmonitored"}
+    if baseline_data:
         try:
-            from rl_ide.drift.monitor import DriftDetector, DriftBaseline
+            from rl_ide.drift.monitor import DriftBaseline, DriftDetector
+
             detector = DriftDetector(DriftBaseline.load(baseline_data))
-            sig = detector.detect_drift(obs_batch, probs, predicted_actions)
+            sig = detector.check_drift(obs_batch, probs)
             drift_report = {
-                "drift_detected": sig.drift_detected,
-                "psi_max": sig.feature_psi_max,
-                "status": sig.severity,
+                "drift_detected": bool(sig.is_drifted),
+                "psi_max": float(sig.max_psi),
+                "status": "drifted" if sig.is_drifted else "healthy",
+                "reasons": list(sig.reasons),
+                "recommendation": sig.recommendation,
             }
-        except Exception:
-            pass
+        except Exception as exc:  # a bundle must still answer; say why it could not monitor
+            drift_report["status"] = "unmonitored"
+            drift_report["error"] = f"{type(exc).__name__}: {exc}"
 
     return {
         "predictions": predictions,

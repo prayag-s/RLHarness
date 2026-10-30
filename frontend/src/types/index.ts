@@ -154,6 +154,20 @@ export interface SessionState {
   scorecard?: Scorecard | null
 }
 
+/** Result of scoring live observations against the training baseline. */
+export interface DriftSnapshot {
+  status?: 'unmonitored' | 'warming_up' | 'healthy' | 'drifted' | string
+  samples_seen?: number
+  window?: number
+  is_drifted?: boolean
+  max_psi?: number
+  entropy_zscore?: number
+  action_shift_zscore?: number
+  reasons?: string[]
+  recommendation?: string
+  baseline_samples?: number
+}
+
 /** How the arena on screen was produced. A preview must never be mistaken for the final canvas. */
 export type ArenaSource = 'bespoke' | 'fallback' | 'preview'
 
@@ -255,6 +269,9 @@ export interface ConversationDetail {
   arena_locked?: boolean
   arena_source?: ArenaSource | null
   scorecard?: Scorecard | null
+  /** Live drift scoring against the training baseline. */
+  drift?: DriftSnapshot | null
+  drift_status?: 'unmonitored' | 'warming_up' | 'healthy' | 'drifted' | string
   /** Present while a synthesis/training job is in flight, so a reload knows work is still running. */
   active_job?: { job_id: string; kind: string; stage: string; status: string } | null
 }
