@@ -7,6 +7,7 @@ mid-flight feedback nudges, and ONNX .runbundle packaging.
 
 from __future__ import annotations
 import asyncio
+from contextvars import ContextVar
 import json
 import os
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
@@ -56,6 +57,7 @@ from rl_ide.llm.client import (
     init_llm_state,
 )
 from rl_ide.synthesizer.env_builder import JITEnvironmentSynthesizer, load_synthesized_env_class, instantiate_env
+from rl_ide.state.dataset_store import get_dataset_store
 from rl_ide.state.records_store import load_records, save_records
 from rl_ide.synthesizer.verifier import SandboxSmokeTester
 from rl_ide.synthesizer.arena_builder import JITArenaSynthesizer
@@ -79,11 +81,27 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+_owner_ctx: ContextVar[str] = ContextVar("rl_owner_id", default="local")
+
+
+def current_owner() -> str:
+    """Tenant key for this request.
+
+    The studio has no identity layer yet (G4 in COMMERCIAL_READINESS_GAPS.md), so ownership comes
+    from ``x-owner-id`` and defaults to the single local user. Everything below is already scoped by
+    it, which means swapping in real authentication only changes this function.
+    """
+    try:
+        return _owner_ctx.get() or "local"
+    except LookupError:
+        return "local"
+
+
 # Global State
 global_store = SessionStateStore()
 global_controller = AutonomousLoopController(global_store)
 global_registry = RunBundleRegistry()
-ingested_datasets_store: dict[str, IngestedDataset] = {}
+dataset_store = get_dataset_store()
 global_omni_agent = StudioOmniAgent(
     conv_store=get_conversation_store(),
     session_store=global_store,
@@ -140,6 +158,7 @@ async def _optional_api_token(request, call_next):
         if supplied != _API_TOKEN:
             from fastapi.responses import JSONResponse
             return JSONResponse({"detail": "Invalid or missing API token."}, status_code=401)
+    _owner_ctx.set((request.headers.get("x-owner-id") or "local").strip() or "local")
     return await call_next(request)
 
 
@@ -191,7 +210,7 @@ async def upload_file(
             content=content,
             role=role,
         )
-        ingested_datasets_store[dataset.dataset_id] = dataset
+        dataset_store.save(dataset, owner_id=current_owner())
 
         return {
             "dataset_id": dataset.dataset_id,
@@ -222,7 +241,7 @@ def ingest_sql(req: SQLIngestRequest):
             query=req.query,
             name=req.name,
         )
-        ingested_datasets_store[dataset.dataset_id] = dataset
+        dataset_store.save(dataset, owner_id=current_owner())
 
         return {
             "dataset_id": dataset.dataset_id,
@@ -253,7 +272,7 @@ class ArchitectChatRequest(BaseModel):
 def architect_chat(req: ArchitectChatRequest):
     """Conversational Intake interview evaluating user intent across the 5 Pillars."""
     require_verified_llm()
-    dataset = ingested_datasets_store.get(req.dataset_id) if req.dataset_id else None
+    dataset = dataset_store.get(req.dataset_id, current_owner()) if req.dataset_id else None
     architect = IntakeArchitectAgent()
     resp = architect.interview(
         user_prompt=req.user_prompt,
@@ -350,7 +369,7 @@ async def start_session(req: SessionStartRequest):
     ws_dir = global_store.base_dir / sid
     ws_dir.mkdir(parents=True, exist_ok=True)
 
-    dataset = ingested_datasets_store.get(req.dataset_id) if req.dataset_id else None
+    dataset = dataset_store.get(req.dataset_id, current_owner()) if req.dataset_id else None
 
     try:
         # 1. Synthesize Environment & Arena
@@ -534,9 +553,9 @@ class UpdateConversationParamsRequest(BaseModel):
 
 @app.get("/api/v4/conversations")
 def list_conversations():
-    """Returns list of all saved conversations sorted by updated_at DESC."""
+    """Returns the caller's conversations sorted by updated_at DESC."""
     conv_store = get_conversation_store()
-    return conv_store.list_conversations()
+    return conv_store.list_conversations(owner_id=current_owner())
 
 
 @app.post("/api/v4/conversations")
@@ -547,6 +566,7 @@ def create_conversation(req: CreateConversationRequest = CreateConversationReque
         title=req.title,
         dataset_id=req.dataset_id,
         training_params=req.training_params,
+        owner_id=current_owner(),
     )
 
 
@@ -554,7 +574,7 @@ def create_conversation(req: CreateConversationRequest = CreateConversationReque
 def get_conversation(conversation_id: str):
     """Loads full conversation state from disk/SQLite, re-instantiates SynthesizedGymEnv and reloads saved SB3 model."""
     conv_store = get_conversation_store()
-    conv = conv_store.get_conversation(conversation_id)
+    conv = conv_store.get_conversation(conversation_id, owner_id=current_owner())
     if not conv:
         raise HTTPException(status_code=404, detail=f"Conversation '{conversation_id}' not found.")
 
@@ -565,7 +585,11 @@ def get_conversation(conversation_id: str):
         try:
             from rl_ide.synthesizer.env_builder import load_synthesized_env_class, instantiate_env
             env_cls = load_synthesized_env_class(env_file)
-            dataset = ingested_datasets_store.get(conv.get("dataset_id")) if conv.get("dataset_id") else None
+            dataset = (
+                dataset_store.get(conv.get("dataset_id"), conv.get("owner_id") or "local")
+                if conv.get("dataset_id")
+                else None
+            )
             records = dataset.df.to_dict(orient="records") if (dataset and hasattr(dataset, "df")) else None
             if records is None:
                 records = load_records(ws_dir)
@@ -675,36 +699,54 @@ def update_conversation_params(conversation_id: str, req: UpdateConversationPara
 
 @app.delete("/api/v4/conversations")
 def clear_all_conversations():
-    """Deletes all conversations and cleans up all associated workspace files."""
+    """Deletes the caller's conversations, their workspaces, bundles and datasets."""
     conv_store = get_conversation_store()
-    deleted_count = conv_store.clear_all()
-    global_store._sessions.clear()
-    global_store._models.clear()
-    global_store._envs.clear()
-    ingested_datasets_store.clear()
-    return {"success": True, "deleted_count": deleted_count}
+    owner = current_owner()
+    conversations = conv_store.list_conversations(owner_id=owner)
+    for summary in conversations:
+        cid = summary["conversation_id"]
+        conv_store.delete(cid, owner_id=owner)
+        global_store.delete_session(cid)
+    for dataset in dataset_store.list(owner_id=owner):
+        dataset_store.delete(dataset["dataset_id"], owner_id=owner)
+    return {"success": True, "deleted_count": len(conversations)}
 
 
 @app.delete("/api/v4/conversations/{conversation_id}")
 def delete_conversation(conversation_id: str):
-    """Deletes a conversation and its workspace files."""
+    """Deletes one of the caller's conversations and everything it owns."""
     conv_store = get_conversation_store()
-    conv = conv_store.get_conversation(conversation_id)
+    owner = current_owner()
+    conv = conv_store.get_conversation(conversation_id, owner_id=owner)
     if not conv:
         raise HTTPException(status_code=404, detail=f"Conversation '{conversation_id}' not found.")
-    conv_store.delete(conversation_id)
+    conv_store.delete(conversation_id, owner_id=owner)
     global_store.delete_session(conversation_id)
     ds_id = conv.get("dataset_id")
     if ds_id:
-        # Only drop the dataset when no other conversation still references it.
+        # Only drop the dataset when no other conversation of this owner still references it.
         still_used = any(
             c.get("dataset_id") == ds_id
-            for c in conv_store.list_conversations()
+            for c in conv_store.list_conversations(owner_id=owner)
             if c.get("conversation_id") != conversation_id
         )
         if not still_used:
-            ingested_datasets_store.pop(ds_id, None)
+            dataset_store.delete(ds_id, owner_id=owner)
     return {"success": True, "conversation_id": conversation_id}
+
+
+@app.get("/api/v4/datasets")
+def list_datasets():
+    """Lists the caller's uploaded datasets (durable, unlike the previous in-memory dict)."""
+    return dataset_store.list(owner_id=current_owner())
+
+
+@app.delete("/api/v4/datasets/{dataset_id}")
+def delete_dataset(dataset_id: str):
+    """Deletes a dataset and its stored rows."""
+    if not dataset_store.delete(dataset_id, owner_id=current_owner()):
+        raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found.")
+    return {"success": True, "dataset_id": dataset_id}
 
 
 class UnifiedConversationChatRequest(BaseModel):
@@ -755,7 +797,11 @@ async def conversation_omni_chat(conversation_id: str, req: UnifiedConversationC
     conv_store = get_conversation_store()
     existing_conv = conv_store.get_conversation(conversation_id)
     effective_ds_id = req.dataset_id or (existing_conv.get("dataset_id") if existing_conv else None)
-    active_dataset = ingested_datasets_store.get(effective_ds_id) if effective_ds_id else None
+    active_dataset = (
+        dataset_store.get(effective_ds_id, existing_conv.get("owner_id") if existing_conv else current_owner())
+        if effective_ds_id
+        else None
+    )
 
     try:
         response = await asyncio.to_thread(
@@ -784,7 +830,9 @@ async def conversation_omni_chat(conversation_id: str, req: UnifiedConversationC
                 env_cls = load_synthesized_env_class(env_file)
                 eps_per_burst = int(response.training_params.get("episodes_per_round") or bp.episodes_per_round or 200)
                 add_rounds = int(response.training_params.get("max_auto_tune_rounds") or bp.max_auto_tune_rounds or 5)
-                training_dataset = active_dataset or (ingested_datasets_store.get(bp.dataset_id) if bp.dataset_id else None)
+                training_dataset = active_dataset or (
+                    dataset_store.get(bp.dataset_id, current_owner()) if bp.dataset_id else None
+                )
 
                 prior_rounds = len(global_store.get_session(conversation_id).rounds_history) if global_store.get_session(conversation_id) else 0
 
@@ -1034,8 +1082,13 @@ def session_rollback(session_id: str, req: RollbackRequest):
 # 4. Export & Registry Endpoints
 # -----------------------------------------------------------------------------
 
+class ExportRequest(BaseModel):
+    # Opt-in: bundles otherwise ship without any customer rows (G3).
+    include_data: bool = False
+
+
 @app.post("/api/v4/sessions/{session_id}/export")
-def session_export(session_id: str):
+def session_export(session_id: str, req: ExportRequest | None = None):
     """Exports SB3 policy to ONNX with parity check and packages standalone .runbundle."""
     session = global_store.get_session(session_id)
     model = global_store.get_model(session_id)
@@ -1092,6 +1145,7 @@ def session_export(session_id: str):
         env_module_path=env_path,
         arena_html_path=arena_path,
         scorecard=load_session_scorecard(session_id),
+        include_data=bool(req.include_data) if req else False,
     )
 
     exported_scorecard: dict[str, Any] | None = None

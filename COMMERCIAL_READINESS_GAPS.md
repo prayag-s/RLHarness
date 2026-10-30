@@ -11,8 +11,9 @@ and the test history (covered by [progress.md](./progress.md), §10).
 §3 were produced by running the commands shown next to them, not estimated.
 
 > **Remediation status (2026-10-30):** Phase **P0-A** is implemented and committed — **G1, G14 and
-> G16 are CLOSED** (see each entry, and `progress.md` §11). Phases P0-B (G2, G3, G4, G9) and P1-C
-> (G5–G8) remain open.
+> G16 are CLOSED** (see each entry, and `progress.md` §11). Phase **P0-B.1** is implemented and
+> committed — **G3, G4 (scoping) and G9 are CLOSED**, with real authentication still outstanding
+> under G4 (`progress.md` §12). **G2 (sandboxed execution)** and phase P1-C (G5–G8) remain open.
 
 ---
 
@@ -142,6 +143,12 @@ no confidence interval, and no per-segment breakdown.
   operator to mount their own CSV. Keep the workspace copy (it is already git-ignored) but strip it
   from the download path.
 - **Effort:** ~0.5 day.
+- **Status: CLOSED in Phase P0-B.1.** Bundles are schema-only by default: the embedded `_records`
+  line is replaced with `_records = []`, `data/README.md` documents mounting `records.json`, and
+  `scorecard.json → deployment.contains_training_data` records whether data was included.
+  `POST /export {"include_data": true}` restores the self-contained bundle for operators who need
+  it. A regression test packs the same environment both ways and asserts the customer value appears
+  only in the opt-in bundle.
 
 #### G4. No identity, no tenancy
 - **Evidence:** one optional shared secret gates `/api/` only — the middleware checks
@@ -159,6 +166,11 @@ no confidence interval, and no per-segment breakdown.
   `(owner_id, dataset_id)`, persisted rather than held in a dict; scope every query by the caller;
   keep `RL_IDE_API_TOKEN` working as the single-user fallback so local usage does not regress.
 - **Effort:** ~2 days.
+- **Status: CLOSED for scoping in Phase P0-B.1 (authentication still open).** `conversations.owner_id`
+  with a migration, owner-scoped list/get/delete, and a durable `DatasetStore` (`runs/datasets.db` +
+  gzipped rows) that fixes uploads vanishing on restart. Cross-owner reads and deletes return 404.
+  **Residual:** the owner is read from a trusted `x-owner-id` header — that is tenancy plumbing, not
+  identity. A real authentication layer is still required before hosting.
 
 ### P1 — cannot operate or bill it
 
@@ -221,6 +233,12 @@ no confidence interval, and no per-segment breakdown.
   plus a periodic `vacuum` after deletes; a retention policy (configurable, default 30 days) for
   bundles and episode rows; a `DELETE /datasets/{id}` that actually removes bytes.
 - **Effort:** ~1 day.
+- **Status: CLOSED in Phase P0-B.1 (retention policy still open).** Verification runs in a
+  `TemporaryDirectory` that is always cleaned; deleting a conversation removes its workspace, runs
+  directory, exported bundles and dataset rows, then `VACUUM`s (the DB here was 220 MB / 0 rows /
+  53 897 free pages before this change). `DELETE /api/v4/datasets/{id}` removes the payload file and
+  compacts. 609 stale `temp_verify_*` directories were cleaned from the checkout. **Residual:** no
+  scheduled retention window yet — deletion is explicit, not time-based.
 
 ### P2 — depth and sales friction
 
@@ -348,7 +366,7 @@ processes, that evaluation never consults `get_critical_actions()`, and that the
 scored under the same masking regime it will run under (today: none, with the illegal-action rate
 reported separately).
 
-**Phase P0-B — "safe to host" (≈3 days)**
+**Phase P0-B — "safe to host" (≈3 days) — B.1 DONE (2026-10-30), B.2 in progress**
 G2 + G3 + G4 + G9.
 Acceptance: env modules execute in a `bwrap` (or `unshare -rn`) worker with a wall-clock timeout, no
 network, a read-only root and only the case directory visible; the multi-tenant path fails closed when

@@ -75,7 +75,8 @@ class ConversationStore:
                     env_code TEXT,
                     arena_html TEXT,
                     latest_model_zip_path TEXT,
-                    arena_locked INTEGER DEFAULT 0
+                    arena_locked INTEGER DEFAULT 0,
+                    owner_id TEXT NOT NULL DEFAULT 'local'
                 );
                 """
             )
@@ -87,6 +88,16 @@ class ConversationStore:
                     conn.execute("ALTER TABLE conversations ADD COLUMN arena_locked INTEGER DEFAULT 0;")
                 except Exception:
                     pass
+            if "owner_id" not in columns:
+                try:
+                    conn.execute(
+                        "ALTER TABLE conversations ADD COLUMN owner_id TEXT NOT NULL DEFAULT 'local';"
+                    )
+                    conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_conversations_owner ON conversations(owner_id);"
+                    )
+                except Exception:
+                    pass
             conn.commit()
 
     def create_conversation(
@@ -96,6 +107,7 @@ class ConversationStore:
         dataset_id: str | None = None,
         training_params: dict[str, Any] | None = None,
         arena_locked: bool = False,
+        owner_id: str = "local",
     ) -> dict[str, Any]:
         """Creates a new blank conversation entry and initializes its workspace directory."""
         cid = conversation_id or f"conv_{uuid.uuid4().hex[:8]}"
@@ -127,6 +139,7 @@ class ConversationStore:
             "arena_html": None,
             "latest_model_zip_path": None,
             "arena_locked": 1 if arena_locked else 0,
+            "owner_id": str(owner_id or "local"),
         }
 
         with self._get_connection() as conn:
@@ -136,12 +149,12 @@ class ConversationStore:
                     conversation_id, title, created_at, updated_at, status, chat_history,
                     dataset_id, blueprint_spec, training_params, current_round, best_metric,
                     rounds_history, episodes, env_code, arena_html, latest_model_zip_path,
-                    arena_locked
+                    arena_locked, owner_id
                 ) VALUES (
                     :conversation_id, :title, :created_at, :updated_at, :status, :chat_history,
                     :dataset_id, :blueprint_spec, :training_params, :current_round, :best_metric,
                     :rounds_history, :episodes, :env_code, :arena_html, :latest_model_zip_path,
-                    :arena_locked
+                    :arena_locked, :owner_id
                 )
                 ON CONFLICT(conversation_id) DO NOTHING;
                 """,
@@ -151,8 +164,8 @@ class ConversationStore:
 
         return self.get_conversation(cid) or record
 
-    def get_conversation(self, conversation_id: str) -> dict[str, Any] | None:
-        """Retrieves and deserializes the full conversation state from SQLite."""
+    def get_conversation(self, conversation_id: str, owner_id: str | None = None) -> dict[str, Any] | None:
+        """Retrieves and deserializes one conversation, optionally scoped to its owner."""
         with self._get_connection() as conn:
             cur = conn.execute(
                 "SELECT * FROM conversations WHERE conversation_id = ?",
@@ -163,6 +176,9 @@ class ConversationStore:
                 return None
 
             d = dict(row)
+            if owner_id is not None and str(d.get("owner_id") or "local") != str(owner_id):
+                # Never reveal that another tenant's conversation exists.
+                return None
             d["chat_history"] = json.loads(d["chat_history"]) if d["chat_history"] else []
             d["blueprint_spec"] = json.loads(d["blueprint_spec"]) if d["blueprint_spec"] else None
             d["training_params"] = json.loads(d["training_params"]) if d["training_params"] else {
@@ -175,17 +191,29 @@ class ConversationStore:
             d["arena_locked"] = bool(d.get("arena_locked", False))
             return d
 
-    def list_conversations(self) -> list[dict[str, Any]]:
-        """Returns metadata summary of all saved conversations sorted by updated_at DESC."""
+    def list_conversations(self, owner_id: str | None = None) -> list[dict[str, Any]]:
+        """Returns metadata summaries, scoped to one owner unless no owner is given."""
         with self._get_connection() as conn:
-            cur = conn.execute(
-                """
-                SELECT conversation_id, title, status, best_metric, training_params,
-                       current_round, updated_at, arena_locked
-                FROM conversations
-                ORDER BY updated_at DESC;
-                """
-            )
+            if owner_id is None:
+                cur = conn.execute(
+                    """
+                    SELECT conversation_id, title, status, best_metric, training_params,
+                           current_round, updated_at, arena_locked
+                    FROM conversations
+                    ORDER BY updated_at DESC;
+                    """
+                )
+            else:
+                cur = conn.execute(
+                    """
+                    SELECT conversation_id, title, status, best_metric, training_params,
+                           current_round, updated_at, arena_locked
+                    FROM conversations
+                    WHERE owner_id = ?
+                    ORDER BY updated_at DESC;
+                    """,
+                    (str(owner_id),),
+                )
             rows = cur.fetchall()
             summaries = []
             for row in rows:
@@ -392,29 +420,53 @@ class ConversationStore:
             raise KeyError(f"Conversation '{conversation_id}' not found.")
         return self.save_or_update(conversation_id, arena_locked=locked)
 
-    def delete(self, conversation_id: str) -> bool:
-        """Deletes conversation record and associated workspace + runs files."""
+    def delete(self, conversation_id: str, owner_id: str | None = None) -> bool:
+        """Deletes a conversation and every byte it owns (workspace, runs, bundles)."""
+        existing = self.get_conversation(conversation_id, owner_id=owner_id)
+        if not existing:
+            return False
+
         with self._get_connection() as conn:
             conn.execute("DELETE FROM conversations WHERE conversation_id = ?", (conversation_id,))
             conn.commit()
 
-        # Remove workspace directory
-        ws_dir = self.workspaces_dir / conversation_id
-        if ws_dir.exists():
+        for base in (self.workspaces_dir, Path("runs")):
+            target = base / conversation_id
+            if target.is_dir():
+                try:
+                    shutil.rmtree(target, ignore_errors=True)
+                except Exception:
+                    pass
+
+        # Exported artefacts are copies of the same data and must not outlive the conversation.
+        bundles_dir = Path("exported_bundles")
+        for artefact in (
+            bundles_dir / f"{conversation_id}.runbundle",
+            bundles_dir / f"{conversation_id}.runbundle.zip",
+        ):
             try:
-                shutil.rmtree(ws_dir, ignore_errors=True)
+                if artefact.is_dir():
+                    shutil.rmtree(artefact, ignore_errors=True)
+                elif artefact.exists():
+                    artefact.unlink()
             except Exception:
                 pass
 
-        # Remove runs directory
-        runs_dir = Path("runs") / conversation_id
-        if runs_dir.exists():
-            try:
-                shutil.rmtree(runs_dir, ignore_errors=True)
-            except Exception:
-                pass
-
+        # Without this the database keeps every deleted page forever: the file on this machine had
+        # 53 897 free pages out of 53 900 and still occupied 220 MB with zero rows.
+        self._compact()
         return True
+
+    def _compact(self) -> None:
+        """Reclaims free pages so deleting a conversation actually frees disk."""
+        try:
+            conn = sqlite3.connect(str(self.db_path), timeout=30.0, isolation_level=None)
+            try:
+                conn.execute("VACUUM;")
+            finally:
+                conn.close()
+        except Exception:
+            pass      # A locked database is not a reason to fail a delete.
 
     def clear_all(self) -> int:
         """Deletes all conversation records and cleans up all workspace & run session folders."""
@@ -435,6 +487,7 @@ class ConversationStore:
                     except Exception:
                         pass
 
+        self._compact()
         return len(cids)
 
 

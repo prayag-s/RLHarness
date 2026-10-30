@@ -24,7 +24,7 @@ from fastapi.testclient import TestClient
 
 from rl_ide.architect.models import AgentBlueprintSpec
 from rl_ide.architect.omni_agent import StudioActionType
-from rl_ide.api.server import app, global_store, ingested_datasets_store
+from rl_ide.api.server import app, global_store, dataset_store
 from rl_ide.state.conversation_store import get_conversation_store
 from rl_ide.ingest.loader import load_file
 from rl_ide.ingest.sql_connector import SQLConnector

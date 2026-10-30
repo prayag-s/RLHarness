@@ -524,8 +524,11 @@ class StudioOmniAgent:
         active_dataset = dataset
         if active_dataset is None and effective_dataset_id:
             try:
-                from rl_ide.api.server import ingested_datasets_store
-                active_dataset = ingested_datasets_store.get(effective_dataset_id)
+                from rl_ide.state.dataset_store import get_dataset_store
+
+                active_dataset = get_dataset_store().get(
+                    effective_dataset_id, owner_id=conv.get("owner_id") or "local"
+                )
             except Exception:
                 pass
 

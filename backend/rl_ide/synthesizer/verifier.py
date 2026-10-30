@@ -10,6 +10,7 @@ import json
 import math
 import re
 import sys
+import tempfile
 import traceback
 import uuid
 from pathlib import Path
@@ -330,10 +331,42 @@ class SandboxSmokeTester:
         repair_logs: list[str] = []
         current_code = code_str
 
-        out_dir = Path(workspace_dir or f"workspaces/temp_verify_{uuid.uuid4().hex[:8]}")
+        # Ephemeral verification workspaces must not accumulate: previously every attempt left a
+        # `workspaces/temp_verify_*` directory behind (609 of them on this machine).
+        temporary_dir: tempfile.TemporaryDirectory | None = None
+        if workspace_dir is None:
+            temporary_dir = tempfile.TemporaryDirectory(prefix="rl_verify_")
+            out_dir = Path(temporary_dir.name)
+        else:
+            out_dir = Path(workspace_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
         canonical_file = out_dir / "env_module.py"
 
+        try:
+            return self._verify_attempts(
+                current_code=current_code,
+                blueprint=blueprint,
+                dataset=dataset,
+                out_dir=out_dir,
+                canonical_file=canonical_file,
+                max_retries=max_retries,
+                repair_logs=repair_logs,
+            )
+        finally:
+            if temporary_dir is not None:
+                temporary_dir.cleanup()
+
+    def _verify_attempts(
+        self,
+        *,
+        current_code: str,
+        blueprint: AgentBlueprintSpec,
+        dataset: IngestedDataset | None,
+        out_dir: Path,
+        canonical_file: Path,
+        max_retries: int,
+        repair_logs: list[str],
+    ) -> tuple[bool, str, list[str]]:
         for attempt in range(max_retries + 1):
             try:
                 # 1. AST Static Audit

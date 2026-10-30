@@ -3,6 +3,7 @@
 from __future__ import annotations
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import zipfile
@@ -447,6 +448,7 @@ class PolicyExporter:
         output_dir: str | Path = "exported_bundles",
         bundle_name: str | None = None,
         scorecard: dict[str, Any] | None = None,
+        include_data: bool = False,
     ) -> tuple[Path, Path, float]:
         """Creates a standalone .runbundle directory and zip archive."""
         out_dir = Path(output_dir).resolve()
@@ -525,6 +527,7 @@ class PolicyExporter:
             **deployment,
             "onnx_numeric_parity_max_diff": float(max_diff),
             "onnx_numeric_parity_tolerance": ONNX_PARITY_TOLERANCE,
+            "contains_training_data": bool(include_data),
         }
         (bundle_dir / "scorecard.json").write_text(
             json.dumps(scorecard_payload, indent=2), encoding="utf-8"
@@ -535,10 +538,34 @@ class PolicyExporter:
             blueprint.model_dump_json(indent=2), encoding="utf-8"
         )
 
-        # 3. Copy env_module.py and arena.html
+        # 3. Copy env_module.py and arena.html. Customer rows are NOT shipped by default: the
+        # generated module embeds a 120-row sample, which is fine for a local studio and wrong for
+        # a bundle that gets emailed around. `include_data=True` is the explicit opt-in.
         env_src = Path(env_module_path)
+        data_dir = bundle_dir / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
         if env_src.exists():
-            shutil.copy2(str(env_src), str(bundle_dir / "env_module.py"))
+            env_text = env_src.read_text(encoding="utf-8")
+            if not include_data:
+                env_text = re.sub(
+                    r"^    _records = .*$",
+                    "    _records = []  # stripped: customer rows are not shipped by default (G3)",
+                    env_text,
+                    count=1,
+                    flags=re.MULTILINE,
+                )
+                (data_dir / "README.md").write_text(
+                    "# Training data not included\n\n"
+                    "This bundle was exported without customer rows. The ONNX policy runs on the\n"
+                    "observations you supply, so no data is required for inference.\n\n"
+                    "To reproduce the environment locally, place a `records.json` file here\n"
+                    "(a JSON list of row objects shaped like the training data) and instantiate\n"
+                    "`SynthesizedGymEnv(dataset_records=<rows>)`.\n\n"
+                    "Re-export with `include_data: true` if you explicitly want the sample\n"
+                    "embedded in the bundle.\n",
+                    encoding="utf-8",
+                )
+            (bundle_dir / "env_module.py").write_text(env_text, encoding="utf-8")
 
         arena_src = Path(arena_html_path)
         if arena_src.exists():

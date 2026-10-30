@@ -920,3 +920,43 @@ section.
   training) applies `get_valid_actions()` so the visualisation stays legible; it is a display path,
   not a measurement, and the scorecard path is unmasked. Worth unifying when the legality contract
   is defined for export (G2/§7 R1).
+
+---
+
+## 12. v4.8 — Phase P0-B.1: no data leaves, tenants isolated, disk bounded (2026-10-30)
+
+Implements G3 + G4 + G9. Phase P0-B is split into two reviewable commits: **B.1** (this section)
+covers data, tenancy and retention; **B.2** covers sandboxed execution (G2).
+
+### 12.1 What changed
+
+| Gap | Change |
+|---|---|
+| **G3** | `package_runbundle(include_data=False)` is the default. The bundled `env_module.py` has its `_records` sample stripped (regex on the generated line), `data/README.md` explains how to mount `records.json`, and `scorecard.json → deployment.contains_training_data` records the choice. `POST /export` takes `{"include_data": true}` for the old self-contained behaviour. |
+| **G4** | `conversations.owner_id` column (auto-migrated, default `local`), owner-scoped `list/get/delete`, and a new `DatasetStore` (`runs/datasets.db` + gzipped JSON rows) replacing the process dict — uploads now survive a restart. Every endpoint resolves the owner from `x-owner-id` via a context-var middleware, so swapping in real auth later changes one function. New `GET /api/v4/datasets` and `DELETE /api/v4/datasets/{id}`. |
+| **G9** | Verification workspaces use `tempfile.TemporaryDirectory` and are always cleaned (609 stale `temp_verify_*` directories were removed from this checkout); `DELETE /conversations/{id}` now also removes `exported_bundles/<id>.runbundle*` and `VACUUM`s the database; dataset deletion removes its payload file and compacts. |
+
+Deleting a conversation previously left every page behind: the database here was 220 MB with zero
+rows and 53 897 of 53 900 pages free. `VACUUM` after delete is now covered by a regression test.
+
+### 12.2 Verification
+
+```text
+$ pytest -q
+109 passed, 11 warnings in 684.28s (0:11:24)
+```
+
+| Test file | Purpose |
+|---|---|
+| `tests/test_tenancy_and_bundles.py` | **New** (8 tests) — dataset durability across store instances, dataset owner scoping, conversation owner scoping, delete removes workspace/bundles and reclaims pages, API hides other owners' conversations (list + get + delete → 404), default bundle contains no customer rows, `include_data` bundle is self-contained, verification leaves no workspace behind |
+| `tests/test_v4_2_commercial_suite.py` | Updated to the new `dataset_store` symbol |
+
+### 12.3 Residual risk from B.1
+
+- **Ownership is a trusted header, not authentication.** `x-owner-id` is only meaningful behind a
+  reverse proxy that sets it; the shared `RL_IDE_API_TOKEN` remains the only gate. An identity layer
+  is still required before hosting (tracked in G4's fix list, not delivered by scoping).
+- **Dataset payloads are JSON, not columnar.** Fine at 600–50 000 rows; a parquet payload is the
+  obvious upgrade if uploads grow.
+- **`save_or_update` creating a conversation falls back to owner `local`.** Normal flows always
+  create the conversation first, so this only matters for internal callers.
