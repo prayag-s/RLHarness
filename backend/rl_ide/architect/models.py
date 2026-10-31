@@ -209,6 +209,9 @@ class IntakeResponse(BaseModel):
             "target_metric_threshold": 90.0,
         }
     )
+    # Journey Coach findings for the objective and attached data. A plain dict keeps this
+    # module free of an import cycle; the API populates it from CoachReport.model_dump().
+    guidance: dict[str, Any] | None = None
 
     @property
     def clarifying_questions(self) -> list[ClarifyingQuestion]:

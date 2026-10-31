@@ -19,6 +19,8 @@ import {
   StudioChatResponse,
   JobStatus,
   UsageReport,
+  CoachListResponse,
+  CoachReport,
 } from '../types'
 
 const API_V4 = '/api/v4'
@@ -66,12 +68,20 @@ export function authHeaders(extra: Record<string, string> = {}): Record<string, 
 export class ApiError extends Error {
   readonly status: number
   readonly reason: string | null
+  /** Present when the Journey Coach blocked the action, so the UI can render the exact fix. */
+  readonly guidance?: CoachReport
 
-  constructor(message: string, status: number, reason: string | null) {
+  constructor(
+    message: string,
+    status: number,
+    reason: string | null,
+    guidance?: CoachReport,
+  ) {
     super(message)
     this.name = 'ApiError'
     this.status = status
     this.reason = reason
+    this.guidance = guidance
   }
 
   get needsModel(): boolean {
@@ -81,7 +91,17 @@ export class ApiError extends Error {
 
 async function failFrom(res: Response, fallback: string): Promise<never> {
   const body = await res.json().catch(() => ({ detail: fallback }))
-  throw new ApiError(body.detail || fallback, res.status, res.headers.get('X-RL-Reason'))
+  const rawDetail = (body as any)?.detail
+  const message =
+    typeof rawDetail === 'string'
+      ? rawDetail
+      : rawDetail?.message || fallback
+  throw new ApiError(
+    message,
+    res.status,
+    res.headers.get('X-RL-Reason'),
+    (body as any)?.guidance,
+  )
 }
 
 // -----------------------------------------------------------------------------
@@ -730,6 +750,63 @@ export async function getUsage(conversationId?: string): Promise<UsageReport> {
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: 'Usage lookup failed' }))
     throw new Error(err.detail || 'Usage lookup failed')
+  }
+  return res.json()
+}
+
+// -----------------------------------------------------------------------------
+// Journey Coach
+// -----------------------------------------------------------------------------
+
+export async function fetchGuidance(
+  conversationId: string,
+  stage?: string,
+): Promise<CoachListResponse> {
+  const query = stage ? `?stage=${encodeURIComponent(stage)}` : ''
+  const res = await apiFetch(`/conversations/${encodeURIComponent(conversationId)}/guidance${query}`)
+  if (!res.ok) {
+    await failFrom(res, 'Could not load coach findings')
+  }
+  return res.json()
+}
+
+export async function evaluateGuidance(
+  conversationId: string,
+  stage?: string,
+  useLlm?: boolean,
+): Promise<CoachReport> {
+  const res = await apiFetch(
+    `/conversations/${encodeURIComponent(conversationId)}/guidance/evaluate`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        stage: stage ?? null,
+        use_llm: useLlm ?? null,
+      }),
+    },
+  )
+  if (!res.ok) {
+    await failFrom(res, 'Could not evaluate coach findings')
+  }
+  return res.json()
+}
+
+export async function acknowledgeGuidance(
+  conversationId: string,
+  ruleId: string,
+  fingerprint?: string,
+): Promise<CoachListResponse> {
+  const res = await apiFetch(
+    `/conversations/${encodeURIComponent(conversationId)}/guidance/${encodeURIComponent(ruleId)}/ack`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fingerprint: fingerprint ?? null }),
+    },
+  )
+  if (!res.ok) {
+    await failFrom(res, 'Could not acknowledge the finding')
   }
   return res.json()
 }

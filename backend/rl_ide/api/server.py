@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field
 
 from rl_ide.architect.models import AgentBlueprintSpec, IntakeResponse
 from rl_ide.architect.intake import IntakeArchitectAgent
+from rl_ide.coach import CoachBlocked, CoachStage, get_coach, blockers_mode
 from rl_ide.architect.omni_agent import (
     StudioOmniAgent,
     StudioActionType,
@@ -110,6 +111,23 @@ app = FastAPI(
 def create_app() -> FastAPI:
     """Returns the FastAPI application instance."""
     return app
+
+
+@app.exception_handler(CoachBlocked)
+async def _coach_blocked_handler(_request: Request, exc: CoachBlocked):
+    """A blocker is a 409 with the finding attached, not a dead end.
+
+    The response carries the same guidance contract the rest of the UI renders, so the client can
+    show the exact fix instead of a generic failure.
+    """
+    return JSONResponse(
+        status_code=409,
+        content={
+            "detail": "The Journey Coach blocked this action until the finding is fixed.",
+            "guidance": exc.report.model_dump(mode="json"),
+        },
+        headers={"X-RL-Reason": "coach-blocked"},
+    )
 
 app.add_middleware(
     CORSMiddleware,
@@ -386,6 +404,14 @@ async def upload_file(
         )
         dataset_store.save(dataset, owner_id=current_owner())
 
+        try:
+            guidance = get_coach().evaluate(
+                CoachStage.DATA, dataset=dataset, use_llm=False
+            ).model_dump(mode="json")
+        except Exception as coach_err:  # noqa: BLE001 - ingestion already succeeded
+            logger.warning("Journey Coach data evaluation failed: %s", coach_err)
+            guidance = None
+
         return {
             "dataset_id": dataset.dataset_id,
             "name": dataset.name,
@@ -395,6 +421,7 @@ async def upload_file(
             "columns": list(dataset.df.columns) if hasattr(dataset, "df") and dataset.df is not None else [],
             "num_rows": len(dataset.df) if hasattr(dataset, "df") and dataset.df is not None else 0,
             "extracted_rules_count": len(dataset.extracted_rules),
+            "guidance": guidance,
         }
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -417,12 +444,21 @@ def ingest_sql(req: SQLIngestRequest):
         )
         dataset_store.save(dataset, owner_id=current_owner())
 
+        try:
+            guidance = get_coach().evaluate(
+                CoachStage.DATA, dataset=dataset, use_llm=False
+            ).model_dump(mode="json")
+        except Exception as coach_err:  # noqa: BLE001 - ingestion already succeeded
+            logger.warning("Journey Coach data evaluation failed: %s", coach_err)
+            guidance = None
+
         return {
             "dataset_id": dataset.dataset_id,
             "name": dataset.name,
             "format": dataset.format,
             "columns": list(dataset.df.columns),
             "num_rows": len(dataset.df),
+            "guidance": guidance,
         }
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -446,7 +482,10 @@ class ArchitectChatRequest(BaseModel):
 def architect_chat(req: ArchitectChatRequest):
     """Conversational Intake interview evaluating user intent across the 5 Pillars."""
     require_verified_llm()
-    bind_usage_context(req.conversation_id)
+    import uuid
+
+    cid = req.conversation_id or f"conv_{uuid.uuid4().hex[:8]}"
+    bind_usage_context(cid)
     dataset = dataset_store.get(req.dataset_id, current_owner()) if req.dataset_id else None
     architect = IntakeArchitectAgent()
     resp = architect.interview(
@@ -458,9 +497,21 @@ def architect_chat(req: ArchitectChatRequest):
         training_params=req.training_params,
     )
 
-    import uuid
-    cid = req.conversation_id or f"conv_{uuid.uuid4().hex[:8]}"
     resp.conversation_id = cid
+
+    # Evaluate what the user is about to build. Advisory here: this endpoint is the repair
+    # surface, so a blocker is reported with its fix instead of stopping the conversation.
+    try:
+        report = get_coach().evaluate(
+            CoachStage.OBJECTIVE,
+            conversation_id=cid,
+            prompt=req.user_prompt,
+            blueprint=resp.blueprint_spec,
+            dataset=dataset,
+        )
+        resp.guidance = report.model_dump(mode="json")
+    except Exception as coach_err:  # noqa: BLE001 - the coach must never break intake
+        logger.warning("Journey Coach objective evaluation failed: %s", coach_err)
 
     conv_store = get_conversation_store()
     existing_conv = conv_store.get_conversation(cid)
@@ -546,6 +597,35 @@ async def start_session(req: SessionStartRequest):
     ws_dir.mkdir(parents=True, exist_ok=True)
 
     dataset = dataset_store.get(req.dataset_id, current_owner()) if req.dataset_id else None
+
+    # Hard preflight before any synthesis is paid for. The objective prompt comes from the
+    # conversation so the judge cache populated during intake is reused instead of re-billed.
+    conv_before = get_conversation_store().get_conversation(
+        sid, owner_id=current_owner()
+    ) or {}
+    objective_prompt = ""
+    for message in conv_before.get("chat_history") or []:
+        if message.get("role") == "user" and message.get("content"):
+            objective_prompt = str(message["content"])
+            break
+    if not objective_prompt:
+        objective_prompt = f"{req.blueprint.task_title}. {req.blueprint.domain_summary}"
+    try:
+        preflight = get_coach().evaluate_preflight(
+            conversation_id=sid,
+            prompt=objective_prompt,
+            blueprint=req.blueprint,
+            dataset=dataset,
+            params={
+                "max_auto_tune_rounds": req.blueprint.max_auto_tune_rounds,
+                "episodes_per_round": req.blueprint.episodes_per_round,
+                "target_metric_threshold": req.blueprint.target_metric_threshold,
+            },
+        )
+    except Exception as coach_err:  # noqa: BLE001 - advisory checks must not break the build
+        logger.warning("Journey Coach preflight failed: %s", coach_err)
+    else:
+        get_coach().enforce(preflight)
 
     try:
         # 1. Synthesize Environment & Arena
@@ -1273,6 +1353,29 @@ def resume_training(conversation_id: str, req: ResumeTrainingRequest = ResumeTra
     target = int(blueprint.max_auto_tune_rounds or 5)
     remaining = req.additional_rounds or max(1, target - done)
 
+    try:
+        resume_report = get_coach().evaluate(
+            CoachStage.PARAMETERS,
+            conversation_id=conversation_id,
+            blueprint=blueprint,
+            dataset=(
+                dataset_store.get(conv.get("dataset_id"), current_owner())
+                if conv.get("dataset_id")
+                else None
+            ),
+            params={
+                "max_auto_tune_rounds": target,
+                "episodes_per_round": int(
+                    req.episodes_per_burst or blueprint.episodes_per_round or 200
+                ),
+                "target_metric_threshold": blueprint.target_metric_threshold,
+            },
+        )
+    except Exception as coach_err:  # noqa: BLE001 - advisory checks must not break a resume
+        logger.warning("Journey Coach resume preflight failed: %s", coach_err)
+    else:
+        get_coach().enforce(resume_report)
+
     payload = {
         "dataset_id": conv.get("dataset_id"),
         "max_rounds": target,
@@ -1736,6 +1839,147 @@ def get_crossfire_closure(conversation_id: str):
     return {
         "conversation_id": conversation_id,
         "closure": CrossfireProtocolStore(global_store.base_dir).closure_report(conversation_id),
+    }
+
+
+# -----------------------------------------------------------------------------
+# Journey Coach
+# -----------------------------------------------------------------------------
+
+class GuidanceEvaluateRequest(BaseModel):
+    stage: CoachStage | None = None  # None = full preflight (objective + data + parameters)
+    dataset_id: str | None = None
+    use_llm: bool | None = None
+
+
+class GuidanceAckRequest(BaseModel):
+    fingerprint: str | None = None
+    note: str = ""
+
+
+def _guidance_context(conversation_id: str, dataset_id: str | None = None):
+    conv = get_conversation_store().get_conversation(
+        conversation_id, owner_id=current_owner()
+    )
+    if not conv:
+        raise HTTPException(
+            status_code=404, detail=f"Conversation '{conversation_id}' not found."
+        )
+    blueprint = None
+    if conv.get("blueprint_spec"):
+        try:
+            blueprint = AgentBlueprintSpec.model_validate(conv["blueprint_spec"])
+        except Exception:
+            blueprint = None
+    resolved_dataset_id = dataset_id or conv.get("dataset_id")
+    dataset = (
+        dataset_store.get(resolved_dataset_id, current_owner())
+        if resolved_dataset_id
+        else None
+    )
+    return conv, blueprint, dataset, load_session_scorecard(conversation_id)
+
+
+def _objective_prompt(conv: dict[str, Any]) -> str:
+    for message in conv.get("chat_history") or []:
+        if message.get("role") == "user" and message.get("content"):
+            return str(message["content"])
+    blueprint = conv.get("blueprint_spec") or {}
+    return f"{blueprint.get('task_title', '')}. {blueprint.get('domain_summary', '')}".strip()
+
+
+@app.get("/api/v4/conversations/{conversation_id}/guidance")
+def get_guidance(conversation_id: str, stage: CoachStage | None = Query(default=None)):
+    """Unresolved Coach findings for this conversation, newest evidence wins."""
+    conv = get_conversation_store().get_conversation(
+        conversation_id, owner_id=current_owner()
+    )
+    if not conv:
+        raise HTTPException(
+            status_code=404, detail=f"Conversation '{conversation_id}' not found."
+        )
+    coach = get_coach()
+    return {
+        "conversation_id": conversation_id,
+        "items": coach.store.items(
+            conversation_id, stage=stage.value if stage else None
+        ),
+        "counts": coach.store.counts(conversation_id),
+        "blocker_mode": blockers_mode(),
+        "llm_calls": coach.store.llm_calls(conversation_id),
+    }
+
+
+@app.post("/api/v4/conversations/{conversation_id}/guidance/evaluate")
+def evaluate_guidance(
+    conversation_id: str,
+    req: GuidanceEvaluateRequest = GuidanceEvaluateRequest(),
+):
+    """Re-evaluates one stage (or the full preflight) on demand.
+
+    The rules are always free. The judge is cached by content hash, so the common case — the UI
+    re-opening a panel after a fix — costs nothing.
+    """
+    conv, blueprint, dataset, scorecard = _guidance_context(
+        conversation_id, req.dataset_id
+    )
+    coach = get_coach()
+    prompt = _objective_prompt(conv)
+    params = conv.get("training_params") or {}
+
+    if req.stage is None:
+        report = coach.evaluate_preflight(
+            conversation_id=conversation_id,
+            prompt=prompt,
+            blueprint=blueprint,
+            dataset=dataset,
+            params=params,
+            use_llm=req.use_llm,
+        )
+    else:
+        report = coach.evaluate(
+            req.stage,
+            conversation_id=conversation_id,
+            prompt=prompt,
+            blueprint=blueprint,
+            dataset=dataset,
+            params=params,
+            scorecard=scorecard,
+            conversation=conv,
+            arena_html=conv.get("arena_html"),
+            env_code=conv.get("env_code"),
+            use_llm=req.use_llm,
+        )
+    return report.model_dump(mode="json")
+
+
+@app.post("/api/v4/conversations/{conversation_id}/guidance/{rule_id}/ack")
+def acknowledge_guidance(
+    conversation_id: str,
+    rule_id: str,
+    req: GuidanceAckRequest = GuidanceAckRequest(),
+):
+    """Acknowledges a warning or tip. A blocker cannot be acknowledged in hard mode."""
+    conv = get_conversation_store().get_conversation(
+        conversation_id, owner_id=current_owner()
+    )
+    if not conv:
+        raise HTTPException(
+            status_code=404, detail=f"Conversation '{conversation_id}' not found."
+        )
+    try:
+        get_coach().acknowledge(
+            conversation_id, rule_id, fingerprint=req.fingerprint, note=req.note
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except PermissionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    coach = get_coach()
+    return {
+        "conversation_id": conversation_id,
+        "items": coach.store.items(conversation_id),
+        "counts": coach.store.counts(conversation_id),
     }
 
 
@@ -2292,6 +2536,17 @@ def session_export(session_id: str, req: ExportRequest | None = None):
         except Exception:
             exported_scorecard = None
 
+    try:
+        export_guidance = get_coach().evaluate(
+            CoachStage.EXPORT,
+            conversation_id=session_id,
+            scorecard=exported_scorecard or load_session_scorecard(session_id),
+            deployment=(exported_scorecard or {}).get("deployment"),
+        ).model_dump(mode="json")
+    except Exception as coach_err:  # noqa: BLE001 - export itself already succeeded
+        logger.warning("Journey Coach export evaluation failed: %s", coach_err)
+        export_guidance = None
+
     return {
         "session_id": session_id,
         "bundle_dir": str(bundle_dir),
@@ -2299,6 +2554,7 @@ def session_export(session_id: str, req: ExportRequest | None = None):
         "zip_path": str(zip_path),
         "onnx_parity_diff": max_diff,
         "scorecard": exported_scorecard,
+        "guidance": export_guidance,
         "download_url": f"/api/v4/sessions/{session_id}/download",
     }
 

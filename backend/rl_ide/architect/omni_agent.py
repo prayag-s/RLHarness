@@ -96,6 +96,9 @@ class StudioChatResponse(BaseModel):
     current_round: int = 1
     best_metric: float = 0.0
     action_plan: ChatActionPlan | None = None
+    # Journey Coach findings for this turn. A dict avoids importing the coach package from the
+    # agent module; the API fills it from CoachReport.model_dump().
+    guidance: dict[str, Any] | None = None
 
     def model_post_init(self, __context: Any) -> None:
         if not self.message and self.assistant_message:
@@ -1138,6 +1141,40 @@ class StudioOmniAgent:
 
         # Layer 5: training budget / run
         wants_training = ExecutionTarget.TRAINING_HYPERPARAMS in action_plan.targets
+        coach_report = None
+        if wants_training and blueprint is not None:
+            # The coach reviews the exact budget that is about to be spent. In hard mode a
+            # structural blocker (zero budget, impossible target, empty data) stops the run here
+            # rather than after an hour of training.
+            from rl_ide.coach import CoachStage, get_coach
+
+            coach = get_coach()
+            try:
+                coach_report = coach.evaluate(
+                    CoachStage.PARAMETERS,
+                    conversation_id=conversation_id,
+                    prompt=user_message,
+                    blueprint=blueprint,
+                    dataset=active_dataset,
+                    params=t_params,
+                )
+            except Exception as coach_err:  # noqa: BLE001 - the coach must never break a turn
+                logging.warning("Journey Coach parameter evaluation failed: %s", coach_err)
+                coach_report = None
+            if coach.hard_mode and coach_report is not None and coach_report.blockers:
+                wants_training = False
+                status = "blocked"
+                action_plan.targets = [
+                    target
+                    for target in action_plan.targets
+                    if target != ExecutionTarget.TRAINING_HYPERPARAMS
+                ]
+                notes.append(
+                    "⛔ Training was not started. The Journey Coach found a blocking issue: "
+                    + "; ".join(item.title for item in coach_report.blockers)
+                    + ". Fix it and send the request again."
+                )
+
         if wants_training and blueprint is not None:
             arena_locked = True
             if "target_metric_threshold" in t_params:
@@ -1265,6 +1302,7 @@ class StudioOmniAgent:
             current_round=current_r,
             best_metric=best_m,
             action_plan=action_plan,
+            guidance=coach_report.model_dump(mode="json") if coach_report else None,
         )
 
     # Generic reward concepts -> breakdown terms. These are English concepts, not domain templates.

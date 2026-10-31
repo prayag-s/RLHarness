@@ -10,7 +10,8 @@ import {
   Sparkles,
   Zap,
 } from 'lucide-react'
-import { RoundSnapshot, Scorecard } from '../types'
+import { CoachAction, CoachItem, CoachReport, RoundSnapshot, Scorecard } from '../types'
+import { CoachCard } from './CoachCard'
 
 interface TelemetryPanelProps {
   targetMetricName?: string
@@ -23,6 +24,9 @@ interface TelemetryPanelProps {
   driftStatus: string
   onRollback: (roundNum: number) => Promise<void>
   isRollingBack?: boolean
+  resultsGuidance?: CoachReport | null
+  onCoachAction?: (action: CoachAction, item: CoachItem) => void
+  onAcknowledgeCoach?: (item: CoachItem) => void
 }
 
 export const TelemetryPanel: React.FC<TelemetryPanelProps> = ({
@@ -36,6 +40,9 @@ export const TelemetryPanel: React.FC<TelemetryPanelProps> = ({
   driftStatus = 'healthy',
   onRollback,
   isRollingBack = false,
+  resultsGuidance = null,
+  onCoachAction,
+  onAcknowledgeCoach,
 }) => {
   const isTargetAchieved = currentMetric >= targetThreshold
   const progressPercent = Math.min(100, Math.max(0, (currentMetric / (targetThreshold || 100)) * 100))
@@ -272,6 +279,15 @@ export const TelemetryPanel: React.FC<TelemetryPanelProps> = ({
                 </div>
               ))}
             </div>
+          )}
+
+          {resultsGuidance && resultsGuidance.items?.length > 0 && (
+            <CoachCard
+              report={resultsGuidance}
+              onAction={onCoachAction || (() => undefined)}
+              onAcknowledge={onAcknowledgeCoach}
+              className="mt-1"
+            />
           )}
         </div>
       )}

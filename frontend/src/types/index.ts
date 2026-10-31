@@ -51,6 +51,62 @@ export interface InteractiveSpec {
   controls: InteractiveControlSpec[]
 }
 
+
+/** One Journey Coach finding: what is wrong, why it matters, and the executable fix. */
+export type CoachStage =
+  | 'objective'
+  | 'data'
+  | 'parameters'
+  | 'preview'
+  | 'results'
+  | 'export'
+
+export type CoachSeverity = 'blocker' | 'warning' | 'tip'
+
+export type CoachActionKind =
+  | 'apply_params'
+  | 'use_objective'
+  | 'send_message'
+  | 'open_guide'
+  | 'run_episodes'
+
+export interface CoachAction {
+  kind: CoachActionKind
+  label: string
+  payload: Record<string, any>
+}
+
+export interface CoachItem {
+  rule_id: string
+  stage: CoachStage
+  severity: CoachSeverity
+  title: string
+  why: string
+  evidence: Record<string, any>
+  actions: CoachAction[]
+  source: 'rule' | 'llm'
+  status: 'open' | 'acknowledged' | 'resolved'
+  fingerprint?: string
+}
+
+export interface CoachReport {
+  stage: CoachStage | null
+  status: 'ok' | 'attention' | 'blocked'
+  items: CoachItem[]
+  conversation_id?: string | null
+  evaluated_at: string
+  llm_used: boolean
+  llm_skipped_reason?: string | null
+}
+
+export interface CoachListResponse {
+  conversation_id: string
+  items: CoachItem[]
+  counts: Record<string, number>
+  blocker_mode: 'hard' | 'advisory'
+  llm_calls: number
+}
+
 export interface AgentBlueprintSpec {
   task_title: string
   domain_summary: string
@@ -102,6 +158,7 @@ export interface IntakeResponse {
   blueprint_spec?: AgentBlueprintSpec | null
   blueprint?: AgentBlueprintSpec | null
   recommended_training_params?: TrainingParams
+  guidance?: CoachReport | null
 }
 
 export interface EpisodeLog {
@@ -205,6 +262,7 @@ export interface StudioChatResponse {
   current_round: number
   best_metric: number
   current_metric?: number
+  guidance?: CoachReport | null
 }
 
 export interface ScorecardBaseline {
@@ -455,6 +513,7 @@ export interface IngestedDatasetSummary {
   columns: string[]
   num_rows: number
   extracted_rules_count?: number
+  guidance?: CoachReport | null
 }
 
 export interface BundleMetadata {

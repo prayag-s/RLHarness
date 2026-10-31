@@ -28,7 +28,11 @@ import {
   IngestedDatasetSummary,
   ActivityTimelineItem,
   TrainingParams,
+  CoachAction,
+  CoachItem,
+  CoachReport,
 } from '../types'
+import { CoachCard } from './CoachCard'
 
 interface ArchitectPanelProps {
   onStartSession: (blueprint: AgentBlueprintSpec, datasetId?: string) => Promise<void>
@@ -56,6 +60,9 @@ interface ArchitectPanelProps {
   onLockArena?: () => void
   onSendStudioMessage?: (message: string, trainingParams?: TrainingParams, answers?: Record<string, string>) => Promise<any>
   chatInputRef?: React.RefObject<HTMLInputElement>
+  coachReport?: CoachReport | null
+  onCoachAction?: (action: CoachAction, item: CoachItem) => void
+  onAcknowledgeCoach?: (item: CoachItem) => void
 }
 
 export const ArchitectPanel: React.FC<ArchitectPanelProps> = ({
@@ -79,6 +86,9 @@ export const ArchitectPanel: React.FC<ArchitectPanelProps> = ({
   onLockArena,
   onSendStudioMessage,
   chatInputRef,
+  coachReport,
+  onCoachAction,
+  onAcknowledgeCoach,
 }) => {
   // Unified Continuous Chat Input State
   const [userPrompt, setUserPrompt] = useState('')
@@ -621,6 +631,16 @@ export const ArchitectPanel: React.FC<ArchitectPanelProps> = ({
             </div>
           )}
         </div>
+
+        {/* Coach findings sit next to the decision, not in a separate help page */}
+        {coachReport && coachReport.items?.length > 0 && (
+          <CoachCard
+            report={coachReport}
+            onAction={onCoachAction || (() => undefined)}
+            onAcknowledge={onAcknowledgeCoach}
+            className="mx-3 mb-1"
+          />
+        )}
 
         {/* 100% Persistent Chat Input Thread */}
         <form onSubmit={(e) => handleUnifiedSend(undefined, e)} className="space-y-1.5">

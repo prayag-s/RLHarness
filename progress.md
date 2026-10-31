@@ -1717,3 +1717,79 @@ Two documents, two audiences:
 - `TRUST_DRAWER_SPEC_AND_IMPLEMENTATION.md` — design record for the UI itself: constraints,
   per-tab behaviour, backend contracts, the defects it exposed, and the deliberate residuals
   (no rubric editor, no re-score button, harvest needs a warm process).
+
+## 21. v5.6 — Journey Coach: catch the shortcut before it costs a run (2026-10-31)
+
+The studio judged outcomes well and intent not at all. A vague objective, an unlabelled dataset, a
+100% target with ten episodes, or a scorecard read without its interval could each waste a run while
+every existing control behaved correctly. The field guide said what to do; nothing checked whether
+the user had done it.
+
+### 21.1 What changed
+
+A new `backend/rl_ide/coach/` package evaluates six checkpoints and returns executable findings:
+
+| Stage | Deterministic checks (free) | LLM judgement (cached) |
+|---|---|---|
+| Objective | six-part coverage, unencoded "never", action/observation presence, multiple jobs | completeness, consistency, a rewritten objective |
+| Data | target, single class, imbalance, missing, duplicates, ID and single-feature leakage, row count | does the data answer the objective |
+| Parameters | 0–100 target, 100% trap, Wilson width, majority/uniform baselines, projected episodes, prohibition vs reward | — |
+| Preview | live hooks, metric signal, controls | can a human judge success from this screen |
+| Results | held-out status, CI width, baseline, plateau, corpus regressions, Crossfire reasons, illegal actions | what it means and what to do next |
+| Export | scorecard presence, Crossfire closure, deployment agreement, ONNX parity | — |
+
+Every finding carries one of five executable actions: `apply_params`, `use_objective`,
+`send_message`, `open_guide`, `run_episodes`.
+
+### 21.2 Hard mode at the execution points
+
+Blockers are enforced where time and money are spent, not where the user is trying to fix them:
+
+- `POST /sessions/start` evaluates objective + data + parameters and returns **HTTP 409 with the
+  guidance** instead of starting synthesis.
+- A training intent inside the Studio chat sets `status="blocked"`, removes the training action and
+  returns the finding; no training job is enqueued.
+- `POST …/training/resume` evaluates before creating the job.
+- The intake chat stays advisory: it is the repair surface.
+
+`RL_IDE_COACH_BLOCKERS=hard` is the default; `advisory` downgrades enforcement. A blocker cannot be
+acknowledged away in hard mode — only warnings and tips can.
+
+### 21.3 Why the judge cannot invent a number
+
+All numbers are computed in `facts.py` before the model is called. The judge may only return
+findings whose numeric tokens already appear in the facts; a 97.5% that is not in the evidence drops
+the finding. It may never return a blocker (downgraded to warning), its output is capped at three
+items, and any provider failure returns rules-only with a reason. The judge is cached by content
+hash and capped at 12 calls per conversation (`RL_IDE_COACH_MAX_LLM_CALLS`), so re-opening a panel
+costs nothing.
+
+### 21.4 UI
+
+- `CoachCard` inline: above the chat input for objective/budget, inside the held-out scorecard for
+  results.
+- `Coach` badge in the header with blocker/warning counts, opening a stage-grouped drawer.
+- `open_guide` deep-links into the field guide (`5.1`, `9.3`, `19.4`).
+- `apply_params` patches the training controls; `send_message` / `use_objective` go through the
+  existing Studio chat.
+
+### 21.5 Verification
+
+- `backend/tests/test_journey_coach.py` — 29 tests: rules, hard/advisory enforcement, blocker
+  acknowledgement refusal, persistence across restart, acknowledged-warning resolution, judge number
+  rejection, blocker downgrade, fail-open, cache reuse, rule-over-LLM dedup, three HTTP endpoints.
+- `npm run build` (TypeScript + Vite) passes.
+- Targeted backend suites (`test_agentic_chat_planner`, `test_product_friction`,
+  `test_llm_mandatory_gate`, `test_jobs`) pass after the integration.
+
+### 21.6 Residual risk
+
+- Thresholds in `rules.py` are encoded opinions (5% minority, 30% missing, 20 episodes, 10-point
+  CI), not learned per tenant.
+- The judge does not inspect `env_module.py`; correctness there remains the smoke tester's and the
+  verifier gate's job.
+- Results guidance is triggered by `scorecard_ready`; a run without a scorecard gets the
+  "no held-out evidence" tip rather than an inferred narrative.
+- Hard mode is process-wide (`RL_IDE_COACH_BLOCKERS`), not a per-conversation setting.
+
+The full design record is in `JOURNEY_COACH_SPEC_AND_IMPLEMENTATION.md`.

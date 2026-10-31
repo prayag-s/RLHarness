@@ -1,4 +1,4 @@
-import React, { useMemo, useRef } from 'react'
+import React, { useEffect, useMemo, useRef } from 'react'
 import ReactMarkdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { BookOpen, X } from 'lucide-react'
@@ -7,6 +7,8 @@ import guideMarkdown from '../../../docs/USER_GUIDE.md?raw'
 interface GuideModalProps {
   isOpen: boolean
   onClose: () => void
+  /** Section number to scroll to, e.g. "5.1" or "9.3". */
+  initialSection?: string | null
 }
 
 interface TocEntry {
@@ -62,9 +64,28 @@ const components: Components = {
   h3: heading('h3'),
 }
 
-export const GuideModal: React.FC<GuideModalProps> = ({ isOpen, onClose }) => {
+export const GuideModal: React.FC<GuideModalProps> = ({ isOpen, onClose, initialSection }) => {
   const toc = useMemo(() => buildToc(guideMarkdown), [])
   const contentRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!isOpen || !initialSection) return
+    const entry =
+      toc.find((item) => item.text.startsWith(`${initialSection} `)) ||
+      toc.find((item) => item.text === initialSection)
+    if (!entry) return
+    const timer = window.setTimeout(() => {
+      const container = contentRef.current
+      const target = container?.querySelector<HTMLElement>(`[id="${entry.id}"]`)
+      if (!container || !target) return
+      const offset =
+        target.getBoundingClientRect().top -
+        container.getBoundingClientRect().top +
+        container.scrollTop
+      container.scrollTo({ top: Math.max(0, offset - 12) })
+    }, 60)
+    return () => window.clearTimeout(timer)
+  }, [isOpen, initialSection, toc])
 
   if (!isOpen) return null
 

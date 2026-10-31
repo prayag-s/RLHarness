@@ -10,6 +10,7 @@ import { CodeInspectorModal } from './components/CodeInspectorModal'
 import { SQLIngestModal } from './components/SQLIngestModal'
 import { ConversationSidebar } from './components/ConversationSidebar'
 import { TrustPanel } from './components/TrustPanel'
+import { CoachPanel } from './components/CoachPanel'
 
 import {
   AgentBlueprintSpec,
@@ -28,6 +29,9 @@ import {
   ArenaSource,
   DriftSnapshot,
   ObservedStep,
+  CoachAction,
+  CoachItem,
+  CoachReport,
 } from './types'
 
 import {
@@ -52,6 +56,9 @@ import {
   fetchConversation,
   deleteConversation,
   clearAllConversations,
+  acknowledgeGuidance,
+  evaluateGuidance,
+  fetchGuidance,
 } from './services/api'
 
 // The field guide (Markdown + renderer) is only needed when opened, so keep it out of the
@@ -118,6 +125,15 @@ export const App: React.FC = () => {
   // Trust surface: corpus / Crossfire / gate history, plus the last step the user inspected.
   const [isTrustOpen, setIsTrustOpen] = useState(false)
   const [isGuideOpen, setIsGuideOpen] = useState(false)
+  const [guideSection, setGuideSection] = useState<string | null>(null)
+  const [isCoachOpen, setIsCoachOpen] = useState(false)
+  const [coachReport, setCoachReport] = useState<CoachReport | null>(null)
+  const [resultsGuidance, setResultsGuidance] = useState<CoachReport | null>(null)
+  const [coachCounts, setCoachCounts] = useState<{ blocker: number; warning: number }>({
+    blocker: 0,
+    warning: 0,
+  })
+  const activeConversationIdRef = useRef<string | undefined>(undefined)
   const [lastStep, setLastStep] = useState<ObservedStep | null>(null)
   const [trustRefreshKey, setTrustRefreshKey] = useState(0)
 
@@ -151,6 +167,116 @@ export const App: React.FC = () => {
       apiKey: '',
     }
   })
+
+  useEffect(() => {
+    activeConversationIdRef.current = activeConversationId
+  }, [activeConversationId])
+
+  // The coach is advisory to the shell: a failed count or evaluation must never break the studio.
+  const refreshCoachSummary = async (conversationId?: string) => {
+    const cid = conversationId || activeConversationIdRef.current
+    if (!cid) {
+      setCoachCounts({ blocker: 0, warning: 0 })
+      return
+    }
+    try {
+      const data = await fetchGuidance(cid)
+      setCoachCounts({
+        blocker: data.counts.blocker || 0,
+        warning: data.counts.warning || 0,
+      })
+    } catch {
+      // Keep the last known counts; the next evaluation will refresh them.
+    }
+  }
+
+  const refreshResultsGuidance = async (conversationId: string) => {
+    try {
+      const report = await evaluateGuidance(conversationId, 'results')
+      setResultsGuidance(report)
+      void refreshCoachSummary(conversationId)
+    } catch (err) {
+      console.warn('Coach results evaluation failed', err)
+    }
+  }
+
+  const markAcknowledged = (report: CoachReport | null, item: CoachItem): CoachReport | null => {
+    if (!report) return report
+    return {
+      ...report,
+      items: report.items.map((candidate) =>
+        candidate.rule_id === item.rule_id &&
+        (candidate.fingerprint || candidate.title) === (item.fingerprint || item.title)
+          ? { ...candidate, status: 'acknowledged' }
+          : candidate,
+      ),
+    }
+  }
+
+  const handleCoachAction = async (action: CoachAction, item: CoachItem) => {
+    if (action.kind === 'apply_params' || action.kind === 'run_episodes') {
+      const patch = action.payload || {}
+      setTrainingParams((prev) => ({
+        ...prev,
+        ...(patch.max_auto_tune_rounds !== undefined
+          ? { max_auto_tune_rounds: Number(patch.max_auto_tune_rounds) }
+          : {}),
+        ...(patch.episodes_per_round !== undefined
+          ? { episodes_per_round: Number(patch.episodes_per_round) }
+          : {}),
+        ...(patch.target_metric_threshold !== undefined
+          ? { target_metric_threshold: Number(patch.target_metric_threshold) }
+          : {}),
+      }))
+      addTimelineItem('Coach recommendation applied', action.label, 'synthesis', 'success')
+      return
+    }
+
+    if (action.kind === 'open_guide') {
+      setGuideSection(String(action.payload?.section || '') || null)
+      setIsGuideOpen(true)
+      return
+    }
+
+    const message =
+      action.kind === 'use_objective'
+        ? String(action.payload?.objective || '')
+        : String(action.payload?.message || '')
+    if (!message) return
+
+    if (action.kind === 'use_objective') {
+      setCoachReport(null)
+    }
+    addTimelineItem('Coach action', action.label, 'synthesis', 'info')
+    try {
+      await handleSendStudioMessage(message)
+    } catch (err: any) {
+      addTimelineItem(
+        'Coach action failed',
+        err?.message || 'Could not apply the fix',
+        'error',
+        'warning',
+      )
+    }
+  }
+
+  const handleAcknowledgeCoach = async (item: CoachItem) => {
+    const cid = activeConversationIdRef.current
+    if (!cid) return
+    try {
+      await acknowledgeGuidance(cid, item.rule_id, item.fingerprint)
+      setCoachReport((prev) => markAcknowledged(prev, item))
+      setResultsGuidance((prev) => markAcknowledged(prev, item))
+      void refreshCoachSummary(cid)
+    } catch (err: any) {
+      addTimelineItem(
+        'Coach acknowledgement failed',
+        err?.message || 'Could not acknowledge the finding',
+        'error',
+        'warning',
+      )
+    }
+  }
 
   // Mandatory LLM Key Verification on Startup
   useEffect(() => {
@@ -307,6 +433,9 @@ export const App: React.FC = () => {
     try {
       const conv = await fetchConversation(cid)
       setActiveConversationId(cid)
+      setCoachReport(null)
+      setResultsGuidance(null)
+      void refreshCoachSummary(cid)
       setArenaHtml(conv.arena_html || '')
       setArenaLocked(conv.arena_locked ?? false)
       setArenaSource((conv.arena_source as ArenaSource) || null)
@@ -537,6 +666,11 @@ export const App: React.FC = () => {
         setActiveConversationId(resp.conversation_id)
       }
 
+      if (resp.guidance) {
+        setCoachReport(resp.guidance)
+        void refreshCoachSummary(resp.conversation_id || activeConversationId)
+      }
+
       // Refresh conversations list in background
       loadConversationsList()
 
@@ -608,6 +742,20 @@ export const App: React.FC = () => {
 
       if (resp.conversation_id) {
         setActiveConversationId(resp.conversation_id)
+      }
+
+      if (resp.guidance) {
+        setCoachReport(resp.guidance)
+        void refreshCoachSummary(resp.conversation_id)
+      }
+      if (resp.status === 'blocked') {
+        setIsTraining(false)
+        addTimelineItem(
+          'Coach stopped training',
+          'A blocking finding must be fixed before the run can start. See the Coach card.',
+          'error',
+          'warning',
+        )
       }
 
       if (resp.arena_html) {
@@ -838,7 +986,18 @@ export const App: React.FC = () => {
       // Connect WebSocket for live telemetry streaming
       connectWebSocket(sid)
     } catch (err: any) {
-      addTimelineItem('Synthesis Failed', err.message || 'Error compiling environment', 'error', 'warning')
+      if (err instanceof ApiError && err.guidance) {
+        setCoachReport(err.guidance)
+        setIsCoachOpen(true)
+        addTimelineItem(
+          'Coach blocked the build',
+          err.guidance.items?.[0]?.title || err.message,
+          'error',
+          'warning',
+        )
+      } else {
+        addTimelineItem('Synthesis Failed', err.message || 'Error compiling environment', 'error', 'warning')
+      }
       setIsTraining(false)
     } finally {
       setIsSynthesizing(false)
@@ -876,6 +1035,10 @@ export const App: React.FC = () => {
     } else if (eventType === 'scorecard_ready') {
       setScorecard(event.scorecard || null)
       setTrustRefreshKey((k) => k + 1)
+      const coachConversation = activeConversationIdRef.current
+      if (coachConversation) {
+        void refreshResultsGuidance(coachConversation)
+      }
       addTimelineItem(
         'Held-Out Scorecard 🎯',
         event.message || 'Evaluation finished on unseen rows.',
@@ -1124,6 +1287,9 @@ export const App: React.FC = () => {
     try {
       const summary = await uploadDatasetFile(file)
       setAttachedDataset(summary)
+      if (summary.guidance) {
+        setCoachReport(summary.guidance)
+      }
       addTimelineItem(
         'Dataset Attached 📊',
         `Uploaded "${summary.name}" (${summary.num_rows} rows, ${summary.columns.length} columns)`,
@@ -1185,6 +1351,9 @@ export const App: React.FC = () => {
           scorecard?.crossfire?.reasons?.length ?? activeSession?.crossfire?.reasons?.length ?? 0
         }
         onOpenGuide={() => setIsGuideOpen(true)}
+        onOpenCoach={() => setIsCoachOpen(true)}
+        coachBlockers={coachCounts.blocker}
+        coachWarnings={coachCounts.warning}
         isCheckingLLM={isCheckingLLM}
       />
 
@@ -1212,6 +1381,9 @@ export const App: React.FC = () => {
           onLockArena={handleLockArena}
           onSendStudioMessage={handleSendStudioMessage}
           chatInputRef={chatInputRef}
+          coachReport={coachReport}
+          onCoachAction={handleCoachAction}
+          onAcknowledgeCoach={handleAcknowledgeCoach}
         />
 
         {/* Center Panel: Universal Sandboxed Arena Iframe */}
@@ -1244,6 +1416,9 @@ export const App: React.FC = () => {
           driftStatus={driftStatus}
           onRollback={handleRollback}
           isRollingBack={isRollingBack}
+          resultsGuidance={resultsGuidance}
+          onCoachAction={handleCoachAction}
+          onAcknowledgeCoach={handleAcknowledgeCoach}
         />
       </div>
 
@@ -1283,7 +1458,14 @@ export const App: React.FC = () => {
       />
 
       <React.Suspense fallback={null}>
-        <GuideModal isOpen={isGuideOpen} onClose={() => setIsGuideOpen(false)} />
+        <GuideModal
+          isOpen={isGuideOpen}
+          onClose={() => {
+            setIsGuideOpen(false)
+            setGuideSection(null)
+          }}
+          initialSection={guideSection}
+        />
       </React.Suspense>
 
       <TrustPanel
@@ -1295,6 +1477,14 @@ export const App: React.FC = () => {
         refreshKey={trustRefreshKey}
         actionLabels={activeSession?.blueprint?.action_labels ?? []}
         onCorpusChanged={() => setTrustRefreshKey((k) => k + 1)}
+      />
+
+      <CoachPanel
+        isOpen={isCoachOpen}
+        onClose={() => setIsCoachOpen(false)}
+        conversationId={activeConversationId ?? activeSession?.session_id}
+        onAction={handleCoachAction}
+        onChanged={() => void refreshCoachSummary()}
       />
 
       <CodeInspectorModal

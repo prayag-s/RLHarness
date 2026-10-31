@@ -34,6 +34,9 @@ interface HeaderProps {
   trustVerdict?: string
   trustBlockers?: number
   onOpenGuide: () => void
+  onOpenCoach: () => void
+  coachBlockers?: number
+  coachWarnings?: number
   isCheckingLLM?: boolean
 }
 
@@ -57,6 +60,9 @@ export const Header: React.FC<HeaderProps> = ({
   trustVerdict,
   trustBlockers = 0,
   onOpenGuide,
+  onOpenCoach,
+  coachBlockers = 0,
+  coachWarnings = 0,
   isCheckingLLM = false,
 }) => {
   const getProviderLabel = () => {
@@ -223,6 +229,37 @@ export const Header: React.FC<HeaderProps> = ({
         >
           <BookOpen className="h-3.5 w-3.5 text-emerald-400" />
           <span>Guide</span>
+        </button>
+
+        {/* Journey Coach: findings that must be fixed before a run is paid for */}
+        <button
+          onClick={onOpenCoach}
+          className={`flex items-center space-x-1.5 px-3 py-1 rounded-lg text-xs font-medium border transition ${
+            coachBlockers > 0
+              ? 'bg-rose-950/50 border-rose-800/70 text-rose-300 hover:border-rose-700'
+              : coachWarnings > 0
+                ? 'bg-amber-950/40 border-amber-800/60 text-amber-300 hover:border-amber-700'
+                : 'bg-gray-900 border-gray-700 text-gray-200 hover:border-gray-600'
+          }`}
+          title={
+            coachBlockers > 0
+              ? `${coachBlockers} blocking finding(s) must be fixed before training`
+              : coachWarnings > 0
+                ? `${coachWarnings} coach warning(s) for this conversation`
+                : 'Objective, data, budget and result findings'
+          }
+        >
+          <Sparkles className="h-3.5 w-3.5 opacity-80" />
+          <span>Coach</span>
+          {coachBlockers > 0 ? (
+            <span className="px-1.5 py-0.2 rounded-full bg-rose-900/80 border border-rose-700/60 text-rose-200 text-[10px] font-mono">
+              {coachBlockers}
+            </span>
+          ) : coachWarnings > 0 ? (
+            <span className="px-1.5 py-0.2 rounded-full bg-amber-900/80 border border-amber-700/60 text-amber-200 text-[10px] font-mono">
+              {coachWarnings}
+            </span>
+          ) : null}
         </button>
 
         {/* Trust & Provenance: the corpus, the pre-registered verdict, the gate history */}
