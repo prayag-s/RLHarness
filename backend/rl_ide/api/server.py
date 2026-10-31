@@ -1704,6 +1704,32 @@ def harvest_passive_log(conversation_id: str, req: PassiveHarvestRequest):
     return {"detected": True, "detection": detection.model_dump(), "harvested": harvested}
 
 
+@app.get("/api/v4/conversations/{conversation_id}/gates")
+def get_gate_history(conversation_id: str):
+    """Every verifier-gate verdict for this conversation, oldest first.
+
+    Served from the live session when it is in memory, otherwise from the persisted
+    ``session_state.json``: a restarted server must not lose the explanation of why a round was
+    reverted, which is the whole point of keeping the history.
+    """
+    session = global_store.get_session(conversation_id)
+    if session is None:
+        session = global_store.load_session_state(conversation_id)
+    if session is None:
+        return {
+            "conversation_id": conversation_id,
+            "entries": [],
+            "last": None,
+            "mutation_pending": None,
+        }
+    return {
+        "conversation_id": conversation_id,
+        "entries": list(session.gate_history or []),
+        "last": session.critique_gate,
+        "mutation_pending": session.mutation_pending,
+    }
+
+
 @app.get("/api/v4/conversations/{conversation_id}/crossfire")
 def get_crossfire_closure(conversation_id: str):
     """The pre-registered verdict, or the reasons a verdict cannot be claimed."""

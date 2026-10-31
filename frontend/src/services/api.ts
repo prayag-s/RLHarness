@@ -1,5 +1,10 @@
 import {
   AgentBlueprintSpec,
+  CrossfireClosure,
+  EvalCorpusCase,
+  EvalCorpusResponse,
+  GateHistoryResponse,
+  PassiveHarvestResult,
   ClarifyingQuestion,
   IntakeResponse,
   SessionState,
@@ -437,6 +442,93 @@ export async function interactSession(
     throw new Error(err.detail || 'Interaction failed')
   }
 
+  return res.json()
+}
+
+// -----------------------------------------------------------------------------
+// Trust surface: golden corpus, Crossfire protocol, passive harvest
+// -----------------------------------------------------------------------------
+
+export async function fetchEvalCorpus(
+  conversationId: string,
+): Promise<EvalCorpusResponse> {
+  const res = await apiFetch(`/conversations/${conversationId}/corpus`)
+  if (!res.ok) {
+    await failFrom(res, 'Could not read the eval corpus')
+  }
+  return res.json()
+}
+
+export async function addCorpusCase(
+  conversationId: string,
+  payload: {
+    obs_vector: number[]
+    expected_actions?: number[]
+    forbidden_actions?: number[]
+    rationale?: string
+    source?: string
+  },
+): Promise<{ case: EvalCorpusCase }> {
+  const res = await apiFetch(`/conversations/${conversationId}/corpus/cases`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) {
+    await failFrom(res, 'Could not lock this case')
+  }
+  return res.json()
+}
+
+export async function waiveCorpusCase(
+  conversationId: string,
+  caseId: string,
+  reason: string,
+): Promise<{ waived: string }> {
+  const res = await apiFetch(`/conversations/${conversationId}/corpus/cases`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ waive_case_id: caseId, waive_reason: reason }),
+  })
+  if (!res.ok) {
+    await failFrom(res, 'Could not waive this case')
+  }
+  return res.json()
+}
+
+export async function harvestPassiveLog(
+  conversationId: string,
+  datasetId: string,
+  options: { min_usable_rows?: number; max_cases?: number } = {},
+): Promise<PassiveHarvestResult> {
+  const res = await apiFetch(`/conversations/${conversationId}/corpus/harvest-passive`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ dataset_id: datasetId, ...options }),
+  })
+  if (!res.ok) {
+    await failFrom(res, 'Could not harvest this log')
+  }
+  return res.json()
+}
+
+export async function fetchGateHistory(
+  conversationId: string,
+): Promise<GateHistoryResponse> {
+  const res = await apiFetch(`/conversations/${conversationId}/gates`)
+  if (!res.ok) {
+    await failFrom(res, 'Could not read the gate history')
+  }
+  return res.json()
+}
+
+export async function fetchCrossfireClosure(
+  conversationId: string,
+): Promise<{ conversation_id: string; closure: CrossfireClosure }> {
+  const res = await apiFetch(`/conversations/${conversationId}/crossfire`)
+  if (!res.ok) {
+    await failFrom(res, 'Could not read the Crossfire protocol')
+  }
   return res.json()
 }
 

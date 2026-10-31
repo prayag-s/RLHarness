@@ -67,6 +67,37 @@ def parse_nudge_meta_command(text: str) -> dict[str, Any] | None:
 
 MAX_PPO_TIMESTEPS = 100_000
 
+# A UI history, not an audit log: the corpus and scorecard are the durable record. Twenty entries
+# cover a long run without letting the session JSON grow without bound.
+MAX_GATE_HISTORY = 20
+
+
+def record_gate_decision(
+    session: "SessionState",
+    decision: Any,
+    *,
+    round_num: int,
+    origin: str,
+) -> dict[str, Any]:
+    """Appends a gate verdict to the session so the UI can explain each keep/rollback."""
+    triage = getattr(decision, "triage", None)
+    entry = {
+        "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "round": int(round_num),
+        "origin": origin,
+        "kind": getattr(decision, "mutation_kind", None),
+        "passed": bool(getattr(decision, "passed", False)),
+        "category": getattr(triage, "category", None) if triage else None,
+        "reason": getattr(decision, "reason", ""),
+        "advice": getattr(triage, "advice", "") if triage else "",
+        "evidence": getattr(triage, "evidence", {}) if triage else {},
+    }
+    session.critique_gate = decision.model_dump()
+    history = list(session.gate_history or [])
+    history.append(entry)
+    session.gate_history = history[-MAX_GATE_HISTORY:]
+    return entry
+
 
 class TrainingInProgressError(RuntimeError):
     """Raised when a session already has an active training/tuning operation."""
@@ -143,6 +174,9 @@ class SessionState(BaseModel):
     eval_corpus: dict[str, Any] | None = None
     crossfire: dict[str, Any] | None = None
     critique_gate: dict[str, Any] | None = None
+    # Every gate decision, oldest first. critique_gate alone is the last one, which is not enough
+    # to answer "why did round 3 get reverted?" once round 4 has been judged.
+    gate_history: list[dict[str, Any]] = Field(default_factory=list)
     best_val_metric: float | None = None
     best_val_round: int | None = None
     mutation_pending: str | None = None
@@ -722,7 +756,7 @@ class AutonomousLoopController:
                     term_stats=term_stats,
                     entropy_after=entropy_now,
                 )
-                session.critique_gate = decision.model_dump()
+                record_gate_decision(session, decision, round_num=r, origin="training_round")
                 mutation_kind = None
                 session.mutation_pending = None
                 if not decision.passed:

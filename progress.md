@@ -1681,9 +1681,29 @@ assumption can be challenged. Latency is reported end-to-end (ONNX p99 **plus** 
   tested at store level, but nothing in the chat flow calls them yet; today a critique becomes a
   corpus case only through `POST .../corpus/cases`.
 
-### 20.6 Operator documentation
+### 20.6 Trust drawer: the controls now have a UI
 
-`CROSSFIRE_CONTROLS_USER_GUIDE.md` documents the five controls from the outside in: endpoints and
-payloads, the triage table, how a `win` is actually earned, the cost levers, the CSV shape passive
+The five controls were API-only, which made them look like things that merely "happen". They are
+now drivable from the **Trust** button in the header (a drawer with Crossfire / Corpus / Gate tabs,
+plus a blocker count on the button):
+
+| Added | Behaviour |
+|---|---|
+| `SessionState.gate_history` (+ `GET /conversations/{id}/gates`) | Every gate verdict is kept, not just the last one, and is served from `session_state.json` when the process no longer has the session in memory |
+| `POST …/corpus/cases` from the arena | "This is correct" / "Never do this" on the step just inspected becomes an assertion. The observation comes from the policy's own encoder at that step |
+| Waive from the corpus table | Superseded assertions stop scoring without losing their record |
+| Frontier-log import | Upload + harvest in one action, reporting registered / soft-negative / unmatched counts and the `skipped_no_env` caveat |
+| Crossfire tab | Full reason list and hold-out progress instead of a one-line badge tooltip |
+
+The lock-step path needed one runtime fix: environments that drive their own board state inside
+`interactive_step()` never call `step()`, so `capture_observations()` saw nothing and `/interact`
+returned no observation. `security/worker.py` now records the vector inside `predict()`, which is
+by definition the observation the policy scored. Side effect: live drift scoring now accumulates
+samples for these environments too, where it previously stayed at zero.
+
+### 20.7 Operator documentation
+
+`CROSSFIRE_CONTROLS_USER_GUIDE.md` documents the five controls from the outside in — §11 covers the
+Trust drawer for UI-only users — plus endpoints and payloads, the triage table, how a `win` is actually earned, the cost levers, the CSV shape passive
 harvest accepts, the switches (`RL_IDE_ALLOW_HOST_LLM`, `RL_IDE_OWNER_BUDGET_USD`, ...), and the
 observed failure modes (empty corpus on pre-feature sessions, `skipped_no_env`, `inconclusive`).

@@ -6,6 +6,9 @@ live server; the payloads and outputs below are real, not illustrative.
 > Reading note: "const control" is covered here in both senses the new work supports —
 > **control switches** (what the system will and will not allow, §3/§7) and **cost control**
 > (what owning the policy costs, §5).
+>
+> **In a hurry?** Everything below is reachable from the **Trust** button in the app header — see
+> §11. The curl examples stay because they are the only way to script or audit these controls.
 
 Set a base URL once:
 
@@ -51,6 +54,8 @@ tic-tac-toe conversation reports `count: 0`). One retrain or resume seeds it; th
 retro-fabricated.
 
 ### 2.2 Read it
+
+*In the UI: Trust → Corpus.*
 
 ```bash
 curl -s "$BASE/api/v4/conversations/$CONV/corpus" | python3 -m json.tool
@@ -123,6 +128,8 @@ audit, and an environment with hidden state outside the vector would make the co
 
 ## 3. The verifier gate — what is now refused
 
+*In the UI: Trust → Gate shows every verdict, newest first, with the triage category and advice.*
+
 A change is kept only if **zero corpus cases regress** and held-out accuracy either stays within
 1.5 pp or the drop is statistically indistinguishable from noise (paired sign test, p > 0.05,
 ≥ 20 paired episodes).
@@ -152,6 +159,9 @@ curl -s "$BASE/api/v4/sessions/<session_id>" | python3 -c \
 ---
 
 ## 4. Crossfire protocol — when you may claim a win
+
+*In the UI: Trust → Crossfire (the default tab) lists every blocking reason and the hold-out
+progress bar, so you do not have to hover a badge.*
 
 The protocol is opened **before** the first training step and stores:
 
@@ -196,6 +206,8 @@ time. Below 100, `reasons` says so and the verdict stays `inconclusive`.
 ---
 
 ## 5. Cost control — the ledger and the payback point
+
+*In the UI: right-hand Telemetry panel, scorecard card (`⚡ p99 latency` and the payback lines).*
 
 `scorecard.economics` prices two things separately: the **token bill** and the **human bill**. A
 token-only comparison flatters the product (~500k decisions to pay back), so both bases are
@@ -262,6 +274,8 @@ Accept values: `accepted/approve/approved/true/1/yes/y/kept/correct`. Reject val
 `rejected/reject/false/0/no/n/edited/overridden/wrong`.
 
 ### 6.2 Upload, then harvest
+
+*In the UI: Trust → Corpus → Import a frontier interaction log (same pipeline, no curl).*
 
 ```bash
 DATASET=$(curl -s -X POST "$BASE/api/v4/ingest/upload" -F "file=@frontier_log.csv" \
@@ -372,3 +386,44 @@ workspaces/<conversation>/
 | `skipped_no_env: true` | Env not loaded in this server process | Harvest in the same process as a train/resume |
 | `400 A case needs an observation and at least one expectation` | Empty `expected_actions` and `forbidden_actions` | Add one of the two |
 | Gate keeps reverting your change | `compiler_mismatch` | Read the compiled expression and the observed ranges from `evidence`, widen the threshold |
+
+---
+
+## 11. Using everything from the UI (no curl)
+
+The **Trust** button sits in the header, between the LLM badge and Policy Registry. It opens a
+drawer scoped to the active conversation, with three tabs. The button carries a count of Crossfire
+blockers, so an unearned claim is visible before you open anything.
+
+| Tab | What it shows | What you can do |
+|-----|---------------|-----------------|
+| **Crossfire** (default) | Verdict pill (`win` / `loss` / `inconclusive` / `not preregistered`), a progress bar `frozen hold-out x / 100`, every blocking reason as a numbered list, policy vs baseline, rubric hash, and the pre-registration timestamps | Read only — a verdict cannot be edited into existence |
+| **Corpus** | Scored/passed/failed/waived counters, then one row per assertion with its status dot, source, expectation and rationale | **Lock the step you just inspected**, **waive** a superseded case, **import a frontier log** |
+| **Gate** | Every verifier-gate decision, newest first: round, change kind, pass/rollback, triage category and the advice | Read only; a pending change is flagged while it waits for the next round |
+
+### 11.1 Locking a step (the important one)
+
+1. Switch the arena to **🎮 Play / Interact** and make a move.
+2. Open **Trust → Corpus**. The card reads e.g. `step 3 · obs[23] · policy chose 4 · Place at center`.
+3. Add a reason (optional) and press **This is correct** (locks the action as expected) or
+   **Never do this** (locks it as forbidden).
+4. The assertion appears in the list immediately and now gates every retrain and every
+   chat-authored change.
+
+The observation comes from the policy's own encoder for that step, so the assertion is testable by
+construction. If the card instead says *"Play the arena in Interactive mode, then reopen this
+drawer"*, no interactive step has been recorded yet in this session.
+
+### 11.2 Importing a frontier log
+
+**Trust → Corpus → Import a frontier interaction log** → choose the CSV. The panel reports how
+many rows matched, how many assertions were registered, how many were soft negatives, and how many
+rows could not be tied to a record (skipped rather than invented). If it says *"No environment
+loaded in the server"*, retry after a training run in the same server session — the harvest needs
+the conversation's encoder in memory.
+
+### 11.3 What is still automatic (by design)
+
+Corpus seeding, the Crossfire protocol opening, gate decisions, best-on-validation selection and
+the economics ledger all happen without a click. The drawer is where you *read and judge* them,
+not where you trigger them.

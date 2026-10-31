@@ -514,6 +514,53 @@ def test_end_to_end_crossfire_falsification_contract(tmp_path):
     assert any("hash" in reason for reason in after["reasons"])
 
 
+def test_gate_history_records_every_verdict_for_the_ui(tmp_path):
+    """The UI answers "why was round 3 reverted?" — one last-decision slot cannot."""
+    from rl_ide.autopilot.loop_controller import MAX_GATE_HISTORY, SessionState, record_gate_decision
+
+    session = SessionState(session_id="s", blueprint=_blueprint_stub())
+    snapshot = VerifierSnapshot(
+        mutation_kind="reward",
+        session_id="s",
+        env_code="",
+        val_metric=80.0,
+        val_outcomes=[1.0, 0.0] * 10,
+        corpus_passing_ids=["c1", "c2"],
+    )
+
+    kept = VerifierGate().decide(
+        snapshot,
+        val_metric_after=84.0,
+        val_outcomes_after=[1.0, 1.0] * 10,
+        corpus_passing_ids_after=["c1", "c2"],
+    )
+    assert kept.passed is True
+    entry = record_gate_decision(session, kept, round_num=2, origin="training_round")
+    assert entry["passed"] is True and entry["round"] == 2
+    assert session.critique_gate["passed"] is True
+
+    rolled = VerifierGate().decide(
+        snapshot,
+        val_metric_after=60.0,
+        val_outcomes_after=[0.0, 0.0] * 10,
+        corpus_passing_ids_after=["c1"],
+    )
+    assert rolled.passed is False
+    bad = record_gate_decision(session, rolled, round_num=3, origin="chat_mutation")
+    assert bad["passed"] is False
+    assert bad["category"] in ("cross_term_interference", "rl_variance")
+    assert bad["advice"], "a rolled-back change must carry actionable advice, not just a verdict"
+
+    # History is append-only and ordered, so the UI can render a timeline.
+    assert [e["round"] for e in session.gate_history] == [2, 3]
+    assert session.gate_history[0]["origin"] == "training_round"
+
+    for i in range(MAX_GATE_HISTORY + 5):
+        record_gate_decision(session, kept, round_num=10 + i, origin="training_round")
+    assert len(session.gate_history) == MAX_GATE_HISTORY
+    assert session.gate_history[-1]["round"] == 10 + MAX_GATE_HISTORY + 4
+
+
 def test_protocol_rejects_rubric_registered_after_training(tmp_path):
     store = CrossfireProtocolStore(tmp_path)
     store.open("s1", rubric=["r"], min_holdout=1)

@@ -205,6 +205,7 @@ class CrossfireProtocolStore:
             "holdout_passed": int(holdout_passed),
             "holdout_pass_rate_pct": pass_rate,
             "target_pass_rate_pct": protocol.target_pass_rate_pct,
+            "min_holdout": protocol.min_holdout,
             "policy_metric": policy_metric,
             "baseline_metric": baseline_metric,
             "beats_baseline": beats_baseline,
@@ -233,5 +234,9 @@ class CrossfireProtocolStore:
             "rubric_hash": protocol.rubric_hash,
             "opened_at": protocol.opened_at,
             "training_started_at": protocol.training_started_at,
+            # Enough for a caller to show progress toward the requirement, not just the complaint.
+            "holdout_registered": len(protocol.holdout_case_ids),
+            "min_holdout": protocol.min_holdout,
+            "target_pass_rate_pct": protocol.target_pass_rate_pct,
             "reasons": gaps or ["The protocol is registered but has not been scored yet."],
         }

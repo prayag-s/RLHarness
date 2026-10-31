@@ -48,6 +48,7 @@ from rl_ide.autopilot.loop_controller import (
     SessionState,
     TrainingInProgressError,
     parse_nudge_meta_command,
+    record_gate_decision,
 )
 from rl_ide.autopilot.auto_tuner import AutoTunerAgent
 from rl_ide.autopilot.eval_corpus import EvalCorpusStore, greedy_predictor
@@ -1366,7 +1367,12 @@ class StudioOmniAgent:
 
         session = self.session_store.get_session(conversation_id)
         if session is not None:
-            session.critique_gate = decision.model_dump()
+            record_gate_decision(
+                session,
+                decision,
+                round_num=int(getattr(session, "current_round", 0) or 0),
+                origin="chat_mutation",
+            )
 
         if decision.passed:
             candidate_path.unlink(missing_ok=True)

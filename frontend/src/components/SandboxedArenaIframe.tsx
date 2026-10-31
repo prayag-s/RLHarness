@@ -12,7 +12,7 @@ import {
   AlertTriangle,
 } from 'lucide-react'
 import { interactSession } from '../services/api'
-import { ArenaSource, EpisodeLog } from '../types'
+import { ArenaSource, EpisodeLog, ObservedStep } from '../types'
 
 interface SandboxedArenaIframeProps {
   sessionId?: string
@@ -29,6 +29,8 @@ interface SandboxedArenaIframeProps {
   arenaPending?: boolean
   arenaError?: string | null
   onRetryArena?: () => void
+  /** Reports the observation behind each interactive step, so the user can lock it as a test. */
+  onStepObserved?: (step: ObservedStep) => void
 }
 
 export const SandboxedArenaIframe: React.FC<SandboxedArenaIframeProps> = ({
@@ -45,6 +47,7 @@ export const SandboxedArenaIframe: React.FC<SandboxedArenaIframeProps> = ({
   arenaPending = false,
   arenaError = null,
   onRetryArena,
+  onStepObserved,
 }) => {
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const [mode, setMode] = useState<'mock' | 'watch' | 'play'>(isArenaLocked ? 'watch' : 'mock')
@@ -114,6 +117,29 @@ export const SandboxedArenaIframe: React.FC<SandboxedArenaIframeProps> = ({
       if (event.data.type === 'ARENA_INTERACT' && sessionId) {
         try {
           const res = await interactSession(sessionId, event.data.payload)
+          // The backend echoes the encoded observation behind this step; without it a "this was
+          // wrong" judgement could not become an executable assertion.
+          const obs: number[] = Array.isArray(res.obs_vector)
+            ? res.obs_vector.map((v: any) => Number(v))
+            : []
+          if (obs.length > 0 && onStepObserved) {
+            const probs: number[] = Array.isArray(res.action_probs) ? res.action_probs : []
+            let chosen: number | null = null
+            if (probs.length > 0) {
+              chosen = probs.reduce((best, p, i) => (p > probs[best] ? i : best), 0)
+            }
+            onStepObserved({
+              obs,
+              action: chosen,
+              probs,
+              step:
+                typeof res.step === 'number'
+                  ? res.step
+                  : typeof res.arena_state?.move_count === 'number'
+                    ? res.arena_state.move_count
+                    : null,
+            })
+          }
           // Send updated state back to iframe
           postArenaUpdate({
             arena_state: res.arena_state || {},
@@ -133,7 +159,7 @@ export const SandboxedArenaIframe: React.FC<SandboxedArenaIframeProps> = ({
     return () => {
       window.removeEventListener('message', handleWindowMessage)
     }
-  }, [sessionId, postArenaUpdate])
+  }, [sessionId, postArenaUpdate, onStepObserved])
 
   // 5. Handle Episode Replay Scrubber
   const handleSelectEpisode = (ep: EpisodeLog, idx: number) => {

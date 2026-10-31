@@ -9,6 +9,7 @@ import {
   AlertTriangle,
   Zap,
   History,
+  ShieldCheck,
 } from 'lucide-react'
 import { LLMSettings } from '../types'
 
@@ -28,6 +29,9 @@ interface HeaderProps {
   conversationCount?: number
   usageCostUsd?: number
   usageCalls?: number
+  onOpenTrust: () => void
+  trustVerdict?: string
+  trustBlockers?: number
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -46,6 +50,9 @@ export const Header: React.FC<HeaderProps> = ({
   conversationCount = 0,
   usageCostUsd = 0,
   usageCalls = 0,
+  onOpenTrust,
+  trustVerdict,
+  trustBlockers = 0,
 }) => {
   const getProviderLabel = () => {
     switch (llmSettings.provider) {
@@ -190,6 +197,33 @@ export const Header: React.FC<HeaderProps> = ({
             </>
           )}
           <Settings className="h-3.5 w-3.5 ml-1 opacity-70" />
+        </button>
+
+        {/* Trust & Provenance: the corpus, the pre-registered verdict, the gate history */}
+        <button
+          onClick={onOpenTrust}
+          className={`flex items-center space-x-1.5 px-3 py-1 rounded-lg text-xs font-medium border transition ${
+            trustVerdict === 'win'
+              ? 'bg-emerald-950/50 border-emerald-800/60 text-emerald-300 hover:border-emerald-700'
+              : trustVerdict === 'loss'
+                ? 'bg-rose-950/40 border-rose-900/60 text-rose-300 hover:border-rose-800'
+                : 'bg-gray-900 border-gray-700 text-gray-200 hover:border-gray-600'
+          }`}
+          title={
+            trustVerdict
+              ? `Crossfire verdict: ${trustVerdict.replace(/_/g, ' ')}${
+                  trustBlockers ? ` · ${trustBlockers} blocker(s)` : ''
+                }`
+              : 'Golden corpus, Crossfire protocol and verifier-gate history'
+          }
+        >
+          <ShieldCheck className="h-3.5 w-3.5 opacity-80" />
+          <span>Trust</span>
+          {trustBlockers > 0 && (
+            <span className="px-1.5 py-0.2 rounded-full bg-amber-900/80 border border-amber-700/60 text-amber-300 text-[10px] font-mono">
+              {trustBlockers}
+            </span>
+          )}
         </button>
 
         {/* Policy Registry Button */}

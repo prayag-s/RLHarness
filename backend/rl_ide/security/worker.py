@@ -103,6 +103,14 @@ def run_serve(job: dict[str, Any]) -> dict[str, Any]:
     def predict(obs):
         import numpy as np
 
+        # The vector the policy actually scored. Some environments drive their own board state in
+        # interactive_step() and never call step(), so env.step() capture alone can miss it - and
+        # an assertion recorded without the real observation would be untestable.
+        try:
+            last_obs[:] = [float(x) for x in np.asarray(obs, dtype="float32").reshape(-1)]
+        except (TypeError, ValueError):
+            pass
+
         if model is None:
             n_actions = int(getattr(env.action_space, "n", 1))
             return 0, [1.0 / max(1, n_actions)] * max(1, n_actions)

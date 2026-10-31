@@ -152,6 +152,11 @@ export interface SessionState {
   latest_frame?: Record<string, any>
   total_episodes_trained?: number
   scorecard?: Scorecard | null
+  eval_corpus?: EvalCorpusReport | null
+  crossfire?: CrossfireClosure | null
+  critique_gate?: GateDecision | null
+  gate_history?: GateRecord[]
+  mutation_pending?: string | null
 }
 
 /** Result of scoring live observations against the training baseline. */
@@ -278,6 +283,112 @@ export interface Scorecard {
     onnx_success_pct?: number
     onnx_numeric_parity_max_diff?: number
     error?: string
+  }
+}
+
+/** One executable assertion: the policy must keep choosing `expected` and never `forbidden`. */
+export interface EvalCorpusCase {
+  case_id: string
+  source: string
+  obs_prefix: number[][]
+  expected_actions: number[]
+  forbidden_actions: number[]
+  action_labels: string[]
+  rationale: string
+  state_summary: Record<string, any>
+  created_at: string
+  waived: boolean
+  waived_reason: string
+}
+
+export interface EvalCorpusReport {
+  total_cases: number
+  scored_cases: number
+  passed_cases: number
+  failed_cases: number
+  waived_cases: number
+  pass_rate_pct: number
+  by_source: Record<string, { passed: number; failed: number; waived: number }>
+  regressed_case_ids: string[]
+  failing_case_ids: string[]
+  failed_details: Array<Record<string, any>>
+}
+
+export interface EvalCorpusResponse {
+  conversation_id: string
+  report: EvalCorpusReport | null
+  cases: EvalCorpusCase[]
+  count: number
+}
+
+/** The pre-registered verdict, or the concrete reasons a verdict cannot be claimed. */
+export interface CrossfireClosure {
+  closed: boolean
+  verdict: 'win' | 'loss' | 'inconclusive' | 'not_preregistered' | string
+  reasons: string[]
+  holdout_total?: number
+  holdout_passed?: number
+  holdout_pass_rate_pct?: number
+  target_pass_rate_pct?: number
+  min_holdout?: number
+  holdout_registered?: number
+  policy_metric?: number | null
+  baseline_metric?: number | null
+  beats_baseline?: boolean
+  rubric_hash?: string
+  opened_at?: string
+  training_started_at?: string | null
+}
+
+export interface GateTriage {
+  category: string
+  advice: string
+  evidence?: Record<string, any>
+}
+
+export interface GateDecision {
+  passed: boolean
+  status?: string
+  reason?: string
+  mutation_kind?: string | null
+  triage?: GateTriage | null
+}
+
+export interface GateRecord {
+  at: string
+  round: number
+  origin: string
+  kind: string | null
+  passed: boolean
+  category: string | null
+  reason: string
+  advice: string
+  evidence?: Record<string, any>
+}
+
+export interface GateHistoryResponse {
+  conversation_id: string
+  entries: GateRecord[]
+  last: GateDecision | null
+  mutation_pending: string | null
+}
+
+/** The observation the user was looking at when they judged the policy. */
+export interface ObservedStep {
+  obs: number[]
+  action: number | null
+  probs: number[]
+  step: number | null
+}
+
+export interface PassiveHarvestResult {
+  detected: boolean
+  detection?: Record<string, any>
+  harvested?: {
+    registered: number
+    soft_negatives: number
+    unmatched_rows: number
+    skipped_no_env: boolean
   }
 }
 

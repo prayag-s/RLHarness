@@ -9,6 +9,7 @@ import { RegistryModal } from './components/RegistryModal'
 import { CodeInspectorModal } from './components/CodeInspectorModal'
 import { SQLIngestModal } from './components/SQLIngestModal'
 import { ConversationSidebar } from './components/ConversationSidebar'
+import { TrustPanel } from './components/TrustPanel'
 
 import {
   AgentBlueprintSpec,
@@ -26,6 +27,7 @@ import {
   Scorecard,
   ArenaSource,
   DriftSnapshot,
+  ObservedStep,
 } from './types'
 
 import {
@@ -106,6 +108,11 @@ export const App: React.FC = () => {
     episodes_per_round: 200,
     target_metric_threshold: 90,
   })
+
+  // Trust surface: corpus / Crossfire / gate history, plus the last step the user inspected.
+  const [isTrustOpen, setIsTrustOpen] = useState(false)
+  const [lastStep, setLastStep] = useState<ObservedStep | null>(null)
+  const [trustRefreshKey, setTrustRefreshKey] = useState(0)
 
   // Modals & Mandatory LLM Gate
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
@@ -373,6 +380,7 @@ export const App: React.FC = () => {
 
   const handleNewAgent = () => {
     setActiveSession(null)
+    setLastStep(null)
     setActiveConversationId(undefined)
     setAttachedDataset(null)
     setArenaHtml('')
@@ -848,6 +856,7 @@ export const App: React.FC = () => {
       )
     } else if (eventType === 'scorecard_ready') {
       setScorecard(event.scorecard || null)
+      setTrustRefreshKey((k) => k + 1)
       addTimelineItem(
         'Held-Out Scorecard 🎯',
         event.message || 'Evaluation finished on unseen rows.',
@@ -1112,6 +1121,11 @@ export const App: React.FC = () => {
         conversationCount={conversations.length}
         usageCostUsd={usage.cost_usd}
         usageCalls={usage.calls}
+        onOpenTrust={() => setIsTrustOpen(true)}
+        trustVerdict={scorecard?.crossfire?.verdict ?? activeSession?.crossfire?.verdict}
+        trustBlockers={
+          scorecard?.crossfire?.reasons?.length ?? activeSession?.crossfire?.reasons?.length ?? 0
+        }
       />
 
       {/* Main Studio 3-Panel Workspace */}
@@ -1154,6 +1168,7 @@ export const App: React.FC = () => {
           arenaPending={arenaPending}
           arenaError={arenaError}
           onRetryArena={handleRetryArena}
+          onStepObserved={setLastStep}
         />
 
         {/* Right Panel: Target Expectations & Multi-Round Telemetry */}
@@ -1204,6 +1219,17 @@ export const App: React.FC = () => {
       <RegistryModal
         isOpen={isRegistryOpen}
         onClose={() => setIsRegistryOpen(false)}
+      />
+
+      <TrustPanel
+        isOpen={isTrustOpen}
+        onClose={() => setIsTrustOpen(false)}
+        conversationId={activeConversationId ?? activeSession?.session_id}
+        session={activeSession}
+        lastStep={lastStep}
+        refreshKey={trustRefreshKey}
+        actionLabels={activeSession?.blueprint?.action_labels ?? []}
+        onCorpusChanged={() => setTrustRefreshKey((k) => k + 1)}
       />
 
       <CodeInspectorModal
