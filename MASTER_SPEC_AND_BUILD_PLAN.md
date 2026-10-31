@@ -594,3 +594,6 @@ memo (claim 4 in particular), so the divergences are recorded here rather than s
 `verifier_gate.py` (paired gate + deterministic triage), `traces.py` (redaction),
 `ingest/interaction_log.py` (passive harvest), per-round sandbox orchestration, best-on-val
 selection, and the two-basis economics ledger.
+
+Operator-facing usage of these controls (endpoints, payloads, switches, troubleshooting) is in
+`CROSSFIRE_CONTROLS_USER_GUIDE.md`.

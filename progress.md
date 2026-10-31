@@ -1677,3 +1677,13 @@ assumption can be challenged. Latency is reported end-to-end (ONNX p99 **plus** 
   `RL_IDE_ALLOW_HOST_LLM=0` is set; the scorecard records this in `economics.caveats`.
 - **Per-round sandbox cost.** Each round restages the workspace and spawns a worker (~1 s plus copy);
   rounds × 50-episode evaluations are now the dominant cost of a long run.
+- **Two harvest paths are unwired.** `harvest_from_critique()` and `supervised_rows()` exist and are
+  tested at store level, but nothing in the chat flow calls them yet; today a critique becomes a
+  corpus case only through `POST .../corpus/cases`.
+
+### 20.6 Operator documentation
+
+`CROSSFIRE_CONTROLS_USER_GUIDE.md` documents the five controls from the outside in: endpoints and
+payloads, the triage table, how a `win` is actually earned, the cost levers, the CSV shape passive
+harvest accepts, the switches (`RL_IDE_ALLOW_HOST_LLM`, `RL_IDE_OWNER_BUDGET_USD`, ...), and the
+observed failure modes (empty corpus on pre-feature sessions, `skipped_no_env`, `inconclusive`).
