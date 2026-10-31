@@ -1604,3 +1604,76 @@ was for something larger than what shipped here.
   advancing and restarting a journey, and the one-shot regression.
 - Gates: **`pytest -q` → 214 passed, 2 skipped, 0 failed in 27:02**; fast gate
   (`-m "not slow and not live_llm"`) → **155 passed, 2 skipped**.
+
+---
+
+## 20. v5.5 — Phase P3: Crossfire closure, measured (2026-10-31)
+
+Implements `PHASE_P3_V5_5_REFINED_EXECUTION_PLAN.md`, which supersedes the DeepSeek draft. The
+draft's five gaps were all real (I re-verified each against the code); its grading was not — an
+instrument that can measure a claim is not evidence the claim holds. Eight corrections were applied
+before implementation, and two claims were withdrawn rather than re-housed.
+
+### 20.1 What changed
+
+| Module | Change |
+|---|---|
+| `autopilot/crossfire_protocol.py` *(new)* | Pre-registered rubric (SHA-256), training-start stamp, frozen hold-out set. Verdict is refused (`closed: false`, `inconclusive`) on a missing stamp, a tampered rubric, a rubric registered after training, or fewer than `min_holdout` (default 100) judgements. |
+| `autopilot/eval_corpus.py` *(new)* | `EvalCorpusStore` / `GoldenEvalCase` with observation prefixes, content-addressed dedupe, waiving, and four growth channels (`val_seed`, `user_locked_step`, `user_critique`, `passive_log`). |
+| `autopilot/verifier_gate.py` *(new)* | Paired retention rule (exact sign test, ≥20 pairs, 1.5 pp tolerance, zero corpus regressions) plus an ordered triage table → `compiler_mismatch` / `cross_term_interference` / `rl_variance` / `unclassified`. `offline_metric` for chat mutations; `rollout_metric` for the loop. |
+| `autopilot/traces.py` *(new)* | Trace redaction: raw observations replaced by per-dimension ranges before anything reaches a provider. |
+| `ingest/interaction_log.py` *(new)* | Detects frontier interaction logs (action column + human verdict), emits supervised rows, and registers rejected/corrected decisions as corpus assertions. Rejections without a correction become soft negatives. |
+| `autopilot/loop_controller.py` | Durable `session_state.json`; best-on-validation checkpointing; gate wired into the round loop for mutation rounds; corpus + protocol seeding before step 1; `skip_auto_tune` / `finalize_scorecard` switches; scorecard now embeds `eval_corpus`, `crossfire`, `economics`, `selection`, `beats_best_baseline`. |
+| `autopilot/scorecard.py` | `compute_economics_summary`: measured token spend (`metering.usage_report` — the draft referenced a method that does not exist), human hours, retrain compute, drift review, two payback bases (`token_only`, `with_human_review`), ±2× sensitivity, caveats. |
+| `autopilot/sandbox_runner.py` + `security/worker.py` | `train_round` worker mode and `run_rounds_in_sandbox`: one `bwrap` worker per round, host tunes between rounds with redacted traces; `RL_IDE_ALLOW_HOST_LLM=0` refuses host tuning entirely. `auto_tune_skipped` is no longer the sandbox outcome. |
+| `architect/omni_agent.py` | Chat mutations of reward, environment mechanics and inference strategy are gated before they are persisted, with rollback and the triage reason surfaced in the timeline. |
+| `api/server.py` | `GET/POST …/corpus`, `POST …/corpus/harvest-passive`, `GET …/crossfire`; training now routed through `run_rounds_in_sandbox`. |
+| `frontend` | Telemetry panel: golden-corpus badge, selected checkpoint, Crossfire verdict, latency + payback per tier. |
+
+### 20.2 Measured evidence
+
+- Fast gate: **170 passed, 2 skipped, 60 deselected in 368 s** (baseline at phase start: 155 passed / 2 skipped / 59 deselected in 414 s — the delta is the 15 new fast closure tests).
+- Hostile-expression suite (`-m slow`, 5 payloads through `bwrap`): **1 passed in 62 s** — object-graph traversal, `numpy.fromfile`, import-time infinite loop, socket connect, env-var exfiltration; none reached the host.
+- Scorecard suite: **11 passed in 49 s** with the new selection/corpus/economics blocks.
+- `npm run build`: clean (tsc + vite).
+
+### 20.3 The economics result, stated plainly
+
+For a session with **$0.04** of measured provider spend, 6 authoring turns, 1.5 h/cycle drift review
+and 250 decisions/day:
+
+| Basis | Flagship frontier payback |
+|---|---|
+| Token pricing only ($0.0045/decision) | ~505,000 decisions (~2,020 days) |
+| Token pricing **+ human review on both sides** | ~4,871 decisions (~19.5 days) |
+
+The first row is the memo's point: at pure token prices the amortisation window is enormous. The
+second row is what a buyer actually experiences, and it only holds if the local policy really does
+replace ≥95 % of per-decision human review. Both rows are printed; neither is presented as *the*
+answer, and the ledger lists human hours, retrain compute and drift review separately so the
+assumption can be challenged. Latency is reported end-to-end (ONNX p99 **plus** feature pipeline)
+— 4.31 ms here, not the 0.31 ms forward pass the draft would have quoted.
+
+### 20.4 Claim ledger after P3
+
+| Claim | Status | Reason |
+|---|---|---|
+| 1 — payback economics | **Instrumented, not proven** | The ledger is honest and two-sided; the business fact is a customer-specific measurement. |
+| 2 — small policy beats frontier | **Testable** | Best-on-val selection removes the in-sample defect; passive harvest removes the cold-start objection for teams already emitting critiques. Still needs ≥100 frozen hold-out judgements per task (`CrossfireProtocolStore` enforces the refusal). |
+| 3 — critique → reward convergence | **Bounded** | Every mutation is judged by an oracle it did not produce, and failures are triaged. Bounded to tasks with an independent oracle; control tasks whose `is_success` comes from the same generator remain circular and are documented as such. |
+| 4 — vibe-coded build | **Runtime mitigated / org open** | Sandbox + hostile suite are real. A named ML owner, IT approval and a production drift baseline are not code. |
+| 5 — switching-cost moat | **Withdrawn** | Exportable diffs, readable reward code and a portable corpus invert lock-in. §1.5 is superseded in `MASTER_SPEC_AND_BUILD_PLAN.md` §18. |
+
+### 20.5 Residual risk added by this phase
+
+- **Post-hoc, not pre-commit.** The §9 two-stage preview (counterfactual rescore + forked burst) is
+  still not implemented; the product now commits, judges and rolls back. Slower per failure, but no
+  silent drift.
+- **Gate independence is bounded by the environment.** For control tasks generated end-to-end, the
+  oracle and the reward come from the same synthesiser.
+- **Corpus assertions are single-observation.** Hidden state outside the observation makes them a
+  lower bound; the stored prefix is for audit, not replay.
+- **Authoring can cross the boundary.** A hosted provider sees prompts and redacted traces unless
+  `RL_IDE_ALLOW_HOST_LLM=0` is set; the scorecard records this in `economics.caveats`.
+- **Per-round sandbox cost.** Each round restages the workspace and spawns a worker (~1 s plus copy);
+  rounds × 50-episode evaluations are now the dominant cost of a long run.

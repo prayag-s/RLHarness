@@ -563,3 +563,34 @@ Because production inference runs without ground-truth labels (`truth.label` is 
 4. **BYOK or local models for authoring.** We never touch the per-token meter[cite: 2].
 5. **Data never leaves the user's boundary.** No telemetry or episode exfiltration[cite: 1, 2].
 6. **The human is in the loop.** Always[cite: 2].
+
+---
+
+## 18. Reality alignment (2026-10-31, `v5.5`)
+
+This document is the *intent* spec. The repository diverged from it in four places during Phases
+0–P3. Auditing the spec instead of the code produced a false bill of indictment in the Crossfire
+memo (claim 4 in particular), so the divergences are recorded here rather than silently kept.
+
+| Spec says (§) | What is actually built | Consequence for claims |
+|---|---|---|
+| §8 **Reward DSL**: a declarative YAML language, LLM emits YAML never Python; safety rests on an AST whitelist | **Generated Python** `compute_reward()` rewritten by AST-validated transformation; the safety boundary is the `bwrap` OS sandbox, not the AST filter | The memo's objection "AST filtering is not a security boundary" is correct *about the design* and **closed at runtime** by `security/sandbox.py` (`--unshare-net`, secret stripping, `RL_IDE_REQUIRE_ISOLATION=1`). A declarative evaluator remains an option, not a requirement. |
+| §9 **Two-stage preview**: <20 ms counterfactual rescore + forked micro-burst with action flips, shown *before* the user commits | **Not implemented.** The product applies, trains briefly, then either retains or rolls back | The promise changes from "preview then commit" to "commit then independent gate". `verifier_gate.py` supplies the gate; the pre-commit preview is an open UX gap, tracked in `progress.md` §20. |
+| §3/§7 **Two reference adapters** (`CSVStreamAdapter`, `TextClassifyAdapter`) behind a `DomainAdapter` protocol | **Universal zero-adapter synthesis**: environments are generated per task from a dataset or a plain-English brief, sandbox-verified, and rendered into a generated arena | The adapter SDK is not the abstraction users see. Cross-domain support is delivered through synthesis + conformance tests (`test_sequential_tasks.py`, `test_universal_agentic_pipeline.py`) instead of two hand-written adapters. |
+| §1.5 **Moats**: accumulated configs, critique logs and policies create switching cost | Exportable diffs, readable reward code and standard ONNX make the accumulated artifact **portable** | **The moat claim is withdrawn** (Crossfire claim 5). Retention now rests on production integration, labelled history and retraining cadence; the eval corpus is a *quality* asset, not a lock-in. |
+
+### 18.1 Data boundary, stated precisely
+
+- **Inference** never leaves the boundary: the shipped artifact is ONNX plus a local runner.
+- **Authoring** uses BYOK or a local model. A hosted provider receives prompts, and between sandboxed
+  rounds it receives **redacted** traces (raw observations replaced by per-dimension ranges, see
+  `autopilot/traces.py`).
+- Tenants that require boundary-local authoring set `RL_IDE_ALLOW_HOST_LLM=0`; host-side tuning is then
+  refused with `auto_tune_host_disabled` and the reward function is retained.
+
+### 18.2 Phase P3 deliverables (see `PHASE_P3_V5_5_REFINED_EXECUTION_PLAN.md`)
+
+`crossfire_protocol.py` (pre-registration guard), `eval_corpus.py` (golden regression vault),
+`verifier_gate.py` (paired gate + deterministic triage), `traces.py` (redaction),
+`ingest/interaction_log.py` (passive harvest), per-round sandbox orchestration, best-on-val
+selection, and the two-basis economics ledger.

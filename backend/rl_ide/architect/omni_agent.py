@@ -50,6 +50,8 @@ from rl_ide.autopilot.loop_controller import (
     parse_nudge_meta_command,
 )
 from rl_ide.autopilot.auto_tuner import AutoTunerAgent
+from rl_ide.autopilot.eval_corpus import EvalCorpusStore, greedy_predictor
+from rl_ide.autopilot.verifier_gate import VerifierGate, VerifierSnapshot, offline_metric
 from rl_ide.llm.client import BaseLLMClient, get_active_llm_client, FallbackCodeSynthesizer, UnconfiguredLLMClient
 
 
@@ -968,6 +970,17 @@ class StudioOmniAgent:
                         "(a verified LLM is required for novel rule generation)."
                     )
                     raise RuntimeError("no-op environment update")
+                kept, gate_note = self._gate_chat_mutation(
+                    conversation_id,
+                    before_code=current_env_code,
+                    candidate_code=code_str,
+                    kind="environment",
+                    ws_dir=ws_dir,
+                )
+                if not kept:
+                    raise RuntimeError(gate_note)
+                if gate_note:
+                    notes.append(gate_note)
                 current_env_code = code_str
 
                 previous_model = self.session_store.get_model(conversation_id)
@@ -1007,6 +1020,18 @@ class StudioOmniAgent:
                         workspace_dir=ws_dir,
                     )
                     if verified:
+                        kept, gate_note = self._gate_chat_mutation(
+                            conversation_id,
+                            before_code=current_env_code,
+                            candidate_code=healed_code,
+                            kind="reward",
+                            ws_dir=ws_dir,
+                        )
+                        if not kept:
+                            notes.append(gate_note)
+                            raise RuntimeError("reward change rejected by the verifier gate")
+                        if gate_note:
+                            notes.append(gate_note)
                         current_env_code = healed_code
                         env_file.write_text(healed_code, encoding="utf-8")
                         session = self.session_store.get_session(conversation_id)
@@ -1055,6 +1080,18 @@ class StudioOmniAgent:
                         workspace_dir=ws_dir,
                     )
                     if verified:
+                        kept, gate_note = self._gate_chat_mutation(
+                            conversation_id,
+                            before_code=current_env_code,
+                            candidate_code=healed_code,
+                            kind="inference",
+                            ws_dir=ws_dir,
+                        )
+                        if not kept:
+                            notes.append(gate_note)
+                            raise RuntimeError("inference patch rejected by the verifier gate")
+                        if gate_note:
+                            notes.append(gate_note)
                         current_env_code = healed_code
                         env_file.write_text(healed_code, encoding="utf-8")
                         session = self.session_store.get_session(conversation_id)
@@ -1239,6 +1276,110 @@ class StudioOmniAgent:
         (r"\b(safety|unsafe|collision|obstacles?)\b", "safety_penalty", -2.0),
         (r"\b(false positive|over-?block|too strict)\b", "false_positive_penalty", -3.0),
     ]
+
+
+    def _gate_chat_mutation(
+        self,
+        conversation_id: str,
+        *,
+        before_code: str,
+        candidate_code: str,
+        kind: str,
+        ws_dir: Path,
+    ) -> tuple[bool, str]:
+        """Judges a chat-authored code change before it is persisted.
+
+        Smoke verification only proves the module imports. This asks the question the user
+        actually cares about: does the trained policy still satisfy the held-out rows and the
+        approved behavioural cases? On failure the previous module is left untouched, the
+        candidate is discarded, and the triage reason is returned for the chat timeline.
+        """
+        model = self.session_store.get_model(conversation_id)
+        env = self.session_store.get_env(conversation_id)
+        if model is None or env is None:
+            # Nothing has been trained yet: the next training round gates this change instead.
+            session = self.session_store.get_session(conversation_id)
+            if session is not None:
+                session.mutation_pending = kind
+            return True, ""
+
+        corpus = EvalCorpusStore(self.session_store.base_dir)
+        gate = VerifierGate()
+        predict = greedy_predictor(model)
+
+        try:
+            split = AutonomousLoopController._selection_split(env) or "val"
+            before_metric = offline_metric(env, predict, split=split)
+            before_report = corpus.evaluate_policy(
+                conversation_id, predict
+            ) if corpus.corpus_path(conversation_id).exists() else None
+        except Exception as exc:
+            return True, f"Gate skipped ({type(exc).__name__}); the next training round will judge the change."
+
+        candidate_path = ws_dir / "env_module_candidate.py"
+        try:
+            candidate_path.write_text(candidate_code, encoding="utf-8")
+            candidate_env = instantiate_env(load_synthesized_env_class(candidate_path))
+        except Exception as exc:
+            candidate_path.unlink(missing_ok=True)
+            return False, f"⚠️ Reward change rejected: the candidate module could not be instantiated ({exc})."
+
+        if (
+            getattr(model, "observation_space", None) != candidate_env.observation_space
+            or getattr(model, "action_space", None) != candidate_env.action_space
+        ):
+            candidate_path.unlink(missing_ok=True)
+            session = self.session_store.get_session(conversation_id)
+            if session is not None:
+                session.mutation_pending = kind
+            return True, "ℹ️ Spaces changed, so the policy must be retrained; the next round will judge this change."
+
+        try:
+            after_metric = offline_metric(candidate_env, predict, split=split)
+        except Exception:
+            after_metric = None
+
+        corpus_after = None
+        if before_report is not None:
+            # The policy weights did not change, so corpus assertions can only move if the new
+            # module alters the observation space semantics; still checked for exactly that.
+            corpus_after = before_report
+
+        decision = gate.decide(
+            VerifierSnapshot(
+                mutation_kind=kind,
+                session_id=conversation_id,
+                env_code=before_code,
+                val_metric=before_metric[0] if before_metric else None,
+                val_outcomes=before_metric[1] if before_metric else [],
+                corpus_passing_ids=sorted(
+                    corpus.passing_case_ids(conversation_id, before_report)
+                ) if before_report else [],
+            ),
+            val_metric_after=after_metric[0] if after_metric else None,
+            val_outcomes_after=after_metric[1] if after_metric else [],
+            corpus_passing_ids_after=sorted(
+                corpus.passing_case_ids(conversation_id, corpus_after)
+            ) if corpus_after else ([] if before_report is None else None),
+            corpus_pass_rate_after=corpus_after.pass_rate_pct if corpus_after else None,
+        )
+
+        session = self.session_store.get_session(conversation_id)
+        if session is not None:
+            session.critique_gate = decision.model_dump()
+
+        if decision.passed:
+            candidate_path.unlink(missing_ok=True)
+            if session is not None:
+                session.mutation_pending = None
+            return True, ""
+
+        candidate_path.unlink(missing_ok=True)
+        category = decision.triage.category if decision.triage else "unclassified"
+        advice = decision.triage.advice if decision.triage else ""
+        return False, (
+            f"⚠️ Reward change rolled back ({category}): {decision.reason} {advice}"
+        )
 
     def _safe_reward_rewrite(
         self,

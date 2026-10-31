@@ -216,9 +216,74 @@ def run_train(job: dict[str, Any]) -> dict[str, Any]:
     return summary
 
 
+def run_train_round(job: dict[str, Any]) -> dict[str, Any]:
+    """Runs exactly one round and reports the evidence the host needs to judge it.
+
+    Multi-round LLM tuning cannot run here: this process has no network and no provider keys by
+    design. One round per worker keeps isolation intact and gives the host a decision point
+    between rounds instead of a black box that swallows the whole run.
+    """
+    import pandas as pd
+
+    from rl_ide.architect.models import AgentBlueprintSpec
+    from rl_ide.autopilot.loop_controller import AutonomousLoopController, SessionStateStore
+    from rl_ide.autopilot.traces import redact_episodes
+    from rl_ide.ingest.loader import IngestedDataset
+    from rl_ide.synthesizer.env_builder import load_synthesized_env_class
+
+    blueprint = AgentBlueprintSpec.model_validate(job["blueprint"])
+    records = _load_records(job.get("records_path"))
+    env_cls = load_synthesized_env_class(job["env_module"])
+
+    dataset = None
+    if records is not None:
+        dataset = IngestedDataset(
+            name="staged_dataset",
+            source_type="file",
+            format="json",
+            df=pd.DataFrame(records),
+            **({"dataset_id": blueprint.dataset_id} if blueprint.dataset_id else {}),
+        )
+
+    store = SessionStateStore(base_dir=job["base_dir"])
+    controller = AutonomousLoopController(store)
+    session = controller.run_loop(
+        session_id=job["session_id"],
+        blueprint=blueprint,
+        env_cls=env_cls,
+        dataset=dataset,
+        on_event_callback=_emit,
+        max_rounds=1,
+        episodes_per_burst=int(job.get("episodes_per_burst") or 25),
+        additional_rounds=None,
+        skip_auto_tune=True,
+        finalize_scorecard=bool(job.get("finalize_scorecard", True)),
+    )
+
+    return {
+        "session_id": session.session_id,
+        "round": session.current_round,
+        "status": session.status,
+        "val_metric": session.current_metric,
+        "target_threshold": session.target_threshold,
+        "best_val_metric": session.best_val_metric,
+        "best_val_round": session.best_val_round,
+        "eval_corpus": session.eval_corpus,
+        "critique_gate": session.critique_gate,
+        "crossfire": session.crossfire,
+        "scorecard": session.scorecard,
+        "episodes": redact_episodes(session.episodes),
+        "rounds_completed": len(session.rounds_history),
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Sandboxed environment worker")
-    parser.add_argument("--mode", required=True, choices=["smoke", "train", "observations", "parity", "serve"])
+    parser.add_argument(
+        "--mode",
+        required=True,
+        choices=["smoke", "train", "train_round", "observations", "parity", "serve"],
+    )
     parser.add_argument("--job", required=True)
     args = parser.parse_args(argv)
 
@@ -241,6 +306,8 @@ def main(argv: list[str] | None = None) -> int:
             result = run_smoke(job)
         elif args.mode == "train":
             result = run_train(job)
+        elif args.mode == "train_round":
+            result = run_train_round(job)
         elif args.mode == "parity":
             result = run_parity(job)
         else:

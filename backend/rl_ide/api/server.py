@@ -50,6 +50,9 @@ from rl_ide.autopilot.loop_controller import (
     TrainingInProgressError,
 )
 from rl_ide.autopilot.auto_tuner import TuningResult
+from rl_ide.autopilot.crossfire_protocol import CrossfireProtocolStore
+from rl_ide.autopilot.eval_corpus import EvalCorpusStore, GoldenEvalCase
+from rl_ide.ingest.interaction_log import detect_interaction_log, harvest_into_corpus
 from rl_ide.export.exporter import PolicyExporter
 from rl_ide.export.registry import RunBundleRegistry, BundleMetadata, BundleDetails
 from rl_ide.ingest.loader import IngestedDataset, load_bytes
@@ -981,8 +984,9 @@ def run_training_task(
     in-process execution with a loud event; an isolation *failure* does not, because falling back
     would re-open the boundary the sandbox exists to close.
     """
-    from rl_ide.autopilot.sandbox_runner import SandboxedTrainingError, run_training_in_sandbox
+    from rl_ide.autopilot.sandbox_runner import SandboxedTrainingError, run_rounds_in_sandbox
     from rl_ide.security import SandboxUnavailable
+    from rl_ide.llm.client import get_active_llm_client
 
     # A retrained or rewritten environment invalidates any cached interactive session.
     close_interact_session(conversation_id)
@@ -991,7 +995,7 @@ def run_training_task(
 
     if isolation_available():
         try:
-            summary = run_training_in_sandbox(
+            summary = run_rounds_in_sandbox(
                 session_id=conversation_id,
                 blueprint=blueprint.model_dump(),
                 env_module=env_file,
@@ -1001,6 +1005,7 @@ def run_training_task(
                 episodes_per_burst=episodes_per_burst,
                 additional_rounds=additional_rounds,
                 on_event=on_event,
+                llm_client=get_active_llm_client(),
             )
             summary.pop("scorecard", None)      # re-read from the copied workspace file
             session = SessionState.model_validate(summary)
@@ -1594,6 +1599,118 @@ async def lock_conversation_arena(conversation_id: str, req: ArenaLockRequest = 
         return {"conversation_id": conversation_id, "arena_locked": updated.get("arena_locked", True)}
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Conversation '{conversation_id}' not found.")
+
+
+class CorpusCaseRequest(BaseModel):
+    obs_vector: list[float] = Field(default_factory=list)
+    expected_actions: list[int] = Field(default_factory=list)
+    forbidden_actions: list[int] = Field(default_factory=list)
+    rationale: str = ""
+    source: str = "user_locked_step"
+    waive_case_id: str | None = None
+    waive_reason: str = ""
+
+
+class PassiveHarvestRequest(BaseModel):
+    dataset_id: str
+    min_usable_rows: int = 100
+    max_cases: int = 50
+
+
+def _corpus_store() -> EvalCorpusStore:
+    return EvalCorpusStore(global_store.base_dir)
+
+
+@app.get("/api/v4/conversations/{conversation_id}/corpus")
+def get_eval_corpus(conversation_id: str):
+    """The behavioural regression suite: what this policy must keep getting right."""
+    store = _corpus_store()
+    cases = store.load(conversation_id)
+    report = None
+    session = global_store.get_session(conversation_id)
+    if session and session.eval_corpus:
+        report = session.eval_corpus
+    elif cases:
+        try:
+            model = global_store.get_model(conversation_id)
+            if model is not None:
+                from rl_ide.autopilot.eval_corpus import greedy_predictor
+
+                report = store.evaluate_policy(conversation_id, greedy_predictor(model)).model_dump()
+        except Exception:
+            report = None
+    return {
+        "conversation_id": conversation_id,
+        "report": report,
+        "cases": [c.model_dump() for c in cases],
+        "count": len(cases),
+    }
+
+
+@app.post("/api/v4/conversations/{conversation_id}/corpus/cases")
+def add_eval_corpus_case(conversation_id: str, req: CorpusCaseRequest):
+    """Locks a step (or waives an earlier assertion) into the regression suite."""
+    store = _corpus_store()
+    if req.waive_case_id:
+        waived = store.waive_case(conversation_id, req.waive_case_id, req.waive_reason)
+        if not waived:
+            raise HTTPException(status_code=404, detail="Case not found.")
+        return {"waived": req.waive_case_id}
+
+    case = store.add_case(
+        conversation_id,
+        req.obs_vector,
+        expected_actions=req.expected_actions,
+        forbidden_actions=req.forbidden_actions,
+        source=req.source,
+        rationale=req.rationale,
+    )
+    if case is None:
+        raise HTTPException(
+            status_code=400, detail="A case needs an observation and at least one expectation."
+        )
+    return {"case": case.model_dump()}
+
+
+@app.post("/api/v4/conversations/{conversation_id}/corpus/harvest-passive")
+def harvest_passive_log(conversation_id: str, req: PassiveHarvestRequest):
+    """Turns an uploaded frontier interaction log into corpus assertions."""
+    try:
+        dataset = dataset_store.get(req.dataset_id, owner_id=current_owner())
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=f"Dataset not found: {exc}")
+    if dataset is None or getattr(dataset, "df", None) is None:
+        raise HTTPException(status_code=400, detail="Dataset has no tabular rows.")
+
+    detection = detect_interaction_log(dataset.df, min_usable_rows=req.min_usable_rows)
+    if not detection.detected:
+        return {"detected": False, "detection": detection.model_dump(), "harvested": None}
+
+    env = global_store.get_env(conversation_id)
+    labels = {}
+    if env is not None:
+        labels = {
+            str(label): idx for idx, label in enumerate(getattr(env, "action_labels", []) or [])
+        }
+    harvested = harvest_into_corpus(
+        _corpus_store(),
+        conversation_id,
+        dataset.df,
+        detection,
+        env=env,
+        label_to_action=labels,
+        max_cases=req.max_cases,
+    )
+    return {"detected": True, "detection": detection.model_dump(), "harvested": harvested}
+
+
+@app.get("/api/v4/conversations/{conversation_id}/crossfire")
+def get_crossfire_closure(conversation_id: str):
+    """The pre-registered verdict, or the reasons a verdict cannot be claimed."""
+    return {
+        "conversation_id": conversation_id,
+        "closure": CrossfireProtocolStore(global_store.base_dir).closure_report(conversation_id),
+    }
 
 
 @app.get("/api/v4/sessions/{session_id}")

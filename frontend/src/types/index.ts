@@ -228,6 +228,50 @@ export interface Scorecard {
   beats_all_baselines: boolean
   rows: { total: number | null; embedded_in_module: number | null }
   notes: string[]
+  beats_best_baseline?: boolean
+  eval_corpus?: {
+    total_cases: number
+    scored_cases: number
+    passed_cases: number
+    failed_cases: number
+    waived_cases: number
+    pass_rate_pct: number
+    regressed_case_ids: string[]
+  }
+  crossfire?: {
+    closed: boolean
+    verdict: string
+    reasons: string[]
+  }
+  selection?: {
+    selected_round: number
+    best_val_round: number | null
+    best_val_metric: number | null
+    source: string
+  }
+  economics?: {
+    ledger: {
+      authoring_tokens_usd: number
+      authoring_human_hours: number
+      authoring_human_usd: number
+      first_year_usd: number
+    }
+    payback: Record<
+      string,
+      {
+        label: string
+        basis_token_only: { decisions_to_payback: number; days_to_payback: number }
+        basis_with_human_review: { decisions_to_payback: number; days_to_payback: number }
+      }
+    >
+    latency: {
+      status: string
+      onnx_p99_ms?: number
+      end_to_end_p99_ms?: number
+      latency_speedup_factor?: number
+    }
+    caveats: string[]
+  }
   deployment?: {
     action_agreement_pct?: number
     policy_success_pct?: number

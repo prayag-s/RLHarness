@@ -321,3 +321,49 @@ would pay for. This round drove four paid-use-case problems through the running 
    synthesis and are sometimes knife-edge. The verifier now detects and surfaces unreachable success,
    but it does not rewrite the criteria — the user sees an explicit warning and can ask for a change in
    chat. Dataset-driven tasks (label contract from the CSV) were stable across every run.
+
+
+---
+
+## 8. Round 3 — Crossfire closure (Phase P3, `v5.5`, 2026-10-31)
+
+The Crossfire memo audited *claims*, not defects, so this round is different from rounds 1–2: the
+issues below are places where the product's own success criterion was circular or unmeasured.
+
+### Issue register (round 3)
+
+| # | Severity | Issue | Where | Status |
+|---|---|---|---|---|
+| C1 | **Critical** | A post-critique reward edit was retained on smoke verification alone: a change that dropped held-out accuracy from 88 % → 52 % or broke approved cases was kept. | `architect/omni_agent.py` (`_safe_reward_rewrite` path), `autopilot/loop_controller.py` | **Fixed** — `VerifierGate` with paired comparison + corpus regressions, all three mutation layers, automatic rollback with triage. |
+| C2 | **High** | Multi-round LLM auto-tuning was a hard no-op whenever the OS sandbox was active (`auto_tune_skipped`). | `autopilot/sandbox_runner.py`, `security/worker.py` | **Fixed** — one sandboxed worker per round (`train_round`), host orchestrates tuning between rounds with redacted traces. |
+| C3 | **High** | "Fit" was selected on the final round rather than the best-on-validation checkpoint. | `autopilot/loop_controller.py` | **Fixed** — `best_val_model.zip` per improving round, reloaded for the final held-out scorecard and export; `scorecard.selection`. |
+| C4 | **High** | No cumulative behavioural regression suite; each retrain forgot every earlier human judgement. | — | **Fixed** — `EvalCorpusStore` with four growth channels and waiving. |
+| C5 | **High** | Cost was reported one-sided: token spend only, no human hours, retraining or drift review; the frontier baseline ignored human review on its side. | `autopilot/scorecard.py` | **Fixed** — two-basis ledger with sensitivity and caveats. |
+| C6 | **Medium** | Closure was asserted ("claim 4 resolved") without a mechanism that could falsify it. | docs | **Fixed** — `CrossfireProtocolStore` refuses a verdict on an unregistered/tampered rubric or a thin hold-out set. |
+| C7 | **Medium** | Chat mutations of environment mechanics and inference strategy were ungated. | `architect/omni_agent.py` | **Fixed** — same gate applied to `reward`, `environment`, `inference`. |
+| C8 | **Medium** | Frontier interaction logs were uploaded and discarded; the cheapest source of labelled critiques was ignored. | `ingest/` | **Fixed** — detection + supervised rows + corpus assertions, with soft/hard negative distinction. |
+| R1 | Residual | The §9 two-stage preview (counterfactual rescore + forked burst *before* commit) does not exist; the product gates after the fact. | product | **Open (UX)** |
+| R2 | Residual | Control tasks whose `is_success` is authored by the same generator as `compute_reward` have no independent oracle: the gate is only as independent as the environment definition. | synthesis | **Open, documented** |
+| R3 | Residual | Corpus assertions are single-observation; hidden state outside the observation makes them a lower bound. | `eval_corpus.py` | **Accepted, documented** |
+| R4 | Residual | Authoring sends prompts (and redacted traces) to a hosted provider unless `RL_IDE_ALLOW_HOST_LLM=0`. | `traces.py`, `sandbox_runner.py` | **Accepted, documented** |
+
+### Closure ledger (round 3)
+
+| Item | Evidence |
+|---|---|
+| Gate retains improvements, rolls back regressions | `test_verifier_gate_retains_improving_critique`, `test_verifier_gate_rolls_back_regressing_critique_and_triages_interference` |
+| Gate does not roll back statistical noise | `test_verifier_gate_does_not_roll_back_on_noise` |
+| Triage is ordered and deterministic | `test_triage_table_is_ordered_and_deterministic`, `test_verifier_gate_triages_dead_reward_term_as_compiler_mismatch` |
+| Host tunes between sandboxed rounds; sovereign mode refuses | `test_host_orchestrated_rounds_tune_between_rounds` |
+| Best-on-val checkpoint is the shipped policy | `test_best_on_validation_checkpoint_selection` |
+| Corpus persists, grows and detects regressions | `test_eval_corpus_seeding_and_persistence`, `test_eval_corpus_harvests_critique_and_locked_steps` |
+| Passive logs split accepted/corrected/rejected | `test_passive_critique_log_ingestion_splits_accepted_and_rejected_rows` |
+| Economics reports both bases + caveats | `test_scorecard_economics_reports_both_bases_and_caveats` |
+| Closure is refused without pre-registration | `test_end_to_end_crossfire_falsification_contract`, `test_protocol_rejects_rubric_registered_after_training` |
+| Hostile modules cannot escape the sandbox | `test_hostile_reward_modules_cannot_escape_the_sandbox` (5 payloads, `bwrap`) |
+
+### Verification after round 3
+
+- `pytest -m "not slow and not live_llm"` — fast gate, see `progress.md` §20 for the measured count.
+- `pytest tests/test_crossfire_closure.py -m slow` — hostile-expression suite, 62 s.
+- `npm run build` — TypeScript clean.

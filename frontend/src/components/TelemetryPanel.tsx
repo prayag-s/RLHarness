@@ -171,6 +171,74 @@ export const TelemetryPanel: React.FC<TelemetryPanelProps> = ({
             </span>
             <span>{scorecard.policy.episodes} eps</span>
           </div>
+
+          {scorecard.eval_corpus && (
+            <div className="flex items-center justify-between text-[10px] font-mono">
+              <span className="text-gray-500">🛡️ Golden corpus</span>
+              <span
+                className={
+                  scorecard.eval_corpus.regressed_case_ids.length > 0
+                    ? 'text-amber-300'
+                    : 'text-emerald-300'
+                }
+              >
+                {scorecard.eval_corpus.passed_cases}/{scorecard.eval_corpus.scored_cases} verified
+                {scorecard.eval_corpus.regressed_case_ids.length > 0
+                  ? ` · ${scorecard.eval_corpus.regressed_case_ids.length} regressed`
+                  : ''}
+              </span>
+            </div>
+          )}
+
+          {scorecard.selection?.source === 'best_val_checkpoint' && (
+            <div className="flex items-center justify-between text-[10px] text-gray-500 font-mono">
+              <span>Selected checkpoint</span>
+              <span>round {scorecard.selection.selected_round} (best val)</span>
+            </div>
+          )}
+
+          {scorecard.crossfire && (
+            <div
+              className={`text-[10px] rounded-lg px-2 py-1.5 border font-mono ${
+                scorecard.crossfire.verdict === 'win'
+                  ? 'bg-emerald-950/40 border-emerald-800/40 text-emerald-300'
+                  : scorecard.crossfire.verdict === 'loss'
+                    ? 'bg-rose-950/40 border-rose-800/40 text-rose-300'
+                    : 'bg-gray-900/60 border-gray-800 text-gray-400'
+              }`}
+              title={(scorecard.crossfire.reasons || []).join(' ')}
+            >
+              Crossfire: {scorecard.crossfire.verdict}
+              {scorecard.crossfire.reasons?.length
+                ? ` · ${scorecard.crossfire.reasons[0]}`
+                : ''}
+            </div>
+          )}
+
+          {scorecard.economics && (
+            <div className="space-y-0.5 border-t border-gray-800 pt-2">
+              <div className="flex items-center justify-between text-[10px] text-gray-500 font-mono">
+                <span>⚡ p99 latency</span>
+                <span>
+                  {scorecard.economics.latency.status === 'measured'
+                    ? `${scorecard.economics.latency.end_to_end_p99_ms} ms`
+                    : 'not measured'}
+                </span>
+              </div>
+              {Object.entries(scorecard.economics.payback).map(([tier, data]) => (
+                <div
+                  key={tier}
+                  className="flex items-center justify-between text-[10px] text-gray-600 font-mono"
+                  title={`${data.label} · token-only payback ${data.basis_token_only.decisions_to_payback} decisions`}
+                >
+                  <span className="truncate pr-2">{tier.replace(/_/g, ' ')}</span>
+                  <span>
+                    {data.basis_with_human_review.decisions_to_payback.toLocaleString()} decisions
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 

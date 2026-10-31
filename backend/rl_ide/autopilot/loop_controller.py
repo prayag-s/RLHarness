@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 import json
+import math
 import os
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 from pathlib import Path
@@ -25,6 +26,9 @@ from pydantic import BaseModel, Field, field_validator
 
 from rl_ide.architect.models import AgentBlueprintSpec
 from rl_ide.autopilot.auto_tuner import AutoTunerAgent, TuningResult
+from rl_ide.autopilot.crossfire_protocol import CrossfireProtocolStore
+from rl_ide.autopilot.eval_corpus import EvalCorpusStore, greedy_predictor
+from rl_ide.autopilot.verifier_gate import VerifierGate, VerifierSnapshot
 from rl_ide.ingest.loader import IngestedDataset
 from rl_ide.llm.client import BaseLLMClient, create_llm_client, get_active_llm_client
 from rl_ide.synthesizer.env_builder import JITEnvironmentSynthesizer, load_synthesized_env_class, instantiate_env
@@ -81,6 +85,15 @@ def episode_step_limit(env: Any, default_ceiling: int = 200) -> int:
     return max(1, horizon)
 
 
+def loop_new_terms(episodes: list[dict[str, Any]], baseline_keys: set[str]) -> list[str]:
+    """Reward-term names that appear after an edit and never appeared before it."""
+    seen: set[str] = set()
+    for episode in episodes:
+        for step in episode.get("steps", []) or []:
+            seen.update((step.get("reward_breakdown") or {}).keys())
+    return sorted(seen - set(baseline_keys))
+
+
 def episode_metric_value(env: Any, steps: list[dict[str, Any]]) -> float:
     """Computes an honest per-episode metric.
 
@@ -127,6 +140,12 @@ class SessionState(BaseModel):
     weights_path: str | None = None
     latest_model_zip_path: str | None = None
     scorecard: dict[str, Any] | None = None
+    eval_corpus: dict[str, Any] | None = None
+    crossfire: dict[str, Any] | None = None
+    critique_gate: dict[str, Any] | None = None
+    best_val_metric: float | None = None
+    best_val_round: int | None = None
+    mutation_pending: str | None = None
     error_message: str | None = None
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
@@ -147,6 +166,30 @@ class SessionStateStore:
         self._sessions: dict[str, SessionState] = {}
         self._models: dict[str, PPO] = {}
         self._envs: dict[str, gym.Env] = {}
+
+    def session_state_path(self, session_id: str) -> Path:
+        return self.base_dir / session_id / "session_state.json"
+
+    def save_session_state(self, session: SessionState) -> None:
+        """Persists round history so a restarted (or per-round sandboxed) worker resumes.
+
+        The episode buffer is truncated: it is a UI history, not resumable training state, and
+        writing every step of every round would bloat the workspace on long runs.
+        """
+        path = self.session_state_path(session.session_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = session.model_dump()
+        payload["episodes"] = payload.get("episodes", [])[-40:]
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    def load_session_state(self, session_id: str) -> SessionState | None:
+        path = self.session_state_path(session_id)
+        if not path.exists():
+            return None
+        try:
+            return SessionState.model_validate_json(path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
 
     def get_session(self, session_id: str) -> SessionState | None:
         return self._sessions.get(session_id)
@@ -229,6 +272,7 @@ class SessionStateStore:
             if model_zip_path.exists():
                 session.latest_model_zip_path = str(model_zip_path)
             session.env_module_code = env_code
+            self.save_session_state(session)
 
         return snapshot
 
@@ -286,6 +330,10 @@ class AutonomousLoopController:
         self._auto_tuner = AutoTunerAgent(llm_client) if llm_client else None
         self._locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
+        self.corpus = EvalCorpusStore(self.store.base_dir)
+        self.protocol = CrossfireProtocolStore(self.store.base_dir)
+        self.gate = VerifierGate()
+        self._best_outcomes: dict[str, list[float]] = {}
 
     def session_lock(self, session_id: str) -> threading.Lock:
         """Per-session lock guarding training, tuning and live inference against races."""
@@ -322,6 +370,8 @@ class AutonomousLoopController:
         max_rounds: int | None = None,
         episodes_per_burst: int = 25,
         additional_rounds: int | None = None,
+        skip_auto_tune: bool = False,
+        finalize_scorecard: bool = True,
     ) -> SessionState:
         """Executes rounds under a per-session lock (see `_run_loop_locked`)."""
         lock = self.session_lock(session_id)
@@ -339,6 +389,8 @@ class AutonomousLoopController:
                 max_rounds=max_rounds,
                 episodes_per_burst=episodes_per_burst,
                 additional_rounds=additional_rounds,
+                skip_auto_tune=skip_auto_tune,
+                finalize_scorecard=finalize_scorecard,
             )
         finally:
             lock.release()
@@ -353,6 +405,8 @@ class AutonomousLoopController:
         max_rounds: int | None = None,
         episodes_per_burst: int = 25,
         additional_rounds: int | None = None,
+        skip_auto_tune: bool = False,
+        finalize_scorecard: bool = True,
     ) -> SessionState:
         """Executes the full multi-round autonomous training loop, supporting continuous resumption."""
         records = dataset.df.to_dict(orient="records") if (dataset and hasattr(dataset, "df")) else None
@@ -363,8 +417,12 @@ class AutonomousLoopController:
         env = instantiate_env(env_cls, dataset_records=records)
         self.store.set_env(session_id, env)
 
-        # Initialize or retrieve SessionState
+        # Initialize or retrieve SessionState (in-memory, else the durable copy on disk)
         session = self.store.get_session(session_id)
+        if not session:
+            session = self.store.load_session_state(session_id)
+            if session is not None:
+                self.store.set_session(session)
         if not session:
             ws_dir = self.store.base_dir / session_id
             env_code_path = ws_dir / "env_module.py"
@@ -480,6 +538,47 @@ class AutonomousLoopController:
 
         current_code = session.env_module_code
 
+        # The corpus and the frozen rubric exist before the first training step; a claim scored
+        # against a rubric written afterwards is not evidence.
+        try:
+            if not self.corpus.load(session_id):
+                seeded = self.corpus.seed_from_validation_split(session_id, env)
+                if seeded:
+                    emit({
+                        "event": "eval_corpus_seeded",
+                        "round": session.current_round,
+                        "cases": len(seeded),
+                        "message": f"Seeded {len(seeded)} held-out behavioural cases into the eval corpus.",
+                    })
+            protocol = self.protocol.load(session_id)
+            if protocol is None:
+                protocol = self.protocol.open(
+                    session_id,
+                    rubric=self.DEFAULT_RUBRIC,
+                    task_title=getattr(blueprint, "task_title", session_id),
+                    task_class=str(getattr(env, "task_class", "control")),
+                )
+            self.protocol.record_training_start(session_id)
+            val_seed_ids = [c.case_id for c in self.corpus.load(session_id) if c.source == "val_seed"]
+            if val_seed_ids:
+                self.protocol.register_holdout(session_id, val_seed_ids)
+            report = self.corpus.evaluate_policy(session_id, greedy_predictor(model))
+            session.eval_corpus = report.model_dump()
+            session.crossfire = self.protocol.closure_report(session_id)
+        except Exception as corpus_err:
+            emit({
+                "event": "eval_corpus_unavailable",
+                "round": session.current_round,
+                "message": f"Eval corpus unavailable: {type(corpus_err).__name__}: {corpus_err}",
+            })
+
+        best_val_metric: float | None = session.best_val_metric
+        best_val_round: int | None = session.best_val_round
+        best_corpus_passing: set[str] = set()
+        best_entropy: float | None = None
+        term_keys: set[str] | None = None
+        mutation_kind: str | None = session.mutation_pending
+
         # --- MULTI-ROUND AUTONOMOUS LOOP ---
         for r in range(start_round, rounds_limit + 1):
             session.current_round = r
@@ -558,6 +657,122 @@ class AutonomousLoopController:
                 "episodes_tested": len(eval_episodes),
                 "illegal_moves_pct": illegal_pct,
             })
+
+            # ---- Independent verifier gate (Crossfire P3) -------------------
+            val_outcomes = [float(ep.get("metric_value", 0.0)) for ep in eval_episodes]
+            entropy_now = self._action_entropy(eval_episodes)
+            term_stats = self._term_stats(eval_episodes, term_keys)
+            corpus_passing: set[str] = set()
+            corpus_report = None
+            try:
+                corpus_report = self.corpus.evaluate_policy(
+                    session_id, greedy_predictor(model), baseline_passing_ids=best_corpus_passing
+                )
+                corpus_passing = self.corpus.passing_case_ids(session_id, corpus_report)
+                session.eval_corpus = corpus_report.model_dump()
+                emit({
+                    "event": "eval_corpus_evaluated",
+                    "round": r,
+                    "pass_rate_pct": corpus_report.pass_rate_pct,
+                    "passed": corpus_report.passed_cases,
+                    "scored": corpus_report.scored_cases,
+                    "regressed": corpus_report.regressed_case_ids,
+                    "message": (
+                        f"Golden corpus: {corpus_report.passed_cases}/{corpus_report.scored_cases} "
+                        f"verified ({corpus_report.pass_rate_pct}%)."
+                    ),
+                })
+            except Exception as corpus_err:
+                emit({
+                    "event": "eval_corpus_unavailable",
+                    "round": r,
+                    "message": f"Corpus evaluation failed: {type(corpus_err).__name__}: {corpus_err}",
+                })
+
+            if best_val_metric is None:
+                best_val_metric, best_val_round = current_metric, r
+                best_corpus_passing = corpus_passing
+                best_entropy = entropy_now
+                self._record_best(session, model, current_code, current_metric, val_outcomes)
+                emit({
+                    "event": "checkpoint_recorded",
+                    "round": r,
+                    "metric": current_metric,
+                    "message": f"Baseline checkpoint recorded (round {r}, {current_metric}%).",
+                })
+            elif mutation_kind:
+                snapshot = VerifierSnapshot(
+                    mutation_kind=mutation_kind,
+                    session_id=session_id,
+                    env_code=current_code,
+                    model_path=str(self._best_paths(session_id)[0]),
+                    val_metric=best_val_metric,
+                    val_outcomes=self._best_outcomes.get(session_id, []),
+                    corpus_passing_ids=sorted(best_corpus_passing),
+                    entropy=best_entropy,
+                )
+                decision = self.gate.decide(
+                    snapshot,
+                    val_metric_after=current_metric,
+                    val_outcomes_after=val_outcomes,
+                    corpus_passing_ids_after=corpus_passing,
+                    corpus_pass_rate_after=(
+                        corpus_report.pass_rate_pct if corpus_report else None
+                    ),
+                    term_stats=term_stats,
+                    entropy_after=entropy_now,
+                )
+                session.critique_gate = decision.model_dump()
+                mutation_kind = None
+                session.mutation_pending = None
+                if not decision.passed:
+                    restored_model, restored_code = self._restore_best(session, env)
+                    if restored_model is not None:
+                        model = restored_model
+                        if restored_code:
+                            current_code = restored_code
+                            try:
+                                restored_env = instantiate_env(
+                                    load_synthesized_env_class(
+                                        self.store.base_dir / session_id / "env_module.py"
+                                    ),
+                                    dataset_records=load_records(self.store.base_dir / session_id),
+                                )
+                                env = restored_env
+                                model.set_env(env)
+                                self.store.set_env(session_id, env)
+                            except Exception:
+                                pass
+                    current_metric = best_val_metric
+                    session.current_metric = current_metric
+                    emit({
+                        "event": "mutation_rolled_back",
+                        "round": r,
+                        "metric": current_metric,
+                        "triage": decision.triage.category if decision.triage else "unclassified",
+                        "advice": decision.triage.advice if decision.triage else "",
+                        "reason": decision.reason,
+                        "message": (
+                            f"Change rolled back: {decision.reason} "
+                            f"({decision.triage.category if decision.triage else 'unclassified'})."
+                        ),
+                    })
+                    continue
+                emit({
+                    "event": "mutation_retained",
+                    "round": r,
+                    "metric": current_metric,
+                    "reason": decision.reason,
+                    "message": f"Change retained: {decision.reason}",
+                })
+
+            if best_val_metric is not None and current_metric >= best_val_metric:
+                best_val_metric, best_val_round = current_metric, r
+                best_corpus_passing = corpus_passing
+                best_entropy = entropy_now
+                self._record_best(session, model, current_code, current_metric, val_outcomes)
+
+            term_keys = self._term_keys(eval_episodes)
 
             # Check Target Mastery Achievement
             if current_metric >= target_threshold:
@@ -651,6 +866,18 @@ class AutonomousLoopController:
                 "message": f"Plateau detected at {current_metric}%. Diagnosing failure episodes and rewriting reward function for Round {r+1}...",
             })
 
+            if skip_auto_tune:
+                # The host owns the LLM between sandboxed rounds (it has the network and the
+                # metered credentials); this worker only trains and reports evidence.
+                session.status = "training"
+                emit({
+                    "event": "auto_tune_deferred",
+                    "round": r,
+                    "metric": current_metric,
+                    "message": "Plateau detected; the host orchestrator will tune between rounds.",
+                })
+                continue
+
             if os.environ.get("RL_IDE_SANDBOX") == "1":
                 # The worker has neither network nor provider keys, so the LLM tuner cannot run
                 # there; skipping is honest and keeps the round alive.
@@ -695,6 +922,7 @@ class AutonomousLoopController:
 
             current_code = tuning_res.updated_code
             session.env_module_code = current_code
+            mutation_kind = "reward"
 
             # Save round snapshot
             self.store.save_round_snapshot(
@@ -764,7 +992,11 @@ class AutonomousLoopController:
                 "changes_summary": tuning_res.changes_summary,
             })
 
+        self.store.save_session_state(session)
+
         # Final held-out scorecard: the only number that describes the shipped policy.
+        if not finalize_scorecard:
+            return session
         try:
             self._finalize_scorecard(session=session, model=model, env=env, blueprint=blueprint, emit=emit)
         except Exception as scorecard_err:
@@ -866,6 +1098,9 @@ class AutonomousLoopController:
 
         if tuning_res.verified and tuning_res.applied and tuning_res.updated_code.strip():
             session.env_module_code = tuning_res.updated_code
+            # The change is judged by the next training round; if it regresses the held-out metric
+            # or the corpus, the loop restores the last approved checkpoint and reports why.
+            session.mutation_pending = "reward"
             env_file = self.store.base_dir / session_id / "env_module.py"
             env_file.write_text(tuning_res.updated_code, encoding="utf-8")
             updated_env_cls = load_synthesized_env_class(env_file)
@@ -1182,6 +1417,134 @@ class AutonomousLoopController:
             "n": len(values),
         }
 
+
+    # ------------------------------------------------------------------
+    # Crossfire P3: corpus seeding, verifier gate, checkpoint selection
+    # ------------------------------------------------------------------
+    DEFAULT_RUBRIC = [
+        "Held-out accuracy must exceed every measured baseline.",
+        "No previously approved behavioural case may regress.",
+        "Held-out accuracy must not fall beyond tolerance after a reward or environment edit.",
+    ]
+
+    @staticmethod
+    def _term_keys(episodes: list[dict[str, Any]]) -> set[str]:
+        keys: set[str] = set()
+        for episode in episodes:
+            for step in episode.get("steps", []) or []:
+                keys.update((step.get("reward_breakdown") or {}).keys())
+        return keys
+
+    @staticmethod
+    def _term_stats(
+        episodes: list[dict[str, Any]], baseline_keys: set[str] | None
+    ) -> dict[str, Any] | None:
+        """Activation statistics for reward terms the previous round never produced."""
+        if baseline_keys is None:
+            return None
+        steps = 0
+        hits = 0
+        total = 0.0
+        for episode in episodes:
+            for step in episode.get("steps", []) or []:
+                steps += 1
+                breakdown = step.get("reward_breakdown") or {}
+                new_values = [
+                    float(v)
+                    for k, v in breakdown.items()
+                    if k not in baseline_keys and abs(float(v)) > 1e-6
+                ]
+                if new_values:
+                    hits += 1
+                total += sum(new_values)
+        new_terms = loop_new_terms(episodes, baseline_keys)
+        if not new_terms:
+            return None
+        return {
+            "new_terms": new_terms,
+            "activation_rate": round(hits / max(1, steps), 4),
+            "mean_term_value": round(total / max(1, steps), 6),
+        }
+
+    @staticmethod
+    def _action_entropy(episodes: list[dict[str, Any]]) -> float | None:
+        """Normalised Shannon entropy of the evaluated action distribution (nats)."""
+        counts: dict[int, int] = {}
+        for episode in episodes:
+            for step in episode.get("steps", []) or []:
+                action = step.get("action")
+                if action is not None:
+                    counts[int(action)] = counts.get(int(action), 0) + 1
+        total = sum(counts.values())
+        if total <= 1 or len(counts) < 2:
+            return 0.0
+        entropy = -sum((c / total) * math.log(c / total) for c in counts.values())
+        return round(entropy, 4)
+
+    def _best_paths(self, session_id: str) -> tuple[Path, Path]:
+        ws = self.store.base_dir / session_id
+        return ws / "best_val_model.zip", ws / "best_val_env_module.py"
+
+    def _record_best(
+        self,
+        session: SessionState,
+        model: PPO,
+        env_code: str,
+        metric: float,
+        outcomes: list[float],
+    ) -> None:
+        self.store.base_dir.mkdir(parents=True, exist_ok=True)
+        model_zip, env_file = self._best_paths(session.session_id)
+        model_zip.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            model.save(str(model_zip))
+        except Exception:
+            return
+        env_file.write_text(env_code, encoding="utf-8")
+        session.best_val_metric = float(metric)
+        session.best_val_round = int(session.current_round)
+        self._best_outcomes[session.session_id] = [float(x) for x in outcomes]
+
+    def _restore_best(
+        self, session: SessionState, env: gym.Env
+    ) -> tuple[PPO | None, str | None]:
+        model_zip, env_file = self._best_paths(session.session_id)
+        if not model_zip.exists():
+            return None, None
+        try:
+            restored = PPO.load(str(model_zip), env=env, device="cpu")
+        except Exception:
+            return None, None
+        self.store.set_model(session.session_id, restored)
+        code = env_file.read_text(encoding="utf-8") if env_file.exists() else session.env_module_code
+        if code:
+            session.env_module_code = code
+            (self.store.base_dir / session.session_id / "env_module.py").write_text(
+                code, encoding="utf-8"
+            )
+        return restored, code
+
+    @staticmethod
+    def _predict_latency(predict: Callable[[list[float]], int], obs_dim: int) -> dict[str, float]:
+        """Percentile latency of one greedy decision (torch path; ONNX is timed at export)."""
+        import time as _time
+
+        sample = [0.0] * max(1, obs_dim)
+        for _ in range(10):  # warm-up so the first-call allocation is not the p99
+            predict(sample)
+        timings: list[float] = []
+        for _ in range(120):
+            started = _time.perf_counter()
+            predict(sample)
+            timings.append((_time.perf_counter() - started) * 1000.0)
+        timings.sort()
+
+        def _pct(p: float) -> float:
+            idx = min(len(timings) - 1, max(0, int(round(p * (len(timings) - 1)))))
+            return round(timings[idx], 4)
+
+        return {"p50_ms": _pct(0.50), "p99_ms": _pct(0.99), "engine": "torch"}
+
     def _finalize_scorecard(
         self,
         session: SessionState,
@@ -1193,6 +1556,7 @@ class AutonomousLoopController:
         """Evaluates on the untouched split, adds baselines, and persists the scorecard."""
         from rl_ide.autopilot.scorecard import (
             build_scorecard,
+            compute_economics_summary,
             logreg_baseline,
             majority_class_baseline,
             uniform_chance_pct,
@@ -1201,6 +1565,39 @@ class AutonomousLoopController:
 
         eval_split, split_counts = self._held_out_split(env)
         task_class = str(getattr(env, "task_class", "control"))
+
+        # Best-on-validation selection: the customer receives the checkpoint that scored best on
+        # held-out selection data, never a degraded late round.
+        selection: dict[str, Any] = {
+            "selected_round": session.current_round,
+            "best_val_round": session.best_val_round,
+            "best_val_metric": session.best_val_metric,
+            "source": "final_round",
+        }
+        best_zip, _best_env = self._best_paths(session.session_id)
+        if (
+            session.best_val_round is not None
+            and session.best_val_round != session.current_round
+            and best_zip.exists()
+        ):
+            try:
+                selected = PPO.load(str(best_zip), env=env, device="cpu")
+                model = selected
+                self.store.set_model(session.session_id, selected)
+                selection["selected_round"] = session.best_val_round
+                selection["source"] = "best_val_checkpoint"
+                model.save(str(Path("runs") / session.session_id / "model.zip"))
+                emit({
+                    "event": "checkpoint_selected",
+                    "round": session.best_val_round,
+                    "metric": session.best_val_metric,
+                    "message": (
+                        f"Selected round {session.best_val_round} checkpoint "
+                        f"({session.best_val_metric}% val) for scoring and export."
+                    ),
+                })
+            except Exception as sel_err:
+                selection["source"] = f"final_round (selection failed: {type(sel_err).__name__})"
 
         metric, episodes, illegal = self.evaluate_policy_deterministic(
             env=env,
@@ -1236,6 +1633,54 @@ class AutonomousLoopController:
         else:
             baselines.append(self._random_policy_baseline(env, eval_split))
 
+        # Corpus, economics and the pre-registered verdict are part of the scorecard, so a
+        # closure probe cannot be reported without them.
+        predict = greedy_predictor(model)
+        corpus_report = None
+        try:
+            corpus_report = self.corpus.evaluate_policy(session.session_id, predict)
+            session.eval_corpus = corpus_report.model_dump()
+        except Exception as corpus_err:
+            emit({
+                "event": "eval_corpus_unavailable",
+                "round": session.current_round,
+                "message": f"Corpus evaluation failed: {type(corpus_err).__name__}: {corpus_err}",
+            })
+
+        crossfire: dict[str, Any] = {"closed": False, "verdict": "not_preregistered", "reasons": []}
+        try:
+            if corpus_report is not None:
+                protocol = self.protocol.load(session.session_id)
+                if protocol is not None:
+                    self.protocol.register_holdout(
+                        session.session_id,
+                        [c.case_id for c in self.corpus.load(session.session_id)],
+                    )
+                best_baseline = max((b["value_pct"] for b in baselines), default=None)
+                crossfire = self.protocol.evaluate(
+                    session.session_id,
+                    holdout_passed=corpus_report.passed_cases,
+                    holdout_total=corpus_report.scored_cases,
+                    policy_metric=metric,
+                    baseline_metric=best_baseline,
+                )
+            session.crossfire = crossfire
+        except Exception as cf_err:
+            crossfire = {
+                "closed": False,
+                "verdict": "inconclusive",
+                "reasons": [f"Protocol evaluation failed: {type(cf_err).__name__}: {cf_err}"],
+            }
+
+        obs_dim = int(np.prod(getattr(env, "observation_space", np.zeros(1)).shape)) if hasattr(env, "observation_space") else 1
+        latency_stats = self._predict_latency(predict, obs_dim)
+        economics = compute_economics_summary(
+            session.session_id,
+            onnx_latency_stats=latency_stats,
+            feature_pipeline_ms=0.0,
+        )
+        economics["latency"]["engine"] = latency_stats.get("engine", "unknown")
+
         scorecard = build_scorecard(
             task_title=getattr(blueprint, "task_title", session.session_id),
             task_class=task_class,
@@ -1253,7 +1698,13 @@ class AutonomousLoopController:
             notes=[
                 "Scored without action masking: the exported ONNX policy applies no mask, so "
                 "neither does the evaluation.",
+                "Latency is measured on the in-process policy; the ONNX figure is recorded by the "
+                "exporter and excludes the feature pipeline.",
             ],
+            eval_corpus=corpus_report.model_dump() if corpus_report else None,
+            crossfire=crossfire,
+            economics=economics,
+            selection=selection,
         )
         session.scorecard = scorecard
 
