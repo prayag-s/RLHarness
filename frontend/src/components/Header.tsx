@@ -34,6 +34,7 @@ interface HeaderProps {
   trustVerdict?: string
   trustBlockers?: number
   onOpenGuide: () => void
+  isCheckingLLM?: boolean
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -56,6 +57,7 @@ export const Header: React.FC<HeaderProps> = ({
   trustVerdict,
   trustBlockers = 0,
   onOpenGuide,
+  isCheckingLLM = false,
 }) => {
   const getProviderLabel = () => {
     switch (llmSettings.provider) {
@@ -176,9 +178,20 @@ export const Header: React.FC<HeaderProps> = ({
               ? provider.color
               : 'bg-amber-950/80 border-amber-600/70 text-amber-300'
           }`}
-          title={isLLMVerified ? 'LLM key verified and active. Click to modify.' : 'No model connected. Exploration works; connect a provider to synthesize.'}
+          title={
+            isCheckingLLM
+              ? 'Checking the configured model…'
+              : isLLMVerified
+                ? `LLM key verified and active: ${llmSettings.provider} / ${llmSettings.modelName || 'default'}. Click to modify.`
+                : 'No model connected. Exploration works; connect a provider to synthesize.'
+          }
         >
-          {isLLMVerified ? (
+          {isCheckingLLM ? (
+            <>
+              <Activity className="h-3.5 w-3.5 text-indigo-400 animate-pulse" />
+              <span>Checking model…</span>
+            </>
+          ) : isLLMVerified ? (
             <>
               <span className="relative flex h-2 w-2">
                 <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>

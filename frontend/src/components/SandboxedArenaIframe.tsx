@@ -53,6 +53,7 @@ export const SandboxedArenaIframe: React.FC<SandboxedArenaIframeProps> = ({
   const [mode, setMode] = useState<'mock' | 'watch' | 'play'>(isArenaLocked ? 'watch' : 'mock')
   const [selectedEpisodeIdx, setSelectedEpisodeIdx] = useState<number | null>(null)
   const [iframeLoaded, setIframeLoaded] = useState(false)
+  const [interactError, setInteractError] = useState<string | null>(null)
 
   // Sync mode if arena lock status changes
   useEffect(() => {
@@ -89,6 +90,11 @@ export const SandboxedArenaIframe: React.FC<SandboxedArenaIframeProps> = ({
   }, [])
 
   const handleSwitchMode = (newMode: 'mock' | 'watch' | 'play') => {
+    if (newMode === 'play' && isTraining) {
+      setInteractError('Training is still running. Play unlocks when the current round finishes.')
+      return
+    }
+    setInteractError(null)
     setMode(newMode)
     setSelectedEpisodeIdx(null)
     if (newMode === 'mock') {
@@ -141,6 +147,7 @@ export const SandboxedArenaIframe: React.FC<SandboxedArenaIframeProps> = ({
             })
           }
           // Send updated state back to iframe
+          setInteractError(null)
           postArenaUpdate({
             arena_state: res.arena_state || {},
             action_probs: res.action_probs || [],
@@ -151,6 +158,11 @@ export const SandboxedArenaIframe: React.FC<SandboxedArenaIframeProps> = ({
           })
         } catch (err) {
           console.error('Interactive step failed:', err)
+          setInteractError(
+            err instanceof Error
+              ? err.message
+              : 'Interactive step failed. The arena could not reach the policy.',
+          )
         }
       }
     }
@@ -232,12 +244,15 @@ export const SandboxedArenaIframe: React.FC<SandboxedArenaIframeProps> = ({
             <button
               type="button"
               onClick={() => handleSwitchMode('play')}
+              disabled={isTraining}
               className={`flex items-center space-x-1.5 px-2.5 py-1 rounded-md transition ${
-                mode === 'play'
-                  ? 'bg-emerald-600 text-white shadow-sm'
-                  : 'text-gray-400 hover:text-gray-200'
+                isTraining
+                  ? 'text-gray-600 cursor-not-allowed'
+                  : mode === 'play'
+                    ? 'bg-emerald-600 text-white shadow-sm'
+                    : 'text-gray-400 hover:text-gray-200'
               }`}
-              title="Test agent interactively"
+              title={isTraining ? 'Play unlocks when training finishes' : 'Test agent interactively'}
             >
               <Gamepad2 className="h-3.5 w-3.5" />
               <span>🎮 Play / Interact</span>
@@ -382,6 +397,20 @@ export const SandboxedArenaIframe: React.FC<SandboxedArenaIframeProps> = ({
 
       {/* Center Sandboxed Iframe Stage */}
       <div className="flex-1 relative w-full h-full bg-gray-950 flex items-center justify-center">
+        {interactError && (
+          <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 flex items-start space-x-2 max-w-xl w-[calc(100%-1.5rem)] rounded-xl border border-amber-800/60 bg-amber-950/90 px-3 py-2 text-[11px] text-amber-100 shadow-lg">
+            <AlertTriangle className="h-4 w-4 shrink-0 text-amber-400 mt-0.5" />
+            <span className="flex-1 leading-snug">{interactError}</span>
+            <button
+              type="button"
+              onClick={() => setInteractError(null)}
+              className="text-amber-300 hover:text-white transition"
+              title="Dismiss"
+            >
+              ✕
+            </button>
+          </div>
+        )}
         {arenaHtml ? (
           <iframe
             ref={iframeRef}

@@ -86,11 +86,74 @@ def load_bundle_context(bundle_dir: Path):
     return sess, baseline_data, action_labels
 
 
+def load_safety_rules(bundle_dir: Path) -> list[dict[str, Any]]:
+    path = bundle_dir / "safety_rules.json"
+    if not path.exists():
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        return payload if isinstance(payload, list) else []
+    except Exception:
+        return []
+
+
+def _rule_matches(record: dict[str, Any], rule: dict[str, Any]) -> bool:
+    raw = record.get(rule.get("feature"))
+    if raw is None:
+        return False
+    try:
+        left = float(raw)
+        right = float(rule.get("value"))
+    except (TypeError, ValueError):
+        return str(raw).strip().lower() == str(rule.get("value")).strip().lower()
+    op = str(rule.get("op") or ">=")
+    return {
+        ">=": left >= right,
+        ">": left > right,
+        "<=": left <= right,
+        "<": left < right,
+        "==": left == right,
+        "!=": left != right,
+    }.get(op, False)
+
+
+def apply_constraint_mask(
+    probs_row: np.ndarray,
+    record: dict[str, Any],
+    rules: list[dict[str, Any]],
+    action_labels: list[str],
+) -> tuple[np.ndarray, list[bool]]:
+    mask = [True] * len(action_labels)
+    index_of = {label: i for i, label in enumerate(action_labels)}
+    for rule in rules:
+        if not _rule_matches(record, rule):
+            continue
+        for label in rule.get("forbidden_actions") or []:
+            idx = index_of.get(label)
+            if idx is not None:
+                mask[idx] = False
+        required = [index_of[l] for l in (rule.get("required_actions") or []) if l in index_of]
+        if required:
+            for i in range(len(mask)):
+                if i not in required:
+                    mask[i] = False
+    if not any(mask):
+        mask[-1] = True
+    masked = np.array(
+        [probs_row[i] if mask[i] and i < len(probs_row) else -1e9 for i in range(len(mask))],
+        dtype=np.float32,
+    )
+    return masked, mask
+
+
 def execute_inference(
     sess: ort.InferenceSession,
     baseline_data: dict[str, Any],
     action_labels: list[str],
     obs_batch: np.ndarray,
+    records: list[dict[str, Any]] | None = None,
+    safety_rules: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if obs_batch.ndim == 1:
         obs_batch = np.expand_dims(obs_batch, axis=0)
@@ -107,18 +170,51 @@ def execute_inference(
     except Exception:
         pass
 
-    probs = sess.run(None, {"obs": obs_batch})[0]
+    raw_probs = sess.run(None, {"obs": obs_batch})[0]
+    masks: list[list[bool] | None] = [None] * len(raw_probs)
+    if safety_rules:
+        if not records:
+            raise ValueError(
+                "This bundle declares hard constraints and cannot run blind. Supply the raw "
+                "records via --record-json, or a 'records' list in the /predict request."
+            )
+        if len(records) != len(raw_probs):
+            raise ValueError(
+                f"Got {len(records)} raw record(s) for {len(raw_probs)} observation(s); "
+                "they must be aligned one-to-one so the safety mask is applied to the right row."
+            )
+        masked_rows = []
+        for row_index, (row, record) in enumerate(zip(raw_probs, records)):
+            masked, mask = apply_constraint_mask(row, record, safety_rules, action_labels)
+            masked_rows.append(masked)
+            masks[row_index] = mask
+        probs = np.vstack(masked_rows)
+    else:
+        probs = raw_probs
+
     predicted_actions = np.argmax(probs, axis=-1)
+    raw_actions = np.argmax(raw_probs, axis=-1)
 
     predictions = []
     for idx, (p, a) in enumerate(zip(probs, predicted_actions)):
         lbl = action_labels[a] if a < len(action_labels) else f"action_{a}"
-        predictions.append({
+        entry = {
             "sample_idx": idx,
             "action_idx": int(a),
             "action_label": lbl,
             "probabilities": [float(val) for val in p],
-        })
+        }
+        if safety_rules:
+            raw_idx = int(raw_actions[idx])
+            entry.update({
+                "raw_action_idx": raw_idx,
+                "raw_action_label": (
+                    action_labels[raw_idx] if raw_idx < len(action_labels) else f"action_{raw_idx}"
+                ),
+                "safety_override": bool(raw_idx != int(a)),
+                "action_mask": masks[idx],
+            })
+        predictions.append(entry)
 
     # Drift check on the inference batch. This used to call a `detect_drift` method that does not
     # exist, inside a bare `except`, so an exported policy reported "healthy" for any input.
@@ -202,6 +298,8 @@ class PolicyDaemonHandler(http.server.BaseHTTPRequestHandler):
                     self.server.baseline_data,
                     self.server.action_labels,
                     obs,
+                    records=data.get("records"),
+                    safety_rules=getattr(self.server, "safety_rules", []),
                 )
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
@@ -225,11 +323,13 @@ class PolicyDaemonHandler(http.server.BaseHTTPRequestHandler):
 
 def run_daemon(bundle_dir: Path, host: str, port: int):
     sess, baseline_data, action_labels = load_bundle_context(bundle_dir)
+    safety_rules = load_safety_rules(bundle_dir)
     server = http.server.HTTPServer((host, port), PolicyDaemonHandler)
     server.bundle_dir = bundle_dir
     server.sess = sess
     server.baseline_data = baseline_data
     server.action_labels = action_labels
+    server.safety_rules = safety_rules
 
     print(f"Starting Policy Daemon on http://{host}:{port} ...")
     try:
@@ -244,12 +344,24 @@ def main():
     parser = argparse.ArgumentParser(description="Run local policy inference and microservice")
     parser.add_argument("--sample", action="store_true", help="Run on synthetic sample observations")
     parser.add_argument("--input", type=str, help="Path to input numpy/csv file")
+    parser.add_argument(
+        "--record-json",
+        type=str,
+        help="Path to the raw records (JSON list) aligned with --input, required when the bundle has hard constraints",
+    )
     parser.add_argument("--serve", action="store_true", help="Launch lightweight HTTP inference daemon")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Host interface for --serve")
     parser.add_argument("--port", type=int, default=9000, help="Port for --serve")
     args = parser.parse_args()
 
     bundle_dir = Path(__file__).resolve().parent
+    safety_rules = load_safety_rules(bundle_dir)
+
+    records = None
+    if args.record_json:
+        with open(args.record_json, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        records = payload if isinstance(payload, list) else payload.get("records")
 
     if args.serve:
         run_daemon(bundle_dir, args.host, args.port)
@@ -263,12 +375,24 @@ def main():
             feat_dim = inp_shape[1] if (len(inp_shape) > 1 and isinstance(inp_shape[1], int)) else (len(baseline_data.get("feature_names", [])) or 9)
         except Exception:
             feat_dim = len(baseline_data.get("feature_names", [0]*9)) or 9
+        if safety_rules and not records:
+            print(
+                "ERROR: this bundle has hard constraints. Re-run with --record-json so the "
+                "safety mask can be applied; refusing to emit an unconstrained decision."
+            )
+            raise SystemExit(2)
         dummy_data = np.random.randn(16, feat_dim).astype(np.float32)
-        res = execute_inference(sess, baseline_data, action_labels, dummy_data)
+        res = execute_inference(
+            sess, baseline_data, action_labels, dummy_data,
+            records=records, safety_rules=safety_rules,
+        )
         print_cli_summary(res, len(dummy_data))
     else:
         arr = np.load(args.input) if args.input.endswith(".npy") else np.loadtxt(args.input, delimiter=",")
-        res = execute_inference(sess, baseline_data, action_labels, arr)
+        res = execute_inference(
+            sess, baseline_data, action_labels, arr,
+            records=records, safety_rules=safety_rules,
+        )
         print_cli_summary(res, len(arr))
 
 
@@ -570,9 +694,16 @@ class PolicyExporter:
             json.dumps(scorecard_payload, indent=2), encoding="utf-8"
         )
 
-        # 2. Save blueprint_spec.json
+        # 2. Save blueprint_spec.json and the executable safety rules.
         (bundle_dir / "blueprint_spec.json").write_text(
             blueprint.model_dump_json(indent=2), encoding="utf-8"
+        )
+        safety_rules = [
+            c.model_dump() if hasattr(c, "model_dump") else dict(c)
+            for c in (getattr(blueprint, "hard_constraints", []) or [])
+        ]
+        (bundle_dir / "safety_rules.json").write_text(
+            json.dumps(safety_rules, indent=2), encoding="utf-8"
         )
 
         # 3. Copy env_module.py and arena.html. Customer rows are NOT shipped by default: the
@@ -599,7 +730,10 @@ class PolicyExporter:
                     "(a JSON list of row objects shaped like the training data) and instantiate\n"
                     "`SynthesizedGymEnv(dataset_records=<rows>)`.\n\n"
                     "Re-export with `include_data: true` if you explicitly want the sample\n"
-                    "embedded in the bundle.\n",
+                    "embedded in the bundle.\n\n"
+                    "If this bundle contains `safety_rules.json`, the supported runtime\n"
+                    "(`run_local.py`) requires `--record-json` so the hard-constraint mask can be\n"
+                    "applied. It refuses to run blind rather than emit an unconstrained decision.\n",
                     encoding="utf-8",
                 )
             (bundle_dir / "env_module.py").write_text(env_text, encoding="utf-8")

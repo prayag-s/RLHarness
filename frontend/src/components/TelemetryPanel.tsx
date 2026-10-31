@@ -39,6 +39,19 @@ export const TelemetryPanel: React.FC<TelemetryPanelProps> = ({
 }) => {
   const isTargetAchieved = currentMetric >= targetThreshold
   const progressPercent = Math.min(100, Math.max(0, (currentMetric / (targetThreshold || 100)) * 100))
+  const bestBaseline = scorecard?.baselines?.length
+    ? scorecard.baselines.reduce(
+        (best, b) => (b.value_pct > best.value_pct ? b : best),
+        scorecard.baselines[0],
+      )
+    : null
+  const ciLow = scorecard?.policy?.ci95_pct?.[0]
+  const statisticallyTied =
+    !!scorecard &&
+    !!bestBaseline &&
+    !scorecard.beats_all_baselines &&
+    typeof ciLow === 'number' &&
+    ciLow <= bestBaseline.value_pct
 
   return (
     <aside className="w-80 flex flex-col h-full bg-gray-900 border-l border-gray-800 text-gray-200 select-none overflow-y-auto">
@@ -152,7 +165,9 @@ export const TelemetryPanel: React.FC<TelemetryPanelProps> = ({
           >
             {scorecard.beats_all_baselines
               ? `Beats every baseline by +${scorecard.uplift_vs_best_baseline_pct.toFixed(1)} pts`
-              : `${Math.abs(scorecard.uplift_vs_best_baseline_pct).toFixed(1)} pts below the best baseline`}
+              : statisticallyTied
+                ? `Statistically tied with ${bestBaseline!.name.replace(/_/g, ' ')} (${bestBaseline!.value_pct.toFixed(1)}%): the policy CI includes it`
+                : `${Math.abs(scorecard.uplift_vs_best_baseline_pct).toFixed(1)} pts below the best baseline (${bestBaseline?.name.replace(/_/g, ' ') ?? 'baseline'})`}
           </div>
 
           {scorecard.deployment?.action_agreement_pct !== undefined && (
@@ -212,6 +227,25 @@ export const TelemetryPanel: React.FC<TelemetryPanelProps> = ({
               {scorecard.crossfire.reasons?.length
                 ? ` · ${scorecard.crossfire.reasons[0]}`
                 : ''}
+            </div>
+          )}
+
+          {scorecard.safety && (
+            <div
+              className={`text-[10px] rounded-lg px-2 py-1.5 border font-mono ${
+                scorecard.safety.violations > 0
+                  ? 'bg-rose-950/40 border-rose-800/40 text-rose-300'
+                  : 'bg-emerald-950/40 border-emerald-800/40 text-emerald-300'
+              }`}
+              title={
+                scorecard.safety.examples?.length
+                  ? JSON.stringify(scorecard.safety.examples.slice(0, 3), null, 1)
+                  : 'Hard constraints are enforced before scoring, play and export.'
+              }
+            >
+              🛡️ Constraints: {scorecard.safety.violations} raw violation
+              {scorecard.safety.violations === 1 ? '' : 's'} / {scorecard.safety.checked} rows
+              {scorecard.safety.runtime_enforced ? ' · runtime-enforced' : ''}
             </div>
           )}
 

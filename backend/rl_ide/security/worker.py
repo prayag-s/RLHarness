@@ -255,6 +255,7 @@ def run_train_round(job: dict[str, Any]) -> dict[str, Any]:
 
     store = SessionStateStore(base_dir=job["base_dir"])
     controller = AutonomousLoopController(store)
+    finalize_scorecard = bool(job.get("finalize_scorecard", True))
     session = controller.run_loop(
         session_id=job["session_id"],
         blueprint=blueprint,
@@ -265,7 +266,9 @@ def run_train_round(job: dict[str, Any]) -> dict[str, Any]:
         episodes_per_burst=int(job.get("episodes_per_burst") or 25),
         additional_rounds=None,
         skip_auto_tune=True,
-        finalize_scorecard=bool(job.get("finalize_scorecard", True)),
+        finalize_scorecard=finalize_scorecard,
+        # One worker = one round; "budget exhausted" would be a lie when more rounds are queued.
+        partial_run=not finalize_scorecard,
     )
 
     return {

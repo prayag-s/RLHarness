@@ -98,6 +98,9 @@ class AgentBlueprintSpec(BaseModel):
     # carries across steps and the reward arrives only at the end (G10).
     task_structuring: str = "one_shot"
     episode_length: int = 1
+    # Declarative "never X when feature >= N" rules. Kept as plain dicts so the blueprint stays
+    # serialisable; the environment and exporter validate them into HardConstraint.
+    hard_constraints: list[dict[str, Any]] = Field(default_factory=list)
     pending_directive: str | None = None  # Latest mechanics/rule instruction for the synthesizer
 
     def to_dynamic_task_blueprint(self) -> DynamicTaskBlueprint:
@@ -128,6 +131,7 @@ class DynamicTaskBlueprint(BaseModel):
     episodes_per_round: int = 200
     task_structuring: str = "one_shot"
     episode_length: int = 1
+    hard_constraints: list[dict[str, Any]] = Field(default_factory=list)
 
     def to_agent_blueprint_spec(self) -> AgentBlueprintSpec:
         reward_list = []
@@ -154,6 +158,7 @@ class DynamicTaskBlueprint(BaseModel):
             label_column=self.label_column,
             task_structuring=self.task_structuring,
             episode_length=self.episode_length,
+            hard_constraints=list(self.hard_constraints or []),
         )
 
     @classmethod
@@ -185,6 +190,7 @@ class DynamicTaskBlueprint(BaseModel):
             episodes_per_round=spec.episodes_per_round,
             task_structuring=spec.task_structuring,
             episode_length=spec.episode_length,
+            hard_constraints=list(spec.hard_constraints or []),
         )
 
 

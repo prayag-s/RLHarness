@@ -238,6 +238,7 @@ def run_rounds_in_sandbox(
     summary: dict[str, Any] = {}
     best_metric: float | None = None
     current_env = Path(env_module)
+    metric_history: list[float] = []
 
     def emit(payload: dict[str, Any]) -> None:
         if on_event:
@@ -323,6 +324,29 @@ def run_rounds_in_sandbox(
             })
             continue
 
+        if metric is not None:
+            try:
+                metric_history.append(float(metric))
+            except (TypeError, ValueError):
+                pass
+
+        # Match the in-process loop: only spend tokens when the policy has actually plateaued.
+        # A policy below 25% after its first round is already stuck; tune before the next one.
+        plateau = False
+        if metric_history and metric_history[-1] < 25.0:
+            plateau = True
+        elif len(metric_history) >= 3:
+            delta_curr = metric_history[-1] - metric_history[-2]
+            delta_prev = metric_history[-2] - metric_history[-3]
+            plateau = delta_curr < 3.0 and delta_prev < 3.0
+        if not plateau:
+            emit({
+                "event": "auto_tune_skipped",
+                "round": result.get("round"),
+                "message": "Policy is still improving; reward function retained.",
+            })
+            continue
+
         try:
             tuner = AutoTunerAgent(llm_client)
             env_path = working_root / session_id / "env_module.py"
@@ -347,6 +371,13 @@ def run_rounds_in_sandbox(
                     "message": "Host tuning produced unverified code; reward retained.",
                 })
                 continue
+            if tuning.updated_code.strip() == current_code.strip():
+                emit({
+                    "event": "auto_tune_noop",
+                    "round": result.get("round"),
+                    "message": "Host tuning proposed no change; reward retained.",
+                })
+                continue
             env_path.write_text(tuning.updated_code, encoding="utf-8")
             current_env = env_path
             smoke = run_smoke_in_sandbox(env_path, records=records)
@@ -357,12 +388,23 @@ def run_rounds_in_sandbox(
                     "message": "Tuned environment failed the smoke check; reward retained.",
                 })
                 continue
+
+            # Mark the mutation so the next worker round judges it with the same verifier gate
+            # the UI promises. Without this flag the tuned code would be used ungated.
+            from rl_ide.autopilot.loop_controller import SessionStateStore
+
+            tuned_store = SessionStateStore(working_root)
+            tuned_session = tuned_store.load_session_state(session_id)
+            if tuned_session is not None:
+                tuned_session.mutation_pending = "reward"
+                tuned_store.save_session_state(tuned_session)
+
             emit({
                 "event": "auto_tuned",
                 "round": result.get("round"),
                 "next_round": index + 2,
                 "diagnosis": tuning.diagnosis,
-                "message": "Host tuned the reward function; next round judges it.",
+                "message": "Host tuned the reward function; the next round's verifier gate judges it.",
             })
         except Exception as exc:  # a failed tune must not kill the run
             emit({

@@ -248,6 +248,21 @@ export interface Scorecard {
     verdict: string
     reasons: string[]
   }
+  safety?: {
+    constraints: Array<{
+      feature: string
+      op: string
+      value: number | string
+      forbidden_actions: string[]
+      required_actions: string[]
+      reason: string
+    }>
+    checked: number
+    violations: number
+    examples: Array<Record<string, unknown>>
+    runtime_enforced: boolean
+    note?: string
+  }
   selection?: {
     selected_round: number
     best_val_round: number | null

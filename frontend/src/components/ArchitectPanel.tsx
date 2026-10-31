@@ -48,6 +48,7 @@ interface ArchitectPanelProps {
   isSynthesizing: boolean
   activeSessionId?: string
   isLLMVerified?: boolean
+  isCheckingLLM?: boolean
   onOpenSettings?: () => void
   trainingParams?: TrainingParams
   onUpdateTrainingParams?: (params: TrainingParams) => void
@@ -70,6 +71,7 @@ export const ArchitectPanel: React.FC<ArchitectPanelProps> = ({
   isSynthesizing,
   activeSessionId,
   isLLMVerified = false,
+  isCheckingLLM = false,
   onOpenSettings,
   trainingParams,
   onUpdateTrainingParams,
@@ -307,7 +309,7 @@ export const ArchitectPanel: React.FC<ArchitectPanelProps> = ({
   return (
     <aside className="w-96 flex flex-col h-full bg-gray-900 border-r border-gray-800 text-gray-200 select-none">
       {/* Explore mode: data intake and existing agents work; synthesis needs a model. */}
-      {!isLLMVerified && (
+      {!isLLMVerified && !isCheckingLLM && (
         <div
           onClick={onOpenSettings}
           className="p-3 bg-amber-950/80 border-b border-amber-700/60 text-amber-100 text-xs flex items-center space-x-2.5 cursor-pointer hover:bg-amber-900/80 transition shadow-inner"

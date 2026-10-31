@@ -24,6 +24,7 @@ from rl_ide.architect.models import (
 from rl_ide.llm.client import BaseLLMClient, FallbackCodeSynthesizer, get_active_llm_client
 from rl_ide.llm.prompts import INTAKE_ARCHITECT_SYSTEM_PROMPT, ARCHITECT_SYSTEM_PROMPT
 from rl_ide.ingest.loader import IngestedDataset
+from rl_ide.security.constraints import extract_hard_constraints
 
 
 UNIVERSAL_INTAKE_PROMPT = """You are an Expert Universal Reinforcement Learning Domain Architect.
@@ -168,7 +169,7 @@ def extract_observation_features_from_prompt(text: str) -> list[str] | None:
     return None
 
 
-def synthesize_blueprint_from_prompt(
+def _synthesize_blueprint_from_prompt_impl(
     prompt: str,
     dataset: IngestedDataset | None = None,
     conversation_history: list[dict[str, str]] | None = None,
@@ -495,6 +496,44 @@ def apply_answers_to_blueprint(
         if m_rnd:
             blueprint.max_auto_tune_rounds = int(m_rnd.group(1))
 
+    return blueprint
+
+
+def synthesize_blueprint_from_prompt(
+    prompt: str,
+    dataset: IngestedDataset | None = None,
+    conversation_history: list[dict[str, str]] | None = None,
+    answers: dict[str, str] | None = None,
+    training_params: dict[str, Any] | None = None,
+    client: BaseLLMClient | None = None,
+) -> DynamicTaskBlueprint:
+    """Generates the blueprint, then attaches any explicit hard constraints from the objective.
+
+    The core synthesis is unchanged; this wrapper makes "must never X when feature >= N" a
+    first-class, executable rule instead of prose the reward function may or may not learn.
+    """
+    blueprint = _synthesize_blueprint_from_prompt_impl(
+        prompt=prompt,
+        dataset=dataset,
+        conversation_history=conversation_history,
+        answers=answers,
+        training_params=training_params,
+        client=client,
+    )
+    try:
+        feature_names = (
+            [str(c) for c in dataset.df.columns]
+            if dataset is not None and hasattr(dataset, "df")
+            else []
+        )
+        labels = [str(a.label) for a in blueprint.actions]
+        blueprint.hard_constraints = [
+            c.model_dump()
+            for c in extract_hard_constraints(prompt, labels, feature_names)
+        ]
+    except Exception:
+        # Constraint extraction must never break synthesis; an empty list is the safe default.
+        blueprint.hard_constraints = []
     return blueprint
 
 

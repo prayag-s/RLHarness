@@ -385,6 +385,18 @@ export const App: React.FC = () => {
     }
   }
 
+  const handleRequestNewAgent = () => {
+    if (
+      attachedDataset &&
+      !window.confirm(
+        `Start a new agent? "${attachedDataset.name}" will be detached from this draft. The upload stays in the dataset library.`,
+      )
+    ) {
+      return
+    }
+    handleNewAgent()
+  }
+
   const handleNewAgent = () => {
     setActiveSession(null)
     setLastStep(null)
@@ -1049,6 +1061,45 @@ export const App: React.FC = () => {
   // 6. Export Standalone ONNX RunBundle
   const handleExportPolicy = async () => {
     if (!activeSession) return
+
+    const evidenceGaps: string[] = []
+    if (scorecard) {
+      if (!scorecard.beats_all_baselines) {
+        const best = scorecard.baselines.length
+          ? scorecard.baselines.reduce(
+              (b, x) => (x.value_pct > b.value_pct ? x : b),
+              scorecard.baselines[0],
+            )
+          : null
+        evidenceGaps.push(
+          best
+            ? `Held-out ${scorecard.policy.value_pct.toFixed(1)}% does not beat the best baseline (${best.name.replace(/_/g, ' ')} ${best.value_pct.toFixed(1)}%).`
+            : `Held-out ${scorecard.policy.value_pct.toFixed(1)}% has no baseline comparison.`,
+        )
+      }
+      if (scorecard.crossfire && scorecard.crossfire.verdict !== 'win') {
+        evidenceGaps.push(`Crossfire verdict: ${scorecard.crossfire.verdict}.`)
+      }
+      if (scorecard.eval_corpus && scorecard.eval_corpus.failed_cases > 0) {
+        evidenceGaps.push(
+          `${scorecard.eval_corpus.failed_cases} golden-corpus case(s) fail.`,
+        )
+      }
+      if (scorecard.safety && scorecard.safety.violations > 0) {
+        evidenceGaps.push(
+          `${scorecard.safety.violations} raw hard-constraint violation(s) — the runtime mask will override them.`,
+        )
+      }
+    }
+    if (
+      evidenceGaps.length > 0 &&
+      !window.confirm(
+        `This policy still has unresolved evidence:\n\n- ${evidenceGaps.join('\n- ')}\n\nExport anyway? The bundle will include the safety rules it can enforce.`,
+      )
+    ) {
+      return
+    }
+
     setIsExporting(true)
     try {
       const exportRes = await exportSessionPolicy(activeSession.session_id)
@@ -1134,6 +1185,7 @@ export const App: React.FC = () => {
           scorecard?.crossfire?.reasons?.length ?? activeSession?.crossfire?.reasons?.length ?? 0
         }
         onOpenGuide={() => setIsGuideOpen(true)}
+        isCheckingLLM={isCheckingLLM}
       />
 
       {/* Main Studio 3-Panel Workspace */}
@@ -1148,10 +1200,11 @@ export const App: React.FC = () => {
           attachedDataset={attachedDataset}
           onRemoveDataset={() => setAttachedDataset(null)}
           timeline={timeline}
-          isTraining={isTraining}
+          isTraining={isTraining || activeSession?.status === 'training'}
           isSynthesizing={isSynthesizing}
           activeSessionId={activeSession?.session_id}
           isLLMVerified={isLLMVerified}
+          isCheckingLLM={isCheckingLLM}
           onOpenSettings={() => setIsGateModalOpen(true)}
           trainingParams={trainingParams}
           onUpdateTrainingParams={setTrainingParams}
@@ -1201,7 +1254,7 @@ export const App: React.FC = () => {
         conversations={conversations}
         activeConversationId={activeConversationId}
         onSelectConversation={handleSelectConversation}
-        onNewAgent={handleNewAgent}
+        onNewAgent={handleRequestNewAgent}
         onDeleteConversation={handleDeleteConversation}
         onClearAll={handleClearAllConversations}
         isLoading={isLoadingConversations}

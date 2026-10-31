@@ -179,6 +179,10 @@ class SessionState(BaseModel):
     gate_history: list[dict[str, Any]] = Field(default_factory=list)
     best_val_metric: float | None = None
     best_val_round: int | None = None
+    # Persisted so a new sandbox worker can still run a paired verifier-gate comparison against
+    # the checkpoint that was actually best, instead of comparing against nothing.
+    best_val_outcomes: list[float] = Field(default_factory=list)
+    best_corpus_passing_ids: list[str] = Field(default_factory=list)
     mutation_pending: str | None = None
     error_message: str | None = None
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
@@ -406,6 +410,7 @@ class AutonomousLoopController:
         additional_rounds: int | None = None,
         skip_auto_tune: bool = False,
         finalize_scorecard: bool = True,
+        partial_run: bool = False,
     ) -> SessionState:
         """Executes rounds under a per-session lock (see `_run_loop_locked`)."""
         lock = self.session_lock(session_id)
@@ -425,6 +430,7 @@ class AutonomousLoopController:
                 additional_rounds=additional_rounds,
                 skip_auto_tune=skip_auto_tune,
                 finalize_scorecard=finalize_scorecard,
+                partial_run=partial_run,
             )
         finally:
             lock.release()
@@ -441,6 +447,7 @@ class AutonomousLoopController:
         additional_rounds: int | None = None,
         skip_auto_tune: bool = False,
         finalize_scorecard: bool = True,
+        partial_run: bool = False,
     ) -> SessionState:
         """Executes the full multi-round autonomous training loop, supporting continuous resumption."""
         records = dataset.df.to_dict(orient="records") if (dataset and hasattr(dataset, "df")) else None
@@ -608,7 +615,7 @@ class AutonomousLoopController:
 
         best_val_metric: float | None = session.best_val_metric
         best_val_round: int | None = session.best_val_round
-        best_corpus_passing: set[str] = set()
+        best_corpus_passing: set[str] = set(session.best_corpus_passing_ids or [])
         best_entropy: float | None = None
         term_keys: set[str] | None = None
         mutation_kind: str | None = session.mutation_pending
@@ -728,6 +735,7 @@ class AutonomousLoopController:
                 best_corpus_passing = corpus_passing
                 best_entropy = entropy_now
                 self._record_best(session, model, current_code, current_metric, val_outcomes)
+                session.best_corpus_passing_ids = sorted(best_corpus_passing)
                 emit({
                     "event": "checkpoint_recorded",
                     "round": r,
@@ -741,7 +749,10 @@ class AutonomousLoopController:
                     env_code=current_code,
                     model_path=str(self._best_paths(session_id)[0]),
                     val_metric=best_val_metric,
-                    val_outcomes=self._best_outcomes.get(session_id, []),
+                    val_outcomes=(
+                        session.best_val_outcomes
+                        or self._best_outcomes.get(session_id, [])
+                    ),
                     corpus_passing_ids=sorted(best_corpus_passing),
                     entropy=best_entropy,
                 )
@@ -805,6 +816,7 @@ class AutonomousLoopController:
                 best_corpus_passing = corpus_passing
                 best_entropy = entropy_now
                 self._record_best(session, model, current_code, current_metric, val_outcomes)
+                session.best_corpus_passing_ids = sorted(best_corpus_passing)
 
             term_keys = self._term_keys(eval_episodes)
 
@@ -842,8 +854,16 @@ class AutonomousLoopController:
                     episodes_count=len(burst_episodes),
                     env_code=current_code,
                     model=model,
-                    diagnosis="Budget exhausted; target threshold not fully met.",
-                    changes_summary="Completed all allotted auto-tune rounds.",
+                    diagnosis=(
+                        "Round complete; more sandboxed rounds are queued."
+                        if partial_run
+                        else "Budget exhausted; target threshold not fully met."
+                    ),
+                    changes_summary=(
+                        "Continuing in the next sandboxed round."
+                        if partial_run
+                        else "Completed all allotted auto-tune rounds."
+                    ),
                 )
                 emit({
                     "event": "budget_exhausted",
@@ -1537,6 +1557,7 @@ class AutonomousLoopController:
         env_file.write_text(env_code, encoding="utf-8")
         session.best_val_metric = float(metric)
         session.best_val_round = int(session.current_round)
+        session.best_val_outcomes = [float(x) for x in outcomes]
         self._best_outcomes[session.session_id] = [float(x) for x in outcomes]
 
     def _restore_best(
@@ -1715,6 +1736,60 @@ class AutonomousLoopController:
         )
         economics["latency"]["engine"] = latency_stats.get("engine", "unknown")
 
+        # Safety audit: count what the raw policy would do before the runtime mask.
+        safety: dict[str, Any] | None = None
+        constraints_raw = [
+            c.model_dump() if hasattr(c, "model_dump") else dict(c)
+            for c in (getattr(blueprint, "hard_constraints", []) or [])
+        ]
+        if constraints_raw:
+            from rl_ide.security.constraints import HardConstraint, action_mask as _action_mask
+
+            rule_objects = [HardConstraint(**c) for c in constraints_raw]
+            labels = list(getattr(env, "action_labels", []) or [])
+            records = list(getattr(env, "records", []) or [])
+            indices = (getattr(env, "split_indices", {}) or {}).get(eval_split) if eval_split else None
+            rows = [records[i] for i in indices] if indices else records
+            violations: list[dict[str, Any]] = []
+            for row_index, record in enumerate(rows):
+                try:
+                    action = int(predict(env._extract_obs(record)))
+                except Exception:
+                    continue
+                mask = _action_mask(record, labels, rule_objects)
+                if 0 <= action < len(mask) and not mask[action]:
+                    violations.append(
+                        {
+                            "row_index": row_index,
+                            "policy_action": labels[action] if action < len(labels) else action,
+                            "record": {
+                                key: record.get(key)
+                                for key in list(record.keys())[:4]
+                            },
+                            "constraint": rule_objects[0].reason if rule_objects else "",
+                        }
+                    )
+            safety = {
+                "constraints": constraints_raw,
+                "checked": len(rows),
+                "violations": len(violations),
+                "examples": violations[:10],
+                "runtime_enforced": True,
+                "note": (
+                    "The environment forces the allowed action before scoring and play. This "
+                    "count is what the raw policy would have chosen without the mask."
+                ),
+            }
+            emit({
+                "event": "safety_audit",
+                "violations": len(violations),
+                "checked": len(rows),
+                "message": (
+                    f"Safety audit: {len(violations)} raw policy violation(s) across {len(rows)} "
+                    f"held-out rows; the runtime mask prevents them."
+                ),
+            })
+
         scorecard = build_scorecard(
             task_title=getattr(blueprint, "task_title", session.session_id),
             task_class=task_class,
@@ -1730,8 +1805,13 @@ class AutonomousLoopController:
             rows_total=getattr(env, "dataset_rows_total", None),
             embedded_rows=len(getattr(env, "_records", []) or []) or None,
             notes=[
-                "Scored without action masking: the exported ONNX policy applies no mask, so "
-                "neither does the evaluation.",
+                (
+                    "Hard constraints are enforced by the environment before scoring, play and "
+                    "export; the safety block counts raw policy violations before the mask."
+                    if constraints_raw
+                    else "Scored without action masking: the exported ONNX policy applies no mask, "
+                    "so neither does the evaluation."
+                ),
                 "Latency is measured on the in-process policy; the ONNX figure is recorded by the "
                 "exporter and excludes the feature pipeline.",
             ],
@@ -1739,6 +1819,7 @@ class AutonomousLoopController:
             crossfire=crossfire,
             economics=economics,
             selection=selection,
+            safety=safety,
         )
         session.scorecard = scorecard
 

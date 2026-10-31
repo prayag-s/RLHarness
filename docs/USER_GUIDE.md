@@ -327,6 +327,11 @@ python run_local.py --input observations.csv # score your own rows
 python run_local.py --serve --port 9000      # start the inference daemon
 ```
 
+When the objective declares a hard constraint, the bundle also ships `safety_rules.json` and the
+supported runtime **refuses to run blind**: supply `--record-json records.json` (one raw record per
+input row) so the mask can be applied. A constrained bundle without raw records exits with an error
+instead of emitting an unconstrained decision.
+
 Use export when the evidence is good. An exported policy is a commitment; it is also the point at which the token bill stops.
 
 ### 8.5 Policy Registry
@@ -554,6 +559,7 @@ The **Held-Out Scorecard** in the telemetry panel is the most important number i
 | **Selected checkpoint** | Which round was kept when validation chose an earlier one | Best validation, not necessarily the last |
 | **Crossfire** | The pre-registered verdict | `win` when you have enough evidence |
 | **⚡ p99 latency** | End-to-end decision latency | Lower is better; compare with the frontier path |
+| **🛡️ Constraints** | How many raw policy actions a declared hard constraint had to override | Zero violations, runtime-enforced |
 | **Payback rows** | Decisions needed to repay authoring cost | Read with chapter 16 |
 
 ### 13.2 In-sample is a warning, not a score
@@ -687,6 +693,12 @@ There are three shapes of solution. Choosing the right one up front saves the mo
 **Strength:** the constraint holds regardless of training noise.
 **Weakness:** a badly written guard can make the agent rigid or predictable.
 
+You do not have to build the guard by hand. When the objective contains a checkable rule — for
+example "must never Auto-Approve an invoice whose vendor_risk_score is 85 or higher" — the app
+extracts it into a declarative constraint, applies it during training, play and scoring, and ships it
+with the bundle. The scorecard's **Constraints** line reports how many raw policy actions the mask
+had to override.
+
 ### 17.3 Hybrid (the usual best answer)
 
 **What:** guard for the invariant, learned policy for the style.
@@ -726,7 +738,7 @@ In a live example in this app, about **120 provider calls cost roughly $0.50** o
 
 ### 18.2 Ten levers, strongest first
 
-1. **Use `deepseek-chat` for iteration.** Switch to a reasoner only when the environment is the blocker.
+1. **Use `deepseek-chat` for iteration.** Switch to a reasoner only when the environment is the blocker. Automatic reward tuning now runs only after a detected plateau, and its change is judged by the next round's verifier gate instead of being applied ungated.
 2. **Get the objective right the first time.** Every re-synthesis is a full prompt.
 3. **One behavioural change per message.** Batching unrelated changes causes regressions, and regressions cause re-runs.
 4. **Do cosmetic changes freely but cheaply.** Looks do not need a reasoner.

@@ -130,6 +130,7 @@ def build_scorecard(
     eval_corpus: dict[str, Any] | None = None,
     crossfire: dict[str, Any] | None = None,
     selection: dict[str, Any] | None = None,
+    safety: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assembles the persisted scorecard, including whether the number is genuinely held out."""
     held_out = (
@@ -170,6 +171,8 @@ def build_scorecard(
         scorecard["crossfire"] = crossfire
     if economics:
         scorecard["economics"] = economics
+    if safety:
+        scorecard["safety"] = safety
     if not held_out:
         if task_class == "classification":
             scorecard["notes"].append(

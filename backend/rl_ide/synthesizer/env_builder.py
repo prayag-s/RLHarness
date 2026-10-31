@@ -1127,6 +1127,10 @@ class JITEnvironmentSynthesizer:
 
         records_json = json.dumps(records_from_frame(usable), default=str)
         obs_dim = len(feature_names)
+        hard_constraints = [
+            c.model_dump() if hasattr(c, "model_dump") else dict(c)
+            for c in (blueprint.hard_constraints or [])
+        ]
 
         return f'''"""Auto-synthesized Gymnasium environment for supervised tabular decisions."""
 
@@ -1179,6 +1183,8 @@ class SynthesizedGymEnv(gym.Env):
         self.active_split = "train"
         self.split_fallback = False
         self._declared_state_schema = {dict(blueprint.state_dict_schema or {})!r}
+        self._HARD_CONSTRAINTS = {hard_constraints!r}
+        self.last_safety_override = False
         self.is_placeholder = False
         self.task_class = "classification"
         self.episode_horizon = 25
@@ -1311,16 +1317,19 @@ class SynthesizedGymEnv(gym.Env):
             "split_counts": self.split_counts(),
             "is_success": False,
             "reward_breakdown": {{}},
-            "arena_state": self.render_arena_state(),
+            "arena_state": self._decorate_safety(
+                self.render_arena_state(), self.records[self.current_idx]
+            ),
         }}
         return obs, info
 
     def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
         action = int(action) % self.n_actions
+        record = self.records[self.current_idx]
+        action, self.last_safety_override = self._apply_constraint(record, action)
         self.step_count += 1
         self.last_action = action
 
-        record = self.records[self.current_idx]
         truth = self._truth_for(record)
         is_correct = truth is not None and action == truth
 
@@ -1354,7 +1363,10 @@ class SynthesizedGymEnv(gym.Env):
             "correct_count": self.correct_count,
             "accuracy_pct": round((self.correct_count / max(1, self.step_count)) * 100, 1),
             "reward_breakdown": breakdown,
-            "arena_state": self.render_arena_state(),
+            "safety_override": bool(self.last_safety_override),
+            "arena_state": self._decorate_safety(
+                self.render_arena_state(), self.records[self.current_idx]
+            ),
         }}
         return next_obs, float(reward), terminated, False, info
 
@@ -1392,12 +1404,91 @@ class SynthesizedGymEnv(gym.Env):
                     [] if "list" in _kind_text
                     else (0 if "int" in _kind_text else (0.0 if "float" in _kind_text else ""))
                 )
+        return self._decorate_safety(state, record)
+
+    def _rule_matches(self, record: dict[str, Any], rule: dict[str, Any]) -> bool:
+        raw = record.get(rule.get("feature"))
+        if raw is None:
+            return False
+        try:
+            left = float(raw)
+            right = float(rule.get("value"))
+        except (TypeError, ValueError):
+            return str(raw).strip().lower() == str(rule.get("value")).strip().lower()
+        op = str(rule.get("op") or ">=")
+        return {{
+            ">=": left >= right,
+            ">": left > right,
+            "<=": left <= right,
+            "<": left < right,
+            "==": left == right,
+            "!=": left != right,
+        }}.get(op, False)
+
+    def _constraint_mask(self, record: dict[str, Any]) -> list[bool]:
+        mask = [True] * self.n_actions
+        label_to_index = {{label: i for i, label in enumerate(self.action_labels)}}
+        for rule in self._HARD_CONSTRAINTS:
+            if not self._rule_matches(record, rule):
+                continue
+            for label in rule.get("forbidden_actions") or []:
+                idx = label_to_index.get(label)
+                if idx is not None:
+                    mask[idx] = False
+            required = [
+                label_to_index[label]
+                for label in (rule.get("required_actions") or [])
+                if label in label_to_index
+            ]
+            if required:
+                for i in range(len(mask)):
+                    if i not in required:
+                        mask[i] = False
+        if not any(mask):
+            # Never let a contradictory rule set remove every action.
+            mask[-1] = True
+        return mask
+
+    def _apply_constraint(self, record: dict[str, Any], action_idx: int) -> tuple[int, bool]:
+        mask = self._constraint_mask(record)
+        if 0 <= action_idx < self.n_actions and mask[action_idx]:
+            return action_idx, False
+        for i, allowed in enumerate(mask):
+            if allowed:
+                return i, True
+        return action_idx, False
+
+    def _decorate_safety(self, state: dict[str, Any], record: dict[str, Any]) -> dict[str, Any]:
+        mask = self._constraint_mask(record)
+        state["action_mask"] = mask
+        state["allowed_actions"] = [
+            {{
+                "index": i,
+                "label": label,
+                "enabled": bool(mask[i]),
+                "disabled_reason": None if mask[i] else "Blocked by a hard constraint",
+            }}
+            for i, label in enumerate(self.action_labels)
+        ]
+        state["safety_override"] = bool(self.last_safety_override)
         return state
 
     def interactive_step(self, payload: dict[str, Any], policy_predict_fn: Callable = None, mode: str = "agent_vs_env") -> dict[str, Any]:
-        custom_record = payload.get("custom_params") or payload.get("record") if isinstance(payload, dict) else None
-        if custom_record and isinstance(custom_record, dict):
-            obs = self._extract_obs(custom_record)
+        payload = payload if isinstance(payload, dict) else {{}}
+
+        if payload.get("reset"):
+            self.reset()
+            return {{
+                "arena_state": self._decorate_safety(
+                    self.render_arena_state(), self.records[self.current_idx]
+                ),
+                "agent_action_label": "Reset",
+                "action_probs": [],
+                "status_text": "Ready for the next record.",
+            }}
+
+        custom_record = payload.get("custom_params") or payload.get("record")
+        if isinstance(custom_record, dict):
             self.records = self.records + [dict(custom_record)]
             self.current_idx = len(self.records) - 1
             self.split_indices = self._compute_splits()
@@ -1406,23 +1497,82 @@ class SynthesizedGymEnv(gym.Env):
                     self.active_split = _name
                     break
         else:
-            index = int(payload.get("user_action", self.current_idx)) % len(self.records) if isinstance(payload, dict) else 0
-            self.current_idx = index
-            obs = self._extract_obs(self.records[index])
+            index = payload.get("record_index", self.current_idx)
+            try:
+                index = int(index)
+            except (TypeError, ValueError):
+                index = self.current_idx
+            self.current_idx = index % len(self.records)
 
+        obs = self._extract_obs(self.records[self.current_idx])
+
+        # The policy always runs for display; the human's click wins when one is supplied.
+        policy_action: int | None = None
+        probs = [1.0 / self.n_actions] * self.n_actions
         if policy_predict_fn is not None:
-            action_idx, probs = policy_predict_fn(obs)
-            action_idx = int(action_idx) % self.n_actions
+            try:
+                policy_action, policy_probs = policy_predict_fn(obs)
+                probs = [float(p) for p in policy_probs]
+            except Exception:
+                policy_action = None
+
+        human_action = payload.get("action_index")
+        if human_action is None:
+            human_action = payload.get("user_action")
+        if human_action is not None and mode != "agent_only":
+            try:
+                action_idx = int(human_action) % self.n_actions
+            except (TypeError, ValueError):
+                action_idx = 0
+        elif policy_action is not None:
+            action_idx = int(policy_action) % self.n_actions
         else:
             action_idx = 0
-            probs = [1.0 / self.n_actions] * self.n_actions
+
+        record = self.records[self.current_idx]
+        action_idx, self.last_safety_override = self._apply_constraint(record, action_idx)
+        truth = self._truth_for(record)
+        is_correct = truth is not None and action_idx == truth
+        reward, breakdown = self.compute_reward(None, action_idx, None, {{"is_correct": is_correct}})
+
+        self.last_action = action_idx
+        self.last_feedback = (
+            f"Correct: {{self.action_labels[action_idx]}}"
+            if is_correct
+            else f"Incorrect: {{self.action_labels[action_idx]}}"
+        )
+        self.last_reward_breakdown = breakdown
+        self.step_count += 1
+        if is_correct:
+            self.correct_count += 1
+        self.cumulative_score += float(reward)
+
+        # Render before advancing so the arena shows the record the decision was made on.
+        state = self._decorate_safety(self.render_arena_state(), record)
+        state["chosen_decision"] = self.action_labels[action_idx]
+        state["reward"] = float(reward)
+        state["reward_breakdown"] = breakdown
+        state["is_success"] = bool(is_correct)
+
+        decision_idx = self.current_idx
+        order = self.split_indices.get(self.active_split) or list(range(len(self.records)))
+        try:
+            position = order.index(self.current_idx)
+        except ValueError:
+            position = -1
+        if position >= 0:
+            self.current_idx = order[(position + 1) % len(order)]
 
         label = self.action_labels[action_idx]
         return {{
-            "arena_state": self.render_arena_state(),
+            "arena_state": state,
             "agent_action_label": label,
-            "action_probs": [float(p) for p in probs],
-            "status_text": f"Agent routed this record to: {{label}}",
+            "action_probs": probs,
+            "reward": float(reward),
+            "reward_breakdown": breakdown,
+            "is_success": bool(is_correct),
+            "decision_record_index": decision_idx,
+            "status_text": f"{{'Correct' if is_correct else 'Recorded'}}: {{label}}",
         }}
 
     def get_demonstrations(self, num_samples: int = 200, split: str = "train") -> tuple[np.ndarray, np.ndarray]:
