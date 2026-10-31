@@ -12,7 +12,7 @@ interface GuideModalProps {
 }
 
 interface TocEntry {
-  level: 1 | 2
+  level: 1 | 2 | 3 | 4
   text: string
   id: string
 }
@@ -34,8 +34,9 @@ function plainText(children: React.ReactNode): string {
   return ''
 }
 
-function buildToc(markdown: string): TocEntry[] {
+function buildToc(markdown: string, maxLevel: 2 | 4 = 2): TocEntry[] {
   const entries: TocEntry[] = []
+  const pattern = new RegExp(`^(#{1,${maxLevel}})\\s+(.*)$`)
   let inCode = false
   for (const line of markdown.split('\n')) {
     if (line.trimStart().startsWith('```')) {
@@ -43,10 +44,14 @@ function buildToc(markdown: string): TocEntry[] {
       continue
     }
     if (inCode) continue
-    const match = /^(#{1,2})\s+(.*)$/.exec(line)
+    const match = pattern.exec(line)
     if (!match) continue
     const text = match[2].replace(/[*`]/g, '').trim()
-    entries.push({ level: match[1].length as 1 | 2, text, id: slugify(text) })
+    entries.push({
+      level: match[1].length as 1 | 2 | 3 | 4,
+      text,
+      id: slugify(text),
+    })
   }
   return entries
 }
@@ -65,14 +70,22 @@ const components: Components = {
 }
 
 export const GuideModal: React.FC<GuideModalProps> = ({ isOpen, onClose, initialSection }) => {
-  const toc = useMemo(() => buildToc(guideMarkdown), [])
+  const toc = useMemo(() => buildToc(guideMarkdown, 2), [])
+  // The sidebar stays at chapter level; deep links (e.g. "9.3") need every heading.
+  const headingIndex = useMemo(() => buildToc(guideMarkdown, 4), [])
   const contentRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     if (!isOpen || !initialSection) return
     const entry =
-      toc.find((item) => item.text.startsWith(`${initialSection} `)) ||
-      toc.find((item) => item.text === initialSection)
+      headingIndex.find((item) => item.text === initialSection) ||
+      // Subsections read "9.3 The trap"; chapters read "9. The trap".
+      headingIndex.find(
+        (item) =>
+          item.text.startsWith(`${initialSection} `) ||
+          item.text.startsWith(`${initialSection}. `),
+      ) ||
+      headingIndex.find((item) => item.text.startsWith(`${initialSection}.`))
     if (!entry) return
     const timer = window.setTimeout(() => {
       const container = contentRef.current
@@ -85,7 +98,7 @@ export const GuideModal: React.FC<GuideModalProps> = ({ isOpen, onClose, initial
       container.scrollTo({ top: Math.max(0, offset - 12) })
     }, 60)
     return () => window.clearTimeout(timer)
-  }, [isOpen, initialSection, toc])
+  }, [isOpen, initialSection, headingIndex])
 
   if (!isOpen) return null
 

@@ -1769,7 +1769,9 @@ costs nothing.
 - `CoachCard` inline: above the chat input for objective/budget, inside the held-out scorecard for
   results.
 - `Coach` badge in the header with blocker/warning counts, opening a stage-grouped drawer.
-- `open_guide` deep-links into the field guide (`5.1`, `9.3`, `19.4`).
+- `open_guide` deep-links into the field guide (`5.1`, `9.3`, `19.4`). The guide now carries a
+  full chapter 24 — checkpoints, severity semantics, the hard-mode boundary, the findings table, a
+  worked example and the three switches.
 - `apply_params` patches the training controls; `send_message` / `use_objective` go through the
   existing Studio chat.
 

@@ -16,6 +16,7 @@ There are three ways in, depending on how much time you have.
 | Understand what you are looking at | **Part I** (chapters 1–3) then **Part IV** (chapters 13–16) |
 | Stop spending too much | **Chapter 12** (models) and **Chapter 18** (cost playbook) |
 | Fix an agent that plateaued | **Chapter 19** (quality playbook) |
+| Find out why a build or a training run is blocked | **Chapter 24 — The Journey Coach** |
 | Look up a word | **Chapter 22 — Glossary** |
 | Keep a single page by your desk | **Chapter 23 — Cheat sheet** |
 
@@ -97,6 +98,8 @@ This is the whole product in eight steps. Each step is a chapter later.
 - **Step 7** is where you decide whether to trust the result.
 - **Step 8** is a file you can run anywhere.
 
+At every arrow in that diagram the **Journey Coach** checks the thing you are about to rely on and tells you when it will not do what you think. It is advisory while you are still deciding, and it stops an expensive build or training run on a structural blocker. Chapter 24 is the full tour; the rest of this book is what it is checking against.
+
 ---
 
 # Part II — Your first agent in 15 minutes
@@ -166,7 +169,7 @@ Answer these six questions, in this order:
 5. **What must it never do?** (hard constraints)
 6. **What must the human see** while it works? (arena, controls, explanation)
 
-You do not need to label the parts. You do need to cover them.
+You do not need to label the parts. You do need to cover them. The Coach checks this list before the blueprint locks (chapter 24); a missing part appears as a finding instead of a silent default.
 
 ### 5.2 Good and bad objectives
 
@@ -245,6 +248,8 @@ Click the **Params** pill (it reads like `Params: 5 Rounds • 200 eps • 90%`)
 | **Rounds** | 1–100 | How many train–evaluate cycles to run |
 | **Episodes / Round** | ≥ 1 | How much practice happens in each cycle |
 | **Target Goal (%)** | 50–100 | The success rate at which training stops early |
+
+Before the run starts, the Coach checks these three numbers against the objective and the data (chapter 24). A zero budget is a blocker; a 100% target or a ten-episode evaluation is a warning with a better preset attached.
 
 A round is not "one episode". Inside a round the app runs a PPO training burst sized from the episode budget, then scores the policy on **50 deterministic evaluation episodes**, then decides what to do next.
 
@@ -469,6 +474,8 @@ The scorecard will show split counts (`train … · val … · test …`) and wh
 - **Encode time.** If rows span time, split by time, not randomly, or the model will "predict" the past from the future.
 - **Remove identifiers and personal data** unless the task genuinely needs them.
 
+The Coach applies these checks when you attach a dataset (chapter 24) and repeats the objective-aware ones before training. A missing label or a single-class target is a blocker; imbalance, missingness and leakage are warnings.
+
 ### 11.4 The leakage test
 
 Ask: *could a careful human have known this at decision time?* If not, the column must not be an observation. This single check prevents most disappointing deployments.
@@ -583,6 +590,8 @@ Reading:
 
 **Decision:** ship a pilot, keep the corpus, and do not claim "unbeatable" in marketing. Raise evaluation size before making a strong claim.
 
+The Coach produces this reading automatically when the scorecard changes: it names the interval problem, the baseline comparison and the next action, and links to the playbook section (chapter 24). It does not replace your judgement about whether to ship.
+
 ---
 
 ## 14. Drift
@@ -604,7 +613,7 @@ Drift is **not** accuracy. A drifted agent may still be right today. Drift says 
 
 ## 15. The Trust drawer: Crossfire, Corpus, Gate
 
-Click **Trust** in the header. Three tabs.
+Click **Trust** in the header. Three tabs. The Coach's result card sits inside the scorecard and links here: Crossfire answers "may I claim it?", while the Coach answers "did I understand it?" (chapter 24).
 
 ### 15.1 Crossfire — "am I allowed to call this proven?"
 
@@ -884,6 +893,9 @@ Attach `invoices.csv` with columns including `amount`, `risk_score`, `department
 | Export fails parity | ONNX disagrees with the trained policy | Do not ship; report the failure |
 | Arena looks generic | The synthesised arena is still pending | Read the activity stream; wait or ask for a change |
 | Spend climbing with no progress | Repeated synthesis loop | Simplify the objective; switch to a cheaper model; cap budget |
+| **Coach: blocked before training** | A structural finding: zero budget, empty or one-class data, no label for a supervised metric, no action space | Open the Coach card, apply the fix, send the request again. A blocker cannot be acknowledged away |
+| **Coach: warning will not go away** | You changed nothing, so the evidence is unchanged | Fix the artefact, or acknowledge the warning; it stays quiet until the evidence changes |
+| **Coach panel is empty** | No checkpoint has been evaluated for this conversation yet | Send an objective, attach data, or finish a round; the first card appears with intake |
 
 ---
 
@@ -999,9 +1011,165 @@ Attach `invoices.csv` with columns including `amount`, `risk_score`, `department
 - [ ] Played 20+ steps without surprises
 - [ ] Crossfire verdict understood — `inconclusive` is not `win`
 
+**Coach checklist**
+
+- [ ] No blocker in the Coach card before you lock the arena
+- [ ] Objective has a measurable success metric
+- [ ] Every "never" rule has a threshold or a penalty behind it
+- [ ] Dataset has a label column and a clearly named outcome
+- [ ] Target is not 100% unless a guard can guarantee it
+- [ ] At least 200 episodes per round for a first attempt
+- [ ] After the run: read the interval and the next action the card offers
+- [ ] Acknowledged warnings were read, not dismissed
+
 ---
 
-## 24. Limits, safety, and honest answers
+# Part VII — Staying on the path
+
+## 24. The Journey Coach: the checklist the app runs for you
+
+The rest of this book is advice. The Coach is that advice turned into checks that run at the moment
+you are about to spend time or money. It is not a second chatbot and it is not a score. It is a short
+list of "this will not do what you think" findings, and each finding carries the button that fixes it.
+
+You meet it in three places:
+
+| Where | What it shows |
+|---|---|
+| **Inline card** above the chat input | Objective, data and budget findings for this conversation |
+| **Inside the Held-Out Scorecard** | What the result means and what to do next |
+| **Coach** button in the header | Everything still open, grouped by stage |
+
+The badge on the **Coach** button is the count of unresolved findings. Red means a blocker; amber
+means a warning. Opening the panel performs no mutation: it is a read.
+
+### 24.1 The six checkpoints
+
+| Stage | When it runs | A finding you may see |
+|---|---|---|
+| **Objective** | When the architect drafts a blueprint | "No measurable success criterion was stated" |
+| **Data** | When you attach a dataset | "The minority class is 3.0%; accuracy will look excellent while the costly class is missed" |
+| **Parameters** | Before a training run | "At 10 episodes the interval is ±22.1 points; about 200 are needed for ±5" |
+| **Preview** | When an arena is generated | "The arena never displays the metric you will be asked to trust" |
+| **Results** | When a scorecard is produced | "80.0% with a 70–90 interval against a 79.0% majority baseline proves nothing yet" |
+| **Export** | When you package a bundle | "The scorecard describes a policy that is not the one in the bundle" |
+
+### 24.2 Blocker, warning, tip
+
+| Severity | What it means | What happens |
+|---|---|---|
+| **Blocker** | The run cannot answer the question you asked | In **hard** mode, build, training or resume is stopped; the card names the exact fix |
+| **Warning** | The run will probably waste time or mislead you | You may proceed, or acknowledge it |
+| **Tip** | A better next step exists | Nothing is blocked |
+
+Blockers are structural, not stylistic: zero rounds or zero episodes, an empty dataset, a label
+column with only one class, a supervised metric with no label column, or no action space at all.
+A warning is the more common case: a 100% target, a wide interval, an ID used as a feature, a
+"never" rule that became a soft preference.
+
+In the default **hard** mode a blocker **cannot be acknowledged away**; it must be fixed. In
+advisory mode it behaves like a warning: reported, acknowledgeable, and the run proceeds. A warning
+or tip can be acknowledged: it goes quiet, and stays quiet until the evidence changes (you change
+the target, the data, or the objective). That is deliberate — the same warning should not nag on
+every render.
+
+### 24.3 What a blocker actually stops
+
+In the default **hard** mode, a blocker stops the three actions that cost real time:
+
+1. **Lock Arena & Start Training** (and synthesis before it).
+2. A **training request** sent through Studio Chat.
+3. **Resume training**.
+
+It does **not** stop the conversation. The intake chat is the repair surface: answer the question,
+name the label column, set a reachable target, then send the request again. The app returns the
+finding as a `409` with the same card the UI renders; a chat turn that would have trained returns
+`status: "blocked"` with the same card. Either way, an API client is not left guessing.
+
+If you are deliberately running an experiment that trips a rule, the deployment switch is
+`RL_IDE_COACH_BLOCKERS=advisory`. In advisory mode blockers are reported and never stop a run.
+That switch is for operators, not a per-conversation setting.
+
+### 24.4 The findings you will meet most often
+
+| Finding | What to do |
+|---|---|
+| The objective is too short to constrain the build | Use the six-part formula in §5.1, or send the rewritten objective the Coach offers |
+| No measurable success criterion | Add a number: "≥ 90% agreement", "within 10% of the shortest path", "false blocks under 2%" |
+| A "never" rule was stated but not encoded | Give it a threshold ("never approve when `risk_score` ≥ 85") or add a penalty term; §17 covers guards |
+| The data has no label column | Name the column that holds the recorded outcome, or switch to a task that does not need one |
+| The classes are severely imbalanced | Optimise recall on the costly class at a fixed false-positive rate, not plain accuracy |
+| A row identifier is being used as a feature | Exclude it; an ID lets the policy memorise the split |
+| A single feature separates the label perfectly | Remove or lag it; this is the target leaking into a feature (§11.4) |
+| A 100% target | Lower it to 90% and raise episodes; §9.3 explains why |
+| Too few episodes to trust the score | Apply the recommended episode count, or run the action the card offers |
+| The target is already met by doing nothing | Raise the target above the majority-class or random baseline |
+| The confidence interval is too wide | Run the episode count in the action; do not re-run until you like the number (§19.4) |
+| The policy is no better than the baseline | Read §19.3; the reward is measuring something other than your intent |
+| Previously approved behaviour regressed | Open Trust → Gate; the triage category names the cause |
+| The result cannot be called proven yet | Open Trust → Crossfire; `inconclusive` is not a failure, it is an evidence gap (§15.1) |
+| The arena does not show the metric | Ask for the readout before you lock; a misleading arena is worse than none (§19.7) |
+
+### 24.5 What the model does — and does not do
+
+This is the part that keeps the Coach honest:
+
+- **Every number comes from code.** The rules read the objective, the dataset profile, the training
+  parameters, the arena and the scorecard. The model receives those facts and may only prioritise
+  them and write the sentence.
+- **It cannot invent a number.** A finding that mentions a value absent from the evidence is
+  discarded before it reaches you.
+- **It can never return a blocker.** Structural blockers are facts. A model must not be the thing
+  that stops your run.
+- **It is cached.** Re-opening a card, or re-evaluating the same artefact, costs no tokens. The
+  judge is keyed by the stage, the facts and the objective.
+- **It is capped.** Twelve judge calls per conversation by default. When the cap is reached, the
+  rules keep working and the model is skipped.
+- **It fails open.** If the provider is down, the rules still run and the card says the model was
+  skipped. A coach failure never breaks the studio.
+
+The Coach panel footer shows how many judge calls this conversation has used. The calls are also in
+the normal usage ledger (§16).
+
+### 24.6 A worked example
+
+> Objective: "Build a fraud detector."
+> Data: `invoices.csv`, 3% fraudulent, no column named as the outcome.
+
+1. **Objective:** the Coach warns that the objective has no measurable success criterion.
+2. **Data:** it reports a blocker — the metric is accuracy-like but no label column exists — and a
+   warning that the classes are severely imbalanced.
+3. You name `was_fraud` as the label and restate success as "catch at least 90% of fraud while
+   keeping false blocks under 2%".
+4. **Parameters:** you set 1 round, 50 episodes, 100%. The Coach warns about both the 100% target
+   and the interval width, and offers **Apply recommended** (3 rounds · 200 episodes · 90%).
+5. You train. The scorecard reads `82.0% [74.0–89.0]`, tied with the majority baseline.
+6. **Results:** the Coach says the interval is too wide and the policy is no better than doing
+   nothing, with **Run 300 episodes** and a link to §19.3.
+
+That is the same loop the book describes. The difference is that the app tells you which step you
+are on instead of leaving you to infer it from a chart.
+
+### 24.7 What it will not do
+
+- It does not edit your reward, environment, or parameters on its own. Every fix is a button.
+- It does not prove anything. Crossfire owns the claim.
+- It does not replace the scorecard, the corpus, or your judgement.
+- It does not silently waive a blocker, and it does not hide a warning you have not addressed.
+- It does not read `env_module.py`. Code correctness belongs to the sandbox smoke test and the
+  verifier gate.
+
+### 24.8 Switches
+
+| Switch | Default | Effect |
+|---|---|---|
+| `RL_IDE_COACH_BLOCKERS` | `hard` | `advisory` reports blockers without stopping a run |
+| `RL_IDE_COACH_LLM` | `1` | `0` disables the model and keeps the rules |
+| `RL_IDE_COACH_MAX_LLM_CALLS` | `12` | Per-conversation judge-call cap |
+
+---
+
+## 25. Limits, safety, and honest answers
 
 **What this tool is good at.** Well-scoped decisions with a measurable outcome: games, control, triage, routing, risk scoring.
 
@@ -1012,6 +1180,8 @@ Attach `invoices.csv` with columns including `amount`, `risk_score`, `department
 **Safety.** A trained policy is not a licence. For regulated decisions, keep a human in the loop, keep the corpus, and treat the exported bundle as software that needs monitoring — because it is.
 
 **Claims.** Crossfire exists because it is easy to overclaim. Use its vocabulary: `win` means you may claim, within scope. `inconclusive` means keep gathering evidence. `loss` is a result.
+
+**The Coach.** It is a checklist, not a guarantee. It catches the mistakes that are visible in the artefacts — a missing metric, an unlabelled dataset, an unencoded "never", an over-wide interval — and it stops a run when one of them makes the run meaningless. It cannot tell you whether the job is worth doing, and it does not inspect the generated code. Use it to avoid wasting a run, then use the scorecard and Crossfire to decide whether to ship.
 
 **Maintenance.** Drift is your early warning. Review it, retrain on schedule, and add corpus cases whenever a human corrects the agent.
 

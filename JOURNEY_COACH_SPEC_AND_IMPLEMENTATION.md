@@ -3,8 +3,9 @@
 **Status:** implemented. This is the design record for the layer that catches a shortcut before it
 costs a run, and explains the evidence after one finishes.
 
-Related: `docs/USER_GUIDE.md` (the rules the coach encodes), `TRUST_DRAWER_SPEC_AND_IMPLEMENTATION.md`
-(the controls the coach explains), `progress.md` §21.
+Related: `docs/USER_GUIDE.md` §24 (the operator tour: checkpoints, severities, a worked example and
+the switches), `TRUST_DRAWER_SPEC_AND_IMPLEMENTATION.md` (the controls the coach explains),
+`progress.md` §21.
 
 ---
 
