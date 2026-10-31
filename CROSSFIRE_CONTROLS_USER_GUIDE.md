@@ -427,3 +427,6 @@ the conversation's encoder in memory.
 Corpus seeding, the Crossfire protocol opening, gate decisions, best-on-validation selection and
 the economics ledger all happen without a click. The drawer is where you *read and judge* them,
 not where you trigger them.
+
+The design record for this UI — constraints, tab-by-tab behaviour, backend contracts and the
+residuals left open on purpose — is `TRUST_DRAWER_SPEC_AND_IMPLEMENTATION.md`.

@@ -1701,9 +1701,19 @@ returned no observation. `security/worker.py` now records the vector inside `pre
 by definition the observation the policy scored. Side effect: live drift scoring now accumulates
 samples for these environments too, where it previously stayed at zero.
 
+The full design record — information architecture, the `GateRecord` and `GET …/gates` contracts,
+the four defects found while wiring it, verification evidence and the residuals that were left
+deliberately open — is in `TRUST_DRAWER_SPEC_AND_IMPLEMENTATION.md`.
+
 ### 20.7 Operator documentation
 
-`CROSSFIRE_CONTROLS_USER_GUIDE.md` documents the five controls from the outside in — §11 covers the
-Trust drawer for UI-only users — plus endpoints and payloads, the triage table, how a `win` is actually earned, the cost levers, the CSV shape passive
-harvest accepts, the switches (`RL_IDE_ALLOW_HOST_LLM`, `RL_IDE_OWNER_BUDGET_USD`, ...), and the
-observed failure modes (empty corpus on pre-feature sessions, `skipped_no_env`, `inconclusive`).
+Two documents, two audiences:
+
+- `CROSSFIRE_CONTROLS_USER_GUIDE.md` — operator-facing. The five controls from the outside in (§11
+  covers the Trust drawer for UI-only users), endpoints and payloads, the triage table, how a `win`
+  is actually earned, the cost levers, the CSV shape passive harvest accepts, the switches
+  (`RL_IDE_ALLOW_HOST_LLM`, `RL_IDE_OWNER_BUDGET_USD`, ...), and the observed failure modes (empty
+  corpus on pre-feature sessions, `skipped_no_env`, `inconclusive`).
+- `TRUST_DRAWER_SPEC_AND_IMPLEMENTATION.md` — design record for the UI itself: constraints,
+  per-tab behaviour, backend contracts, the defects it exposed, and the deliberate residuals
+  (no rubric editor, no re-score button, harvest needs a warm process).

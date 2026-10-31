@@ -596,4 +596,5 @@ memo (claim 4 in particular), so the divergences are recorded here rather than s
 selection, and the two-basis economics ledger.
 
 Operator-facing usage of these controls (endpoints, payloads, switches, troubleshooting) is in
-`CROSSFIRE_CONTROLS_USER_GUIDE.md`.
+`CROSSFIRE_CONTROLS_USER_GUIDE.md`; the UI that exposes them is specified in
+`TRUST_DRAWER_SPEC_AND_IMPLEMENTATION.md`.
