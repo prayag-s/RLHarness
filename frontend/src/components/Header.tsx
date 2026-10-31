@@ -10,6 +10,7 @@ import {
   Zap,
   History,
   ShieldCheck,
+  BookOpen,
 } from 'lucide-react'
 import { LLMSettings } from '../types'
 
@@ -32,6 +33,7 @@ interface HeaderProps {
   onOpenTrust: () => void
   trustVerdict?: string
   trustBlockers?: number
+  onOpenGuide: () => void
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -53,6 +55,7 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenTrust,
   trustVerdict,
   trustBlockers = 0,
+  onOpenGuide,
 }) => {
   const getProviderLabel = () => {
     switch (llmSettings.provider) {
@@ -197,6 +200,16 @@ export const Header: React.FC<HeaderProps> = ({
             </>
           )}
           <Settings className="h-3.5 w-3.5 ml-1 opacity-70" />
+        </button>
+
+        {/* Field guide: the plain-English handbook, bundled from docs/USER_GUIDE.md */}
+        <button
+          onClick={onOpenGuide}
+          className="flex items-center space-x-1.5 px-3 py-1 rounded-lg bg-gray-900 border border-gray-700 hover:border-gray-600 text-gray-200 text-xs font-medium transition"
+          title="Open the plain-English field guide"
+        >
+          <BookOpen className="h-3.5 w-3.5 text-emerald-400" />
+          <span>Guide</span>
         </button>
 
         {/* Trust & Provenance: the corpus, the pre-registered verdict, the gate history */}

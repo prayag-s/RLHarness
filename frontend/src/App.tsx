@@ -54,6 +54,12 @@ import {
   clearAllConversations,
 } from './services/api'
 
+// The field guide (Markdown + renderer) is only needed when opened, so keep it out of the
+// initial bundle.
+const GuideModal = React.lazy(() =>
+  import('./components/GuideModal').then((m) => ({ default: m.GuideModal })),
+)
+
 /** True when the backend refused because no verified model is configured (G13). */
 function isModelRequired(err: unknown): boolean {
   return err instanceof ApiError && err.needsModel
@@ -111,6 +117,7 @@ export const App: React.FC = () => {
 
   // Trust surface: corpus / Crossfire / gate history, plus the last step the user inspected.
   const [isTrustOpen, setIsTrustOpen] = useState(false)
+  const [isGuideOpen, setIsGuideOpen] = useState(false)
   const [lastStep, setLastStep] = useState<ObservedStep | null>(null)
   const [trustRefreshKey, setTrustRefreshKey] = useState(0)
 
@@ -1126,6 +1133,7 @@ export const App: React.FC = () => {
         trustBlockers={
           scorecard?.crossfire?.reasons?.length ?? activeSession?.crossfire?.reasons?.length ?? 0
         }
+        onOpenGuide={() => setIsGuideOpen(true)}
       />
 
       {/* Main Studio 3-Panel Workspace */}
@@ -1220,6 +1228,10 @@ export const App: React.FC = () => {
         isOpen={isRegistryOpen}
         onClose={() => setIsRegistryOpen(false)}
       />
+
+      <React.Suspense fallback={null}>
+        <GuideModal isOpen={isGuideOpen} onClose={() => setIsGuideOpen(false)} />
+      </React.Suspense>
 
       <TrustPanel
         isOpen={isTrustOpen}
