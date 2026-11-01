@@ -991,12 +991,15 @@ class AutonomousLoopController:
                 changes_summary=tuning_res.changes_summary,
             )
 
-            # Hot-swap the updated env_module.py into active session
-            env_file = self.store.base_dir / session_id / "env_module.py"
-            env_file.write_text(current_code, encoding="utf-8")
-            updated_env_cls = load_synthesized_env_class(env_file)
-            env = instantiate_env(updated_env_cls, dataset_records=records)
-            self.store.set_env(session_id, env)
+            # Hot-swap the updated env_module.py into active session. A tuner that verified
+            # nothing (`applied=False`, e.g. no environment source to rewrite) leaves the live
+            # env untouched: writing and importing a blank module would kill the round.
+            if tuning_res.applied and current_code.strip():
+                env_file = self.store.base_dir / session_id / "env_module.py"
+                env_file.write_text(current_code, encoding="utf-8")
+                updated_env_cls = load_synthesized_env_class(env_file)
+                env = instantiate_env(updated_env_cls, dataset_records=records)
+                self.store.set_env(session_id, env)
 
             if (
                 getattr(model, "observation_space", None) == env.observation_space
