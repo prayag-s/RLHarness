@@ -118,6 +118,8 @@ From the repository root:
 
 Defaults: backend on `http://127.0.0.1:8000`, frontend on `http://127.0.0.1:5173` in dev. In `prod` the backend serves the built UI on port 8000.
 
+Each run is a clean restart: whatever instance is already running from a previous `dev` or `prod` launch (even on another port) is stopped first, so you can re-run the same command instead of hunting for a process. A port held by an unrelated program is reported rather than taken over.
+
 You need **Python 3.11+**, **Node.js 20+**, and the Python dependencies installed (`backend/requirements.lock`). `run.sh` checks for these and tells you exactly what is missing.
 
 ### 4.2 The first screen: the model gate
