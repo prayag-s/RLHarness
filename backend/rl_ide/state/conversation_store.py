@@ -122,10 +122,28 @@ class ConversationStore:
                     output_tokens INTEGER NOT NULL DEFAULT 0,
                     cost_usd REAL NOT NULL DEFAULT 0,
                     latency_ms REAL NOT NULL DEFAULT 0,
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    role TEXT,
+                    reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+                    cached_input_tokens INTEGER NOT NULL DEFAULT 0
                 );
                 """
             )
+            # Existing databases predate role attribution and cache accounting, and every one of
+            # them was written by a client that never reported reasoning tokens.
+            usage_columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(llm_usage);").fetchall()
+            }
+            for column, ddl in (
+                ("role", "ALTER TABLE llm_usage ADD COLUMN role TEXT;"),
+                ("reasoning_tokens", "ALTER TABLE llm_usage ADD COLUMN reasoning_tokens INTEGER NOT NULL DEFAULT 0;"),
+                ("cached_input_tokens", "ALTER TABLE llm_usage ADD COLUMN cached_input_tokens INTEGER NOT NULL DEFAULT 0;"),
+            ):
+                if column not in usage_columns:
+                    try:
+                        conn.execute(ddl)
+                    except Exception:
+                        pass
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_llm_usage_conversation ON llm_usage(conversation_id);"
             )
@@ -145,6 +163,9 @@ class ConversationStore:
         latency_ms: float = 0.0,
         conversation_id: str | None = None,
         owner_id: str = "local",
+        role: str | None = None,
+        reasoning_tokens: int = 0,
+        cached_input_tokens: int = 0,
     ) -> None:
         """Records one provider call so a run can be invoiced, capped and explained."""
         with self._get_connection() as conn:
@@ -152,8 +173,8 @@ class ConversationStore:
                 """
                 INSERT INTO llm_usage
                     (conversation_id, owner_id, provider, model, input_tokens, output_tokens,
-                     cost_usd, latency_ms, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+                     cost_usd, latency_ms, created_at, role, reasoning_tokens, cached_input_tokens)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """,
                 (
                     conversation_id,
@@ -165,6 +186,9 @@ class ConversationStore:
                     float(cost_usd),
                     float(latency_ms),
                     utc_now_iso(),
+                    role,
+                    int(reasoning_tokens),
+                    int(cached_input_tokens),
                 ),
             )
             conn.commit()
@@ -211,22 +235,52 @@ class ConversationStore:
             ).fetchall()
             recent = conn.execute(
                 f"""
-                SELECT conversation_id, provider, model, input_tokens, output_tokens,
-                       cost_usd, latency_ms, created_at
+                SELECT conversation_id, provider, model, role, input_tokens, output_tokens,
+                       reasoning_tokens, cached_input_tokens, cost_usd, latency_ms, created_at
                 FROM llm_usage {where}
                 ORDER BY id DESC LIMIT ?;
                 """,
                 [*params, int(limit)],
             ).fetchall()
+            by_role = conn.execute(
+                f"""
+                SELECT COALESCE(role, 'unattributed') AS role, COUNT(*) AS calls,
+                       COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                       COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                       COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens,
+                       COALESCE(SUM(cached_input_tokens), 0) AS cached_input_tokens,
+                       COALESCE(SUM(cost_usd), 0.0) AS cost_usd
+                FROM llm_usage {where}
+                GROUP BY 1
+                ORDER BY cost_usd DESC;
+                """,
+                params,
+            ).fetchall()
+            efficiency = conn.execute(
+                f"""
+                SELECT COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens,
+                       COALESCE(SUM(cached_input_tokens), 0) AS cached_input_tokens
+                FROM llm_usage {where};
+                """,
+                params,
+            ).fetchone()
 
+        input_total = int(totals["input_tokens"])
+        cached_total = int(efficiency["cached_input_tokens"])
         return {
             "totals": {
                 "calls": int(totals["calls"]),
-                "input_tokens": int(totals["input_tokens"]),
+                "input_tokens": input_total,
                 "output_tokens": int(totals["output_tokens"]),
                 "cost_usd": round(float(totals["cost_usd"]), 6),
             },
+            "efficiency": {
+                "reasoning_tokens": int(efficiency["reasoning_tokens"]),
+                "cached_input_tokens": cached_total,
+                "cache_hit_rate": round(cached_total / input_total, 4) if input_total else 0.0,
+            },
             "by_model": [dict(row) for row in by_model],
+            "by_role": [dict(row) for row in by_role],
             "recent": [dict(row) for row in recent],
         }
 

@@ -632,6 +632,21 @@ export interface UsageReport {
     output_tokens: number
     cost_usd: number
   }
+  // Reasoning tokens are billed as output; this block makes the split and cache discounts visible.
+  efficiency?: {
+    reasoning_tokens: number
+    cached_input_tokens: number
+    cache_hit_rate: number
+  }
+  by_role?: Array<{
+    role: string
+    calls: number
+    input_tokens: number
+    output_tokens: number
+    reasoning_tokens: number
+    cached_input_tokens: number
+    cost_usd: number
+  }>
   by_model: Array<{
     provider: string
     model: string
@@ -644,8 +659,11 @@ export interface UsageReport {
     conversation_id: string | null
     provider: string
     model: string
+    role?: string | null
     input_tokens: number
     output_tokens: number
+    reasoning_tokens?: number
+    cached_input_tokens?: number
     cost_usd: number
     latency_ms: number
     created_at: string

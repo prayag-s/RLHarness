@@ -65,12 +65,12 @@ class _RecordingClient(BaseLLMClient):
         self.prompts: list[str] = []
         self.system_prompts: list[str | None] = []
 
-    def generate(self, prompt, system_prompt=None, timeout=None):  # noqa: ANN001
+    def generate(self, prompt, system_prompt=None, timeout=None, role=None):  # noqa: ANN001
         self.prompts.append(prompt)
         self.system_prompts.append(system_prompt)
         return "Here is what happened."
 
-    def generate_json(self, prompt, system_prompt=None, timeout=None):  # noqa: ANN001
+    def generate_json(self, prompt, system_prompt=None, timeout=None, role=None):  # noqa: ANN001
         self.prompts.append(prompt)
         self.system_prompts.append(system_prompt)
         return {}

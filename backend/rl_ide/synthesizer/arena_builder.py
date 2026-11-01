@@ -6,6 +6,7 @@ Eliminates all domain-specific branches, rover fallbacks, and hardcoded template
 """
 
 from __future__ import annotations
+import base64
 import html as html_lib
 import json
 import logging
@@ -26,6 +27,93 @@ logger = logging.getLogger(__name__)
 # minutes on high-latency providers. Short timeouts silently degrade the arena to the generic
 # text fallback, so this is a floor rather than a default.
 ARENA_GENERATION_TIMEOUT_S = 240.0
+
+# ``spec`` asks the model for a small styling contract and renders it locally; ``bespoke`` keeps the
+# historical "model writes the whole document" path; ``deterministic`` never calls the provider.
+ARENA_MODES = ("spec", "bespoke", "deterministic")
+_SPEC_MARKER = "ARENA_SPEC_B64"
+_ACCENTS = {"cyan", "amber", "emerald", "violet", "rose", "sky", "indigo"}
+_STAGE_SIZES = {"compact", "large"}
+
+_ARENA_SPEC_INSTRUCTIONS = (
+    "You design the look and feel of an RL arena. Do not write HTML, CSS or JavaScript.\n"
+    "Return strict JSON only, with exactly these keys:\n"
+    '{"headline": "short title shown in the arena header",\n'
+    ' "accent": "cyan|amber|emerald|violet|rose|sky|indigo",\n'
+    ' "theme": "sans|mono",\n'
+    ' "scoreboard": true|false,\n'
+    ' "stage": "compact|large",\n'
+    ' "caption": "one line describing what the agent sees",\n'
+    ' "chips": ["up to four short labels for extra UI badges"]}\n'
+    "Pick accent and theme so the arena reads as this domain at a glance."
+)
+
+
+def arena_mode() -> str:
+    """Which arena synthesis path this deployment uses."""
+    mode = os.environ.get("RL_IDE_ARENA_MODE", "spec").strip().lower()
+    return mode if mode in ARENA_MODES else "spec"
+
+
+def normalize_arena_spec(raw: Any) -> dict[str, Any]:
+    """Clamps model output to the small set of knobs the local renderer understands."""
+    data = raw if isinstance(raw, dict) else {}
+    accent = str(data.get("accent") or "").strip().lower()
+    theme = str(data.get("theme") or "").strip().lower()
+    stage = str(data.get("stage") or "").strip().lower()
+    chips = [
+        " ".join(str(chip).split())[:40]
+        for chip in (data.get("chips") or [])
+        if str(chip).strip()
+    ][:4]
+    spec: dict[str, Any] = {
+        "headline": " ".join(str(data.get("headline") or "").split())[:80],
+        "accent": accent if accent in _ACCENTS else "",
+        "theme": theme if theme in {"sans", "mono"} else "",
+        "stage": stage if stage in _STAGE_SIZES else "",
+        "caption": " ".join(str(data.get("caption") or "").split())[:140],
+        "chips": chips,
+    }
+    # Only an explicit boolean may switch the scoreboard off: a spec that says nothing about it must
+    # leave the existing heuristic (e.g. the user asking for a scoreboard) in charge.
+    if isinstance(data.get("scoreboard"), bool):
+        spec["scoreboard"] = data["scoreboard"]
+    return spec
+
+
+def parse_arena_spec(raw: str) -> dict[str, Any] | None:
+    """Reads a spec from a model answer, or None when the answer is not usable."""
+    from rl_ide.llm.client import extract_json_from_text
+
+    text = (raw or "").strip()
+    if not text:
+        return None
+    try:
+        return normalize_arena_spec(extract_json_from_text(text))
+    except Exception:
+        return None
+
+
+def embed_arena_spec(html_text: str, spec: dict[str, Any] | None) -> str:
+    """Stores the spec inside the document so a later restyle can start from it."""
+    if not spec:
+        return html_text
+    payload = base64.b64encode(json.dumps(spec, sort_keys=True).encode("utf-8")).decode("ascii")
+    marker = f"<!-- {_SPEC_MARKER}:{payload} -->"
+    if f"<!-- {_SPEC_MARKER}:" in html_text:
+        return re.sub(rf"<!-- {_SPEC_MARKER}:[^>]*-->", marker, html_text, count=1)
+    return html_text.replace("<body", f"{marker}\n<body", 1)
+
+
+def read_arena_spec(html_text: str) -> dict[str, Any] | None:
+    """Recovers the spec embedded by :func:`embed_arena_spec`."""
+    match = re.search(rf"<!-- {_SPEC_MARKER}:([A-Za-z0-9+/=]+) -->", html_text or "")
+    if not match:
+        return None
+    try:
+        return normalize_arena_spec(json.loads(base64.b64decode(match.group(1)).decode("utf-8")))
+    except Exception:
+        return None
 
 
 def _arena_generation_timeout(client: BaseLLMClient) -> float:
@@ -136,8 +224,48 @@ def synthesize_universal_arena_html(
         outcome.clear()
         outcome.update({"source": "fallback", "error": None, "fallback_reason": "no_client"})
 
-    # 1. Try Live LLM UI generation if configured and not FallbackCodeSynthesizer
-    if not isinstance(active_client, FallbackCodeSynthesizer):
+    mode = arena_mode()
+
+    # 1. Spec mode: ask for a small styling contract and render it locally. The document is produced
+    # by code we control, so it always carries the required hooks and never pays for a full HTML
+    # document (nor for a validation round trip that can only discard it).
+    if mode == "spec" and not isinstance(active_client, FallbackCodeSynthesizer):
+        try:
+            prompt = (
+                f"Design the arena for this RL task.\n"
+                f"Task: {bp_spec.task_title}\n"
+                f"Metaphor: {getattr(blueprint, 'visual_metaphor', None) or bp_spec.arena_visual_description}\n"
+                f"Actions: {json.dumps(bp_spec.action_labels)}\n"
+                f"State keys: {json.dumps(getattr(blueprint, 'state_dict_schema', {}))}\n"
+                f"Sample state: {json.dumps(sample_render_state or {}, default=str)}\n"
+                f"Style request: {visual_style or 'Default sleek dark-mode'}\n\n"
+                f"{_ARENA_SPEC_INSTRUCTIONS}"
+            )
+            raw = active_client.generate(
+                prompt,
+                system_prompt=ARENA_BUILDER_SYSTEM_PROMPT,
+                timeout=_arena_generation_timeout(active_client),
+                role="arena_ui",
+            )
+            spec = parse_arena_spec(raw)
+            if spec:
+                if outcome is not None:
+                    outcome.update({"source": "llm", "error": None, "fallback_reason": None})
+                return JITArenaSynthesizer(active_client)._generate_deterministic_arena_html(
+                    blueprint=bp_spec,
+                    sample_arena_state=sample_render_state,
+                    visual_style=visual_style,
+                    spec=spec,
+                )
+            if outcome is not None:
+                outcome.update({"source": "fallback", "error": "Arena spec was not valid JSON.", "fallback_reason": "invalid_spec"})
+        except Exception as exc:
+            logger.warning("Arena spec synthesis failed (%s: %s); using the schema-driven preview.", type(exc).__name__, exc)
+            if outcome is not None:
+                outcome.update({"source": "fallback", "error": f"{type(exc).__name__}: {exc}", "fallback_reason": "exception"})
+
+    # 2. Bespoke mode: the model writes the whole document, which is validated with a JS engine.
+    elif mode == "bespoke" and not isinstance(active_client, FallbackCodeSynthesizer):
         try:
             visual_desc = getattr(blueprint, "visual_metaphor", None) or bp_spec.arena_visual_description or "Interactive Arena"
             actions_list = bp_spec.action_labels
@@ -164,6 +292,7 @@ def synthesize_universal_arena_html(
                 prompt,
                 system_prompt=ARENA_BUILDER_SYSTEM_PROMPT,
                 timeout=_arena_generation_timeout(active_client),
+                role="arena_ui_bespoke",
             )
             html = extract_html_code(raw)
             if html and "ARENA_UPDATE" in html and "startMockAnimationLoop" in html and ("<html" in html.lower() or "<!doctype html" in html.lower()):
@@ -195,7 +324,7 @@ def synthesize_universal_arena_html(
                 outcome["error"] = f"{type(exc).__name__}: {exc}"
                 outcome["fallback_reason"] = "exception"
 
-    # 2. Universal Schema-Driven Arena Generator
+    # 3. Universal Schema-Driven Arena Generator
     synthesizer = JITArenaSynthesizer(active_client)
     return synthesizer._generate_deterministic_arena_html(
         blueprint=bp_spec,
@@ -268,7 +397,51 @@ class JITArenaSynthesizer:
         bp_spec = blueprint.to_agent_blueprint_spec() if hasattr(blueprint, "to_agent_blueprint_spec") else blueprint
         self.last_source = "fallback"
         self.last_error = None
-        if not isinstance(self.client, FallbackCodeSynthesizer):
+        mode = arena_mode()
+
+        # Spec mode: restyle means "return the updated contract", not "return the whole document".
+        # The previous spec is embedded in the current HTML, so this needs no extra state and never
+        # sends 15 KB of HTML back to the model to change one colour.
+        if mode == "spec" and not isinstance(self.client, FallbackCodeSynthesizer):
+            try:
+                current_spec = read_arena_spec(current_arena_html) or {}
+                prompt = (
+                    f"Restyle the arena for this RL task.\n"
+                    f"Task: {bp_spec.task_title}\n"
+                    f"Metaphor: {bp_spec.arena_visual_description}\n"
+                    f"Actions: {json.dumps(bp_spec.action_labels)}\n"
+                    f"Current spec: {json.dumps(current_spec, sort_keys=True)}\n"
+                    f"User request: \"{user_visual_request}\"\n\n"
+                    f"{_ARENA_SPEC_INSTRUCTIONS}"
+                )
+                raw = self.client.generate(
+                    prompt,
+                    system_prompt=ARENA_SYNTHESIZER_SYSTEM_PROMPT,
+                    timeout=_arena_generation_timeout(self.client),
+                    role="arena_ui",
+                )
+                spec = parse_arena_spec(raw)
+                if spec:
+                    updated = self._generate_deterministic_arena_html(
+                        blueprint=bp_spec,
+                        sample_arena_state=sample_arena_state,
+                        visual_style=user_visual_request,
+                        spec=spec,
+                    )
+                    if workspace_dir:
+                        (Path(workspace_dir) / "arena.html").write_text(updated, encoding="utf-8")
+                    self.last_source = "llm"
+                    return updated
+                self.last_error = "Arena restyle did not return a valid spec."
+            except Exception as exc:
+                logger.warning(
+                    "Arena spec restyle failed (%s: %s); keeping the current arena.",
+                    type(exc).__name__,
+                    exc,
+                )
+                self.last_error = f"{type(exc).__name__}: {exc}"
+
+        elif mode == "bespoke" and not isinstance(self.client, FallbackCodeSynthesizer):
             try:
                 prompt = (
                     f"You are updating and restyling this self-contained `arena.html` according to the user's request:\n"
@@ -284,6 +457,7 @@ class JITArenaSynthesizer:
                     prompt,
                     system_prompt=ARENA_SYNTHESIZER_SYSTEM_PROMPT,
                     timeout=_arena_generation_timeout(self.client),
+                    role="arena_ui_bespoke",
                 )
                 extracted = extract_html_code(raw)
                 if (
@@ -325,6 +499,7 @@ class JITArenaSynthesizer:
             blueprint=bp_spec,
             sample_arena_state=sample_arena_state,
             visual_style=user_visual_request,
+            spec=read_arena_spec(current_arena_html),
         )
         if workspace_dir:
             (Path(workspace_dir) / "arena.html").write_text(updated, encoding="utf-8")
@@ -354,15 +529,18 @@ class JITArenaSynthesizer:
         blueprint: AgentBlueprintSpec,
         sample_arena_state: dict[str, Any] | None,
         visual_style: str | None = None,
+        spec: dict[str, Any] | None = None,
     ) -> str:
         """Builds a self-contained arena driven only by the blueprint contract and real state.
 
         No domain branches: visuals come from the declared action labels, the actual
-        ``get_render_state()`` sample, and elements the user explicitly requested.
+        ``get_render_state()`` sample, and elements the user explicitly requested. ``spec`` is the
+        validated styling contract, which takes precedence over the keyword heuristics below.
         """
         task_title = blueprint.task_title or "RL Arena"
         action_labels = blueprint.action_labels or ["Action 0", "Action 1"]
         target_threshold = blueprint.target_metric_threshold
+        spec = normalize_arena_spec(spec)
 
         # Restyle state is explicit: only the current request and the blueprint metaphor.
         style_query = f"{visual_style or ''} {blueprint.arena_visual_description or ''}".lower()
@@ -373,6 +551,19 @@ class JITArenaSynthesizer:
         has_larger = "larger" in style_query or "bigger" in style_query
         accent_color = "amber" if has_gold else "cyan"
         theme_class = "font-mono" if has_arcade else "font-sans"
+
+        # An explicit spec wins over the text heuristics: it came from the model, the user asked for
+        # it, and it is the only styling signal that survives a round trip through the HTML.
+        if spec.get("accent"):
+            accent_color = spec["accent"]
+        if spec.get("theme"):
+            theme_class = "font-mono" if spec["theme"] == "mono" else "font-sans"
+        if isinstance(spec.get("scoreboard"), bool):
+            has_scoreboard = spec["scoreboard"]
+        if spec.get("stage"):
+            has_larger = spec["stage"] == "large"
+        if spec.get("headline"):
+            task_title = spec["headline"]
 
         # User-requested UI elements are rendered generically (text is escaped).
         requested: list[str] = []
@@ -387,6 +578,9 @@ class JITArenaSynthesizer:
         for quoted in re.findall(r"['\"]([^'\"]{3,60})['\"]", visual_style or ""):
             if quoted.strip() and quoted.strip() not in requested:
                 requested.append(quoted.strip())
+        for chip in spec.get("chips") or []:
+            if chip and chip not in requested:
+                requested.append(chip)
         requested = requested[:4]
 
         requested_html = ""
@@ -431,8 +625,10 @@ class JITArenaSynthesizer:
         # The generic preview cannot draw the bespoke metaphor, so keep it as a one-line caption
         # instead of letting the prose dominate the stage.
         caption_metaphor = safe_metaphor if len(safe_metaphor) <= 110 else safe_metaphor[:107].rstrip() + "…"
+        if spec.get("caption"):
+            caption_metaphor = html_lib.escape(spec["caption"])
 
-        return f"""<!DOCTYPE html>
+        return embed_arena_spec(f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -746,4 +942,4 @@ class JITArenaSynthesizer:
   </script>
 </body>
 </html>
-"""
+""", spec)

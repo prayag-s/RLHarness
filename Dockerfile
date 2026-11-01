@@ -22,8 +22,11 @@ RUN npm run build
 
 FROM python:3.12-slim AS runtime
 
+# `node` is a runtime dependency, not just a build tool: the arena generator validates the
+# JavaScript it wrote before accepting it, and without an engine that check fails closed — the
+# document is discarded after the provider has already been paid for it.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends bubblewrap ca-certificates \
+    && apt-get install -y --no-install-recommends bubblewrap ca-certificates nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 ENV PYTHONUNBUFFERED=1 \

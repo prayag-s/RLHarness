@@ -185,7 +185,7 @@ def test_synthesizer_hooks_relaxation_and_keeps_the_promise(tmp_path):
             super().__init__(LLMConfig(provider="deepseek", api_key="sk-test-12345678"))
             self.prompts: list[str] = []
 
-        def generate(self, prompt, system_prompt=None, timeout=None):  # noqa: ANN001
+        def generate(self, prompt, system_prompt=None, timeout=None, role=None):  # noqa: ANN001
             self.prompts.append(prompt)
             body = REACHABLE_ENV if "never signals success" in prompt else UNREACHABLE_ENV
             return f"```python\n{body}\n```"

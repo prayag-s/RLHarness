@@ -82,7 +82,7 @@ class FakeClient:
         self.fail = fail
         self.calls = 0
 
-    def generate_json(self, prompt, system_prompt=None, timeout=None):
+    def generate_json(self, prompt, system_prompt=None, timeout=None, role=None):
         self.calls += 1
         if self.fail:
             raise RuntimeError("provider down")

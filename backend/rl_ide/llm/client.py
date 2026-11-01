@@ -13,6 +13,7 @@ import httpx
 from pydantic import BaseModel, Field
 
 from rl_ide.llm.metering import BudgetExceeded, capture_response, enforce_budget
+from rl_ide.llm.roles import max_tokens_for, profile_for, timeout_for
 
 
 class LLMConfig(BaseModel):
@@ -108,20 +109,42 @@ class BaseLLMClient(ABC):
         return self.config.provider
 
     @abstractmethod
-    def generate(self, prompt: str, system_prompt: str | None = None, timeout: float | None = None) -> str:
-        """Generates raw text completion."""
+    def generate(
+        self,
+        prompt: str,
+        system_prompt: str | None = None,
+        timeout: float | None = None,
+        role: str | None = None,
+    ) -> str:
+        """Generates raw text completion.
+
+        ``role`` names the call site (see ``rl_ide.llm.roles``). It selects the reasoning and
+        output budget, and it is recorded on the usage row so cost can be attributed.
+        """
         ...
 
-    def generate_json(self, prompt: str, system_prompt: str | None = None, timeout: float | None = None) -> dict[str, Any]:
+    def generate_json(
+        self,
+        prompt: str,
+        system_prompt: str | None = None,
+        timeout: float | None = None,
+        role: str | None = None,
+    ) -> dict[str, Any]:
         """Generates completion and parses as JSON."""
-        raw = self.generate(prompt, system_prompt, timeout=timeout)
+        raw = self.generate(prompt, system_prompt, timeout=timeout, role=role)
         return extract_json_from_text(raw)
 
 
 class DeepSeekLLMClient(BaseLLMClient):
-    """First-class DeepSeek LLM Client (deepseek-chat / deepseek-reasoner)."""
+    """First-class DeepSeek LLM Client (deepseek-chat / deepseek-flash / deepseek-reasoner)."""
 
-    def generate(self, prompt: str, system_prompt: str | None = None, timeout: float | None = None) -> str:
+    def generate(
+        self,
+        prompt: str,
+        system_prompt: str | None = None,
+        timeout: float | None = None,
+        role: str | None = None,
+    ) -> str:
         api_key = self.config.api_key or os.environ.get("DEEPSEEK_API_KEY", "")
         if not api_key:
             raise ValueError("DEEPSEEK_API_KEY is not set or provided in LLMConfig.")
@@ -143,29 +166,37 @@ class DeepSeekLLMClient(BaseLLMClient):
         if not model_name or model_name.lower() in ("default", "none"):
             model_name = "deepseek-chat"
 
-        # Set token headroom: deepseek-flash supports up to 384K output tokens
-        max_tokens = self.config.max_tokens
-        if not max_tokens:
-            max_tokens = 384000 if "flash" in model_name.lower() else 8192
-        elif "flash" in model_name.lower() and max_tokens < 16384:
-            max_tokens = 384000
-
-        payload = {
+        profile = profile_for(role)
+        payload: dict[str, Any] = {
             "model": model_name,
             "messages": messages,
             "temperature": self.config.temperature,
-            "max_tokens": max_tokens,
+            "max_tokens": max_tokens_for(role, self.config.max_tokens),
         }
+        # DeepSeek enables thinking by default at high effort and bills the chain-of-thought as
+        # output tokens. Roles that classify, summarise or emit a spec must switch it off.
+        if profile.thinking:
+            payload["reasoning_effort"] = profile.effort
+        else:
+            payload["thinking"] = {"type": "disabled"}
 
-        req_timeout = timeout if timeout is not None else self.config.timeout
+        req_timeout = timeout_for(role, timeout, self.config.timeout)
         enforce_budget()
         started = time.perf_counter()
         with httpx.Client(timeout=req_timeout) as client:
             resp = client.post(endpoint, headers=headers, json=payload)
             resp.raise_for_status()
             data = resp.json()
-            capture_response("deepseek", model_name, data, started)
+            capture_response("deepseek", model_name, data, started, role=role)
             choice = data["choices"][0]
+            if choice.get("finish_reason") == "length":
+                # Reasoning and the answer share the output budget. Failing loudly here is cheaper
+                # than returning a truncated module (or nothing) that verification then rejects.
+                raise RuntimeError(
+                    f"DeepSeek response for role '{role or 'default'}' was truncated at "
+                    f"max_tokens={payload['max_tokens']}; raise the role budget in "
+                    "rl_ide/llm/roles.py or disable thinking for this role."
+                )
             msg = choice.get("message", {})
             content = msg.get("content") or ""
             if not content.strip() and msg.get("reasoning_content"):
@@ -181,7 +212,13 @@ class DeepSeekLLMClient(BaseLLMClient):
 class OpenAILLMClient(BaseLLMClient):
     """OpenAI API Client (GPT-4o, o3-mini, etc.)."""
 
-    def generate(self, prompt: str, system_prompt: str | None = None, timeout: float | None = None) -> str:
+    def generate(
+        self,
+        prompt: str,
+        system_prompt: str | None = None,
+        timeout: float | None = None,
+        role: str | None = None,
+    ) -> str:
         api_key = self.config.api_key or os.environ.get("OPENAI_API_KEY", "")
         if not api_key:
             raise ValueError("OPENAI_API_KEY is not set or provided in LLMConfig.")
@@ -202,17 +239,17 @@ class OpenAILLMClient(BaseLLMClient):
             "model": self.config.model_name or "gpt-4o",
             "messages": messages,
             "temperature": self.config.temperature,
-            "max_tokens": self.config.max_tokens,
+            "max_tokens": max_tokens_for(role, self.config.max_tokens),
         }
 
-        req_timeout = timeout if timeout is not None else self.config.timeout
+        req_timeout = timeout_for(role, timeout, self.config.timeout)
         enforce_budget()
         started = time.perf_counter()
         with httpx.Client(timeout=req_timeout) as client:
             resp = client.post(endpoint, headers=headers, json=payload)
             resp.raise_for_status()
             data = resp.json()
-            capture_response("openai", self.config.model_name or "gpt-4o", data, started)
+            capture_response("openai", self.config.model_name or "gpt-4o", data, started, role=role)
             return data["choices"][0]["message"]["content"]
 
 
@@ -224,7 +261,13 @@ class AzureOpenAILLMClient(BaseLLMClient):
     rather than a bearer token. This is the provider most enterprise procurement asks for.
     """
 
-    def generate(self, prompt: str, system_prompt: str | None = None, timeout: float | None = None) -> str:
+    def generate(
+        self,
+        prompt: str,
+        system_prompt: str | None = None,
+        timeout: float | None = None,
+        role: str | None = None,
+    ) -> str:
         api_key = self.config.api_key or os.environ.get("AZURE_OPENAI_API_KEY", "")
         if not api_key:
             raise ValueError("AZURE_OPENAI_API_KEY is not set or provided in LLMConfig.")
@@ -251,17 +294,17 @@ class AzureOpenAILLMClient(BaseLLMClient):
         payload = {
             "messages": messages,
             "temperature": self.config.temperature,
-            "max_tokens": self.config.max_tokens,
+            "max_tokens": max_tokens_for(role, self.config.max_tokens),
         }
 
-        req_timeout = timeout if timeout is not None else self.config.timeout
+        req_timeout = timeout_for(role, timeout, self.config.timeout)
         enforce_budget()
         started = time.perf_counter()
         with httpx.Client(timeout=req_timeout) as client:
             resp = client.post(url, headers={"api-key": api_key, "Content-Type": "application/json"}, json=payload)
             resp.raise_for_status()
             data = resp.json()
-            capture_response("azure_openai", deployment, data, started)
+            capture_response("azure_openai", deployment, data, started, role=role)
             return data["choices"][0]["message"]["content"]
 
 
@@ -272,7 +315,13 @@ class OpenAICompatibleLLMClient(BaseLLMClient):
     these run inside the customer's network without auth — but if `api_key` is set it is sent.
     """
 
-    def generate(self, prompt: str, system_prompt: str | None = None, timeout: float | None = None) -> str:
+    def generate(
+        self,
+        prompt: str,
+        system_prompt: str | None = None,
+        timeout: float | None = None,
+        role: str | None = None,
+    ) -> str:
         base_url = (self.config.base_url or "").rstrip("/")
         if not base_url:
             raise ValueError(
@@ -292,24 +341,30 @@ class OpenAICompatibleLLMClient(BaseLLMClient):
             "model": self.config.model_name or "default",
             "messages": messages,
             "temperature": self.config.temperature,
-            "max_tokens": self.config.max_tokens,
+            "max_tokens": max_tokens_for(role, self.config.max_tokens),
         }
 
-        req_timeout = timeout if timeout is not None else self.config.timeout
+        req_timeout = timeout_for(role, timeout, self.config.timeout)
         enforce_budget()
         started = time.perf_counter()
         with httpx.Client(timeout=req_timeout) as client:
             resp = client.post(f"{base_url}/chat/completions", headers=headers, json=payload)
             resp.raise_for_status()
             data = resp.json()
-            capture_response("openai_compatible", self.config.model_name or "default", data, started)
+            capture_response("openai_compatible", self.config.model_name or "default", data, started, role=role)
             return data["choices"][0]["message"]["content"]
 
 
 class AnthropicLLMClient(BaseLLMClient):
     """Anthropic Messages API Client (Claude 3.5 Sonnet, Claude 3.7 Sonnet)."""
 
-    def generate(self, prompt: str, system_prompt: str | None = None, timeout: float | None = None) -> str:
+    def generate(
+        self,
+        prompt: str,
+        system_prompt: str | None = None,
+        timeout: float | None = None,
+        role: str | None = None,
+    ) -> str:
         api_key = self.config.api_key or os.environ.get("ANTHROPIC_API_KEY", "")
         if not api_key:
             raise ValueError("ANTHROPIC_API_KEY is not set or provided in LLMConfig.")
@@ -324,14 +379,14 @@ class AnthropicLLMClient(BaseLLMClient):
         }
         payload: dict[str, Any] = {
             "model": self.config.model_name or "claude-3-5-sonnet-20241022",
-            "max_tokens": self.config.max_tokens,
+            "max_tokens": max_tokens_for(role, self.config.max_tokens),
             "temperature": self.config.temperature,
             "messages": [{"role": "user", "content": prompt}],
         }
         if system_prompt:
             payload["system"] = system_prompt
 
-        req_timeout = timeout if timeout is not None else self.config.timeout
+        req_timeout = timeout_for(role, timeout, self.config.timeout)
         enforce_budget()
         started = time.perf_counter()
         with httpx.Client(timeout=req_timeout) as client:
@@ -339,7 +394,11 @@ class AnthropicLLMClient(BaseLLMClient):
             resp.raise_for_status()
             data = resp.json()
             capture_response(
-                "anthropic", self.config.model_name or "claude-3-5-sonnet-20241022", data, started
+                "anthropic",
+                self.config.model_name or "claude-3-5-sonnet-20241022",
+                data,
+                started,
+                role=role,
             )
             return data["content"][0]["text"]
 
@@ -347,7 +406,13 @@ class AnthropicLLMClient(BaseLLMClient):
 class OllamaLLMClient(BaseLLMClient):
     """Ollama and vLLM local OpenAI-compatible endpoint."""
 
-    def generate(self, prompt: str, system_prompt: str | None = None, timeout: float | None = None) -> str:
+    def generate(
+        self,
+        prompt: str,
+        system_prompt: str | None = None,
+        timeout: float | None = None,
+        role: str | None = None,
+    ) -> str:
         base_url = (self.config.base_url or "http://localhost:11434/v1").rstrip("/")
         endpoint = f"{base_url}/chat/completions"
 
@@ -366,13 +431,13 @@ class OllamaLLMClient(BaseLLMClient):
             "temperature": self.config.temperature,
         }
 
-        req_timeout = timeout if timeout is not None else self.config.timeout
+        req_timeout = timeout_for(role, timeout, self.config.timeout)
         started = time.perf_counter()
         with httpx.Client(timeout=req_timeout) as client:
             resp = client.post(endpoint, headers=headers, json=payload)
             resp.raise_for_status()
             data = resp.json()
-            capture_response("ollama", self.config.model_name or "llama3.1", data, started)
+            capture_response("ollama", self.config.model_name or "llama3.1", data, started, role=role)
             return data["choices"][0]["message"]["content"]
 
 
@@ -383,7 +448,13 @@ class FallbackCodeSynthesizer(BaseLLMClient):
     and arena.html responses dynamically based on user prompts and schemas.
     """
 
-    def generate(self, prompt: str, system_prompt: str | None = None, timeout: float | None = None) -> str:
+    def generate(
+        self,
+        prompt: str,
+        system_prompt: str | None = None,
+        timeout: float | None = None,
+        role: str | None = None,
+    ) -> str:
         prompt_lower = prompt.lower()
         sys_lower = (system_prompt or "").lower()
 
@@ -548,7 +619,13 @@ class UnconfiguredLLMClient(BaseLLMClient):
     def __init__(self, config: LLMConfig | None = None):
         super().__init__(config or LLMConfig(provider="unconfigured", model_name="none"))
 
-    def generate(self, prompt: str, system_prompt: str | None = None, timeout: float | None = None) -> str:
+    def generate(
+        self,
+        prompt: str,
+        system_prompt: str | None = None,
+        timeout: float | None = None,
+        role: str | None = None,
+    ) -> str:
         raise RuntimeError(
             "A verified LLM API key is mandatory before executing studio tasks. "
             "Please configure and verify your LLM settings."

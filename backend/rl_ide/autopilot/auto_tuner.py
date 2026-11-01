@@ -5,6 +5,7 @@ shortfalls; rewrites compute_reward(); and self-heals updated Gymnasium code.
 """
 
 from __future__ import annotations
+import ast
 import json
 import math
 import re
@@ -15,6 +16,8 @@ from pydantic import BaseModel, Field
 
 from rl_ide.architect.models import AgentBlueprintSpec
 from rl_ide.ingest.loader import IngestedDataset
+from rl_ide.synthesizer.patch import PatchError, extract_function_block, replace_function
+from rl_ide.synthesizer.verifier import repair_attempts
 from rl_ide.llm.client import (
     BaseLLMClient,
     create_llm_client,
@@ -183,7 +186,7 @@ class AutoTunerAgent:
             blueprint=blueprint,
             dataset=dataset,
             workspace_dir=workspace_dir,
-            max_retries=3,
+            max_retries=repair_attempts("tune"),
         )
 
         hyper_diffs = {
@@ -225,20 +228,51 @@ class AutoTunerAgent:
         if not isinstance(self.client, (FallbackCodeSynthesizer, UnconfiguredLLMClient)):
             try:
                 prompt = (
-                    f"Autonomous Tuning Round {round_num} for '{blueprint.task_title}':\n"
-                    f"Diagnosis: {diagnosis}\n"
-                    f"Proposed Changes: {changes_summary}\n\n"
+                    # The module goes first: it is the long, stable part of the prompt, so putting the
+                    # per-round diagnosis last lets the provider serve the rest from its prefix cache.
                     f"Current Environment Code:\n```python\n{current_code}\n```\n\n"
-                    f"Rewrite `compute_reward()` and any necessary helper logic to resolve the diagnosed failure modes.\n"
-                    f"Return the complete updated Python module in ```python ... ```."
+                    f"Round {round_num} for '{blueprint.task_title}'.\n"
+                    f"Diagnosis: {diagnosis}\n"
+                    f"Proposed changes: {changes_summary}\n\n"
+                    f"Rewrite `compute_reward()` (and a helper only if it is genuinely needed) to fix "
+                    f"the diagnosed failure modes.\n"
+                    f"Return ONLY the replacement `def compute_reward(...)` function inside "
+                    f"```python ... ``` — do not repeat the rest of the module."
                 )
-                raw = self.client.generate(prompt, system_prompt=AUTO_TUNER_SYSTEM_PROMPT)
-                match = re.search(r"```(?:python)?\s*([\s\S]*?)\s*```", raw)
-                if match:
-                    return match.group(1).strip()
+                raw = self.client.generate(
+                    prompt, system_prompt=AUTO_TUNER_SYSTEM_PROMPT, role="auto_tuner"
+                )
+                patched = self._apply_reward_patch(current_code, raw)
+                if patched:
+                    return patched
             except Exception as exc:
                 print(f"[AutoTunerAgent] LLM reward rewrite notice ({exc}); applying deterministic reward scaling.")
 
         # Deterministic fallback: changing reward semantics without an LLM cannot be done safely,
         # so the reward function is left untouched and the caller reports "not applied".
         return current_code
+
+    @staticmethod
+    def _apply_reward_patch(current_code: str, raw: str) -> str | None:
+        """Splices a returned ``compute_reward`` into the module, or accepts a full module.
+
+        A model that still returns a whole module is honoured for compatibility, but the prompt asks
+        for the function alone: re-emitting 2 KB of unchanged code is the dominant cost of a round.
+        """
+        if not raw:
+            return None
+        block = extract_function_block(raw, "compute_reward")
+        if block:
+            try:
+                return replace_function(current_code, block, "compute_reward")
+            except PatchError:
+                return None
+        match = re.search(r"```(?:python)?\s*([\s\S]*?)\s*```", raw)
+        if match and "def compute_reward" in match.group(1):
+            candidate = match.group(1).strip()
+            try:
+                ast.parse(candidate)
+            except SyntaxError:
+                return None
+            return candidate
+        return None

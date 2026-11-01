@@ -206,6 +206,7 @@ def judge(
         user_prompt,
         system_prompt=COACH_JUDGE_SYSTEM_PROMPT,
         timeout=45.0,
+        role="coach_judge",
     )
     if not isinstance(payload, dict):
         return []

@@ -8,6 +8,7 @@ from __future__ import annotations
 import ast
 import json
 import math
+import os
 import re
 import sys
 import tempfile
@@ -28,6 +29,19 @@ from rl_ide.synthesizer.env_builder import (
     instantiate_env,
     load_synthesized_env_class,
 )
+
+
+def repair_attempts(kind: str = "synthesize") -> int:
+    """How many self-healing rewrites a verification loop may spend.
+
+    Each rewrite re-emits a whole module, so this count is a direct cost multiplier. A fresh module
+    (``synthesize``) gets a second chance; a surgical patch (``tune``) has a small enough surface that
+    one attempt plus the next round's telemetry is a better trade than paying for three rewrites.
+    """
+    env_name = "RL_IDE_TUNE_MAX_REPAIRS" if kind == "tune" else "RL_IDE_VERIFY_MAX_REPAIRS"
+    default = 1 if kind == "tune" else 2
+    raw = os.environ.get(env_name, "").strip()
+    return int(raw) if raw.isdigit() else default
 
 
 class SecurityViolationError(Exception):
@@ -395,6 +409,7 @@ class SandboxSmokeTester:
                         "You are an expert RL environment engineer. You fix environments whose success "
                         "condition is unreachable, without weakening the task into a trivial one."
                     ),
+                    role="verifier_repair",
                 )
             except Exception as exc:
                 logs.append(f"Relaxation call failed: {type(exc).__name__}: {exc}")
@@ -617,6 +632,7 @@ class SandboxSmokeTester:
                 raw = self.client.generate(
                     prompt,
                     system_prompt=with_english_rule("You are an Expert Python RL Debugger."),
+                    role="verifier_repair",
                 )
                 match = re.search(r"```(?:python)?\s*([\s\S]*?)\s*```", raw)
                 if match:

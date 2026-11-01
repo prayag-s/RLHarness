@@ -704,10 +704,10 @@ def synthesize_universal_env(
     user_prompt: str = "",
     dataset: IngestedDataset | None = None,
     client: BaseLLMClient | None = None,
-    max_retries: int = 3,
+    max_retries: int = 2,
     allow_placeholder: bool | None = None,
 ) -> str:
-    """Universal LLM Gymnasium Code Synthesizer with 3-Attempt Self-Healing Sandbox Loop.
+    """Universal LLM Gymnasium Code Synthesizer with a bounded self-healing sandbox loop.
 
     When no usable LLM is available, an explicit placeholder module is only produced in test
     mode (or when ``allow_placeholder`` is explicitly true). In every other case synthesis
@@ -743,7 +743,9 @@ def synthesize_universal_env(
                 f"10. Optional: get_valid_actions() and get_critical_actions() when the domain has legal/tactical actions\n\n"
                 f"Output ONLY valid Python code inside ```python ... ```."
             )
-            raw = active_client.generate(prompt, system_prompt=ENV_BUILDER_SYSTEM_PROMPT)
+            raw = active_client.generate(
+                prompt, system_prompt=ENV_BUILDER_SYSTEM_PROMPT, role="env_synthesizer"
+            )
             extracted = extract_python_code(raw)
             if extracted and "class SynthesizedGymEnv" in extracted:
                 code = extracted

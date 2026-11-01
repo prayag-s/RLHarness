@@ -544,32 +544,57 @@ Ask: *could a careful human have known this at decision time?* If not, the colum
 
 Prices are USD per **1 million tokens**, applied to every metered call:
 
-| Model | Input | Output |
-|---|---:|---:|
-| `deepseek-chat` | $0.27 | $1.10 |
-| `deepseek-reasoner` | $0.55 | $2.19 |
-| `gpt-4o` | $2.50 | $10.00 |
-| `gpt-4o-mini` | $0.15 | $0.60 |
-| `claude-3-5-sonnet` | $3.00 | $15.00 |
-| Ollama / local | $0.00 | $0.00 |
+| Model | Input | Output | Cached input |
+|---|---:|---:|---:|
+| `deepseek-flash` (peak) | $0.30 | $1.20 | $0.006 |
+| `deepseek-flash` (off-peak) | $0.15 | $0.60 | $0.003 |
+| `deepseek-chat` | $0.27 | $1.10 | $0.027 |
+| `deepseek-reasoner` | $0.55 | $2.19 | $0.055 |
+| `gpt-4o` | $2.50 | $10.00 | $1.25 |
+| `gpt-4o-mini` | $0.15 | $0.60 | $0.075 |
+| `claude-3-5-sonnet` | $3.00 | $15.00 | $0.30 |
+| Ollama / local | $0.00 | $0.00 | $0.00 |
 
 These are coarse list prices for planning, not an invoice. A real contract can override them:
 
 ```bash
-export RL_IDE_LLM_PRICES='{"deepseek/deepseek-chat": [0.27, 1.10]}'
+export RL_IDE_LLM_PRICES='{"deepseek/deepseek-flash": [0.30, 1.20, 0.006]}'
 ```
+
+**Reasoning tokens are billed as output tokens.** DeepSeek enables thinking by default at high
+effort, so a one-word answer can still be billed for a dozen reasoning tokens. Every call therefore
+declares a *role* with its own budget (`backend/rl_ide/llm/roles.py`):
+
+| Role | Thinking | Output ceiling |
+|---|---|---|
+| `chat_planner`, `coach_judge`, `diagnostic_chat`, `intake_blueprint`, `arena_ui` | off | 700–1,800 |
+| `auto_tuner`, `reward_rewrite` | off | 900–1,200 |
+| `verifier_repair` | on, low effort | 6,000 |
+| `env_synthesizer` | on, low effort | 8,000 |
+
+A thinking role's ceiling covers reasoning *and* the answer. If a response is cut off at the ceiling
+the call fails with an explicit error instead of returning a truncated module: the tokens are
+already paid for, and a half-written environment only costs more to verify.
+
+The usage report shows `totals`, an `efficiency` block (`reasoning_tokens`, `cached_input_tokens`,
+`cache_hit_rate`) and a `by_role` breakdown, so a surprising bill can be traced to the call site
+that caused it. Off-peak DeepSeek pricing (outside 01:00–04:00 and 06:00–10:00 UTC on weekdays) is
+applied automatically.
 
 ### 12.4 Which model should you pick?
 
 | Situation | Choose |
 |---|---|
-| **Default** | `deepseek-chat` — best cost/quality for code synthesis |
+| **Default** | `deepseek-flash` — best cost/quality for code synthesis |
 | Complex environment logic, repeated failures, subtle rules | `deepseek-reasoner` — about 2× the price, slower, better at hard reasoning |
 | You already have an OpenAI or Anthropic contract | The model you already pay for; keep an eye on long prompts |
 | Regulated or private data | Ollama / self-hosted. Nothing leaves the boundary |
 | Cosmetic arena changes | The cheapest model you have. Do not use a reasoner for colours |
 
-**The single best cost decision** is to do cosmetic and structural iteration on `deepseek-chat`, and switch to a stronger model only when the environment itself is the blocker.
+Three decisions, in order of effect: keep the default `deepseek-flash` (it is already the cheapest
+capable model here), leave thinking off for everything that only classifies or styles, and let the
+arena be rendered by code from a spec rather than written as a full HTML document. Raise effort or
+switch models only when the environment itself is the blocker.
 
 ### 12.5 What the header is telling you
 
@@ -1201,6 +1226,12 @@ are on instead of leaving you to infer it from a chart.
 | `RL_IDE_COACH_BLOCKERS` | `hard` | `advisory` reports blockers without stopping a run |
 | `RL_IDE_COACH_LLM` | `1` | `0` disables the model and keeps the rules |
 | `RL_IDE_COACH_MAX_LLM_CALLS` | `12` | Per-conversation judge-call cap |
+| `RL_IDE_LLM_THINKING` | unset | `0` disables reasoning tokens for every role |
+| `RL_IDE_LLM_MAX_TOKENS` | unset | Hard output-token ceiling applied on top of every role budget |
+| `RL_IDE_VERIFY_MAX_REPAIRS` | `2` | Self-healing rewrites allowed while verifying a new environment |
+| `RL_IDE_TUNE_MAX_REPAIRS` | `1` | Self-healing rewrites allowed while verifying an auto-tuned reward |
+| `RL_IDE_ARENA_MODE` | `spec` | `spec` (model styles, code renders), `bespoke` (model writes the HTML), `deterministic` (no provider call) |
+| `RL_IDE_PLANNER_LLM` | `auto` | `auto` asks the model only for directives the local grammar cannot route; `always`, `off` |
 
 ---
 

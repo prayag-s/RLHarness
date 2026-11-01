@@ -202,6 +202,7 @@ def _synthesize_blueprint_from_prompt_impl(
             raw_json = active_client.generate_json(
                 full_query,
                 system_prompt=with_english_rule("You are a Universal RL Domain Architect."),
+                role="intake_blueprint",
             )
             if raw_json and isinstance(raw_json, dict) and "domain_title" in raw_json:
                 data_type = "uploaded_dataset" if dataset is not None else "pure_simulation"

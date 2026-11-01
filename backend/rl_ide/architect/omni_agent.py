@@ -12,6 +12,7 @@ Provides a single unified conversational router (StudioOmniAgent) eliminating th
 
 from __future__ import annotations
 import ast
+import os
 from enum import Enum
 import json
 import logging
@@ -33,6 +34,7 @@ from rl_ide.architect.intake import (
 )
 from rl_ide.synthesizer.arena_builder import JITArenaSynthesizer
 from rl_ide.synthesizer.env_builder import JITEnvironmentSynthesizer, load_synthesized_env_class, instantiate_env
+from rl_ide.synthesizer.patch import extract_function_block, replace_function
 from rl_ide.synthesizer.verifier import SandboxSmokeTester
 from rl_ide.state.records_store import save_records
 from rl_ide.state.job_store import JobCancelled
@@ -114,6 +116,17 @@ class StudioChatResponse(BaseModel):
             self.clarifying_questions = self.questions
         if not self.questions and self.clarifying_questions:
             self.questions = self.clarifying_questions
+
+
+def planner_mode() -> str:
+    """Whether the chat planner may spend a provider call.
+
+    ``auto`` (default) asks the model only when the deterministic grammar found no target on a
+    directive, which is the single case it cannot resolve. ``always`` restores the old behaviour and
+    ``off`` makes planning fully local.
+    """
+    mode = os.environ.get("RL_IDE_PLANNER_LLM", "auto").strip().lower()
+    return mode if mode in {"auto", "always", "off"} else "auto"
 
 
 class StudioOmniAgent:
@@ -212,7 +225,8 @@ class StudioOmniAgent:
     )
     _VISUAL_RE = re.compile(
         r"\b(visual|theme|style|colou?r|layout|size|larger|bigger|scoreboard|hud|display|render|"
-        r"badge|meter|dashboard|chart|animate|animated|animation|arrows?|look and feel|panel)\b"
+        r"badge|meter|dashboard|chart|animate|animated|animation|arrows?|look and feel|panel|"
+        r"gold|golden|amber|silver|neon|darker|lighter|minimal|clean|compact)\b"
     )
     _EXPLICIT_TRAINING_RE = re.compile(
         r"(\bstart\s+training\b|\bcontinue\s+training\b|\bresume\s+training\b|"
@@ -302,40 +316,23 @@ class StudioOmniAgent:
             except Exception:
                 pass
 
-        if not isinstance(self.client, (FallbackCodeSynthesizer, UnconfiguredLLMClient)):
-            try:
-                prompt = (
-                    f"You are the Code-Aware Agentic Chat Planner for an Autonomous RL Studio.\n"
-                    f"User message: \"{user_message}\"\n\n"
-                    f"Environment Context:\n{env_methods_summary}\n\n"
-                    f"Blueprint: {json.dumps(conv.get('blueprint_spec') or {}, default=str)[:2000]}\n\n"
-                    f"Supported Execution Targets:\n"
-                    f"- \"reanchor_domain\": the user pivoted to a different task/domain.\n"
-                    f"- \"inference_strategy\": change how actions are selected during interactive play (randomization, top-k, masking).\n"
-                    f"- \"reward_shaping\": change compute_reward() / training incentives.\n"
-                    f"- \"env_sim_mechanics\": change reset()/step() rules, physics or opponents.\n"
-                    f"- \"arena_visual_ui\": restyle or rebuild the visual arena.\n"
-                    f"- \"training_hyperparams\": run/continue training or change its budget.\n"
-                    f"- \"unsupported_capability\": outside the runtime.\n\n"
-                    f"Rules:\n"
-                    f"1. Arena behaviour changes route to inference_strategy, never reward_shaping alone.\n"
-                    f"2. Compound requests may include multiple targets; set requires_retrain when reward/env/training change.\n"
-                    f"3. Pure questions route to scope_classification=\"discussion\" with targets=[].\n"
-                    f"4. Unbuilt capabilities route to supported=false with targets=[\"unsupported_capability\"].\n\n"
-                    f"Respond with JSON: {{\"supported\": true, \"unsupported_reason\": null, "
-                    f"\"scope_classification\": \"arena_only\", \"targets\": [\"inference_strategy\"], "
-                    f"\"requires_retrain\": false, \"surgical_instructions\": \"...\", "
-                    f"\"user_facing_summary\": \"...\"}}"
-                )
-                res = self.client.generate_json(
-                    with_english_rule(prompt),
-                    system_prompt=with_english_rule("You are a code-aware agentic planner."),
-                )
-                if res and isinstance(res, dict) and "supported" in res and "targets" in res:
-                    return ChatActionPlan.model_validate(res)
-            except Exception as ex:
-                logging.warning(f"LLM ChatActionPlan error: {ex}")
+        targets = self._deterministic_targets(text, conv)
 
+        # The grammar above already handles every routable request, and the provider call costs
+        # tokens on *every* chat message. Consult the model only when the grammar found nothing on a
+        # message that is clearly a directive, which is the one case where it cannot decide.
+        mode = planner_mode()
+        if mode == "always" or (mode == "auto" and not targets):
+            plan = self._llm_chat_plan(user_message, conv, env_methods_summary, targets)
+            if plan is not None:
+                return plan
+
+        return self._build_plan(targets)
+
+    def _deterministic_targets(
+        self, text: str, conv: dict[str, Any]
+    ) -> list[ExecutionTarget]:
+        """The domain-free intent grammar: verbs and style nouns, never domain nouns."""
         targets: list[ExecutionTarget] = []
 
         if (
@@ -368,8 +365,10 @@ class StudioOmniAgent:
             ExecutionTarget.ARENA_VISUAL_UI,
             ExecutionTarget.TRAINING_HYPERPARAMS,
         ]
-        targets = [t for t in order if t in targets]
+        return [t for t in order if t in targets]
 
+    def _build_plan(self, targets: list[ExecutionTarget]) -> ChatActionPlan:
+        """Turns a target list into the plan the executor consumes."""
         has_train_impact = any(
             t in targets for t in (ExecutionTarget.REWARD_SHAPING, ExecutionTarget.ENV_SIM_MECHANICS, ExecutionTarget.TRAINING_HYPERPARAMS)
         )
@@ -410,6 +409,60 @@ class StudioOmniAgent:
             surgical_plan=plan_desc,
             user_facing_summary=f"Formulated execution plan for scope '{scope}' targeting {', '.join(t.value for t in targets) or 'discussion'}.",
         )
+
+    def _llm_chat_plan(
+        self,
+        user_message: str,
+        conv: dict[str, Any],
+        env_methods_summary: str,
+        guessed: list[ExecutionTarget],
+    ) -> ChatActionPlan | None:
+        """Asks the model to route a directive the grammar could not classify."""
+        if isinstance(self.client, (FallbackCodeSynthesizer, UnconfiguredLLMClient)):
+            return None
+        blueprint = conv.get("blueprint_spec") or {}
+        brief: dict[str, Any] = {}
+        if isinstance(blueprint, dict):
+            brief = {
+                key: blueprint.get(key)
+                for key in ("task_title", "action_labels", "arena_visual_description")
+                if blueprint.get(key)
+            }
+        try:
+            prompt = (
+                f"You are the Code-Aware Agentic Chat Planner for an Autonomous RL Studio.\n"
+                f"User message: \"{user_message}\"\n\n"
+                f"Environment Context:\n{env_methods_summary}\n\n"
+                f"Blueprint: {json.dumps(brief, default=str)}\n\n"
+                f"Deterministic router found: {[t.value for t in guessed] or 'nothing'}\n\n"
+                f"Supported Execution Targets:\n"
+                f"- \"reanchor_domain\": the user pivoted to a different task/domain.\n"
+                f"- \"inference_strategy\": change how actions are selected during interactive play (randomization, top-k, masking).\n"
+                f"- \"reward_shaping\": change compute_reward() / training incentives.\n"
+                f"- \"env_sim_mechanics\": change reset()/step() rules, physics or opponents.\n"
+                f"- \"arena_visual_ui\": restyle or rebuild the visual arena.\n"
+                f"- \"training_hyperparams\": run/continue training or change its budget.\n"
+                f"- \"unsupported_capability\": outside the runtime.\n\n"
+                f"Rules:\n"
+                f"1. Arena behaviour changes route to inference_strategy, never reward_shaping alone.\n"
+                f"2. Compound requests may include multiple targets; set requires_retrain when reward/env/training change.\n"
+                f"3. Pure questions route to scope_classification=\"discussion\" with targets=[].\n"
+                f"4. Unbuilt capabilities route to supported=false with targets=[\"unsupported_capability\"].\n\n"
+                f"Respond with JSON: {{\"supported\": true, \"unsupported_reason\": null, "
+                f"\"scope_classification\": \"arena_only\", \"targets\": [\"inference_strategy\"], "
+                f"\"requires_retrain\": false, \"surgical_instructions\": \"...\", "
+                f"\"user_facing_summary\": \"...\"}}"
+            )
+            res = self.client.generate_json(
+                with_english_rule(prompt),
+                system_prompt=with_english_rule("You are a code-aware agentic planner."),
+                role="chat_planner",
+            )
+            if res and isinstance(res, dict) and "supported" in res and "targets" in res:
+                return ChatActionPlan.model_validate(res)
+        except Exception as ex:
+            logging.warning(f"LLM ChatActionPlan error: {ex}")
+        return None
 
     def plan_chat_action(
         self,
@@ -1449,10 +1502,18 @@ class StudioOmniAgent:
                     f"Update only `compute_reward(self, state, action, next_state, info)` to reflect this request:\n"
                     f"\"{user_feedback}\"\n\n"
                     f"Preserve every method signature and unrelated reward term. Clamp each term to [-10.0, 10.0].\n"
-                    f"Return the complete updated Python module inside ```python ... ```.\n\n"
+                    f"Return ONLY the replacement `def compute_reward(...)` function inside ```python ... ```.\n\n"
                     f"Current code:\n{current_code}"
                 )
-                res = self.client.generate(with_english_rule(prompt))
+                res = self.client.generate(with_english_rule(prompt), role="reward_rewrite")
+                block = extract_function_block(res, "compute_reward")
+                if block:
+                    return (
+                        replace_function(current_code, block, "compute_reward"),
+                        True,
+                        "Reward function rewritten by the LLM.",
+                    )
+                # Compatibility: an older prompt (or a cached response) may still return a module.
                 match = re.search(r"```python\s*([\s\S]*?)```", res)
                 if match and "def compute_reward" in match.group(1):
                     candidate = match.group(1).strip()
@@ -1546,7 +1607,7 @@ class StudioOmniAgent:
                     f"Provide a helpful, precise, conversational response to the user. "
                     f"If the user is asking to modify the arena, agent, or environment, explain clearly what actions you can take."
                 )
-                res = self.client.generate(with_english_rule(prompt), timeout=15.0)
+                res = self.client.generate(with_english_rule(prompt), timeout=15.0, role="diagnostic_chat")
                 if res and res.strip():
                     return res.strip()
             except Exception:

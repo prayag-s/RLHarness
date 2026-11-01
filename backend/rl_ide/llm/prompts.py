@@ -108,7 +108,7 @@ STRICT CONSTRAINTS:
 - Preserve all existing method signatures (`compute_reward`, `get_valid_actions`, `interactive_step`).
 - Always return a 2-tuple: `(float(total_reward), breakdown_dict)`
 - Clamp all individual reward terms strictly to the range [-10.0, +10.0] so Critic value estimates never diverge.
-- Return ONLY the updated full Python module inside ```python ... ```.
+- Return ONLY the replacement `compute_reward(self, state, action, next_state, info)` function inside ```python ... ```. Do not repeat any other part of the module.
 """)
 
 ARCHITECT_SYSTEM_PROMPT = INTAKE_ARCHITECT_SYSTEM_PROMPT
