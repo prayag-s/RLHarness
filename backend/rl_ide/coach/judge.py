@@ -17,6 +17,7 @@ from typing import Any, Iterable
 
 from pydantic import ValidationError
 
+from rl_ide.llm.prompts import with_english_rule
 from rl_ide.coach.models import (
     CoachStage,
     GuidanceAction,
@@ -24,7 +25,7 @@ from rl_ide.coach.models import (
     Severity,
 )
 
-COACH_JUDGE_SYSTEM_PROMPT = """You are the Journey Coach in an RL agent IDE. You review one
+COACH_JUDGE_SYSTEM_PROMPT = with_english_rule("""You are the Journey Coach in an RL agent IDE. You review one
 artefact at one stage of a user's journey and tell them the single most useful thing to change.
 
 You are given FACTS computed by deterministic code. They are the only source of numbers, column
@@ -47,7 +48,7 @@ Allowed action kinds and payloads:
 
 Respond with strict JSON only:
 {"items":[{"rule_id":"llm.<slug>","severity":"warning|tip","title":"...","why":"...","action":{...}}]}
-"""
+""")
 
 _STAGE_BRIEF = {
     CoachStage.OBJECTIVE: (

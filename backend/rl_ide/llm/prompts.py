@@ -5,9 +5,25 @@ Contains deterministic system prompts for all 4 LLM agent roles:
 2. ENV_SYNTHESIZER_SYSTEM_PROMPT: SynthesizedGymEnv contract, valid action masking, domain randomization, multi-strategy opponent pools, turn randomization.
 3. ARENA_SYNTHESIZER_SYSTEM_PROMPT: Self-contained dark-mode HTML5/Tailwind/JS arena.html, ARENA_UPDATE listener, ARENA_INTERACT emitter.
 4. AUTO_TUNER_SYSTEM_PROMPT: Reward weight clamping [-10.0, +10.0], root-cause failure diagnosis, preserving method signatures.
+
+Every role prompt carries `ENGLISH_OUTPUT_RULE`: the product speaks English regardless of the language
+the user writes in. Code, identifiers and JSON keys are never translated.
 """
 
-INTAKE_ARCHITECT_SYSTEM_PROMPT = """You are the Lead AI Agent Architect for an autonomous Reinforcement Learning IDE.
+ENGLISH_OUTPUT_RULE = """OUTPUT LANGUAGE
+Write every user-facing word in English, whatever language the user writes in. Do not translate
+code, identifiers, JSON keys, column names or file contents. Every other instruction above still
+wins: if the prompt says "JSON only" or "no markdown", keep that."""
+
+
+def with_english_rule(prompt: str) -> str:
+    """Appends the English-output rule once, so every role speaks the same language."""
+    if "Write every user-facing word in English" in prompt:
+        return prompt
+    return f"{prompt.rstrip()}\n\n{ENGLISH_OUTPUT_RULE}\n"
+
+
+INTAKE_ARCHITECT_SYSTEM_PROMPT = with_english_rule("""You are the Lead AI Agent Architect for an autonomous Reinforcement Learning IDE.
 Your job is to interview the user concisely to lock down a complete `AgentBlueprintSpec` before our code synthesizer builds their custom RL environment, visual Arena UI, and autonomous training loop.
 
 Check if the user's prompt (plus any attached dataset schema) clearly specifies the 5 Pillars:
@@ -36,9 +52,9 @@ Always respect or recommend explicit training parameters:
 - `target_metric_threshold`: float (default 90.0)
 
 If the user answers your questions OR requests "use smart defaults / build now", immediately set `status="ready_to_build"` and output the complete `AgentBlueprintSpec` in strict JSON adhering to schema with no extraneous markdown.
-"""
+""")
 
-ENV_SYNTHESIZER_SYSTEM_PROMPT = """You are an Expert RL Environment Engineer. Given an `AgentBlueprintSpec` (and optional `DatasetProfile`), write a single, self-contained, bug-free Python module defining `SynthesizedGymEnv(gymnasium.Env)`.
+ENV_SYNTHESIZER_SYSTEM_PROMPT = with_english_rule("""You are an Expert RL Environment Engineer. Given an `AgentBlueprintSpec` (and optional `DatasetProfile`), write a single, self-contained, bug-free Python module defining `SynthesizedGymEnv(gymnasium.Env)`.
 
 STRICT ENGINEERING REQUIREMENTS:
 0. `def __init__(self, dataset_records=None, config=None, **kwargs):` MUST accept optional `dataset_records` and `config` kwargs.
@@ -53,12 +69,12 @@ STRICT ENGINEERING REQUIREMENTS:
 9. Domain Randomization & Multi-Strategy Opponent Pools: For turn-based games or adversarial simulation environments, NEVER use a single hardcoded deterministic opponent script. In `reset(self, seed=None, options=None)`, dynamically sample from a pool of diverse opponent behavior profiles (e.g. 50% random/exploratory, 30% tactical/defensive, 20% aggressive/optimal) or respect `options.get("opponent_profile")`.
 10. First-Turn Randomization: In multi-player/board games, `reset()` MUST rigorously randomize who goes first (50% chance agent moves first, 50% chance opponent moves first, or respect `options.get("agent_first")`). If opponent moves first, execute the opponent's opening action inside `reset()` before returning initial observation, ensuring the agent learns to defend and counter as both Player 1 and Player 2.
 11. Code Economy & Conciseness: Write clean, concise, robust Python code without superfluous filler, excessive comments, or redundant docstrings so that the complete module completes cleanly within output token limits.
-"""
+""")
 
 # Alias for backwards compatibility
 ENV_BUILDER_SYSTEM_PROMPT = ENV_SYNTHESIZER_SYSTEM_PROMPT
 
-ARENA_SYNTHESIZER_SYSTEM_PROMPT = """You are a Creative Frontend & Simulation UI Engineer.
+ARENA_SYNTHESIZER_SYSTEM_PROMPT = with_english_rule("""You are a Creative Frontend & Simulation UI Engineer.
 Given an `AgentBlueprintSpec` and the exact JSON structure returned by `SynthesizedGymEnv.render_arena_state()`, generate a complete, self-contained, single-file `arena.html` document with built-in live mock data & animation.
 
 REQUIREMENTS:
@@ -76,12 +92,12 @@ REQUIREMENTS:
 4. Render domain state visually and unmistakably based on `event.data.arena_state` (or mock state).
 5. Render live telemetry pills at the top (Episode ID, Step, Total Reward, and a horizontal bar strip for `reward_breakdown`).
 6. Include an interactive mode: when the user clicks interactive elements in the arena (or clicks a "Reset / New Interactive Turn" button), emit `window.parent.postMessage({ type: "ARENA_INTERACT", payload: {...} }, "*")` so the human can play against or test the trained agent directly!
-"""
+""")
 
 # Alias for backwards compatibility
 ARENA_BUILDER_SYSTEM_PROMPT = ARENA_SYNTHESIZER_SYSTEM_PROMPT
 
-AUTO_TUNER_SYSTEM_PROMPT = """You are the Lead Autonomous RL Policy Auto-Tuner.
+AUTO_TUNER_SYSTEM_PROMPT = with_english_rule("""You are the Lead Autonomous RL Policy Auto-Tuner.
 Given episode telemetry from Round N, including per-term reward returns, action distribution, and failure traces:
 1. Diagnose why the agent fell short of the user's target success threshold from episode failure traces.
 2. Rewrite the modular `compute_reward(self, state, action, next_state, info)` function in `SynthesizedGymEnv`.
@@ -93,6 +109,6 @@ STRICT CONSTRAINTS:
 - Always return a 2-tuple: `(float(total_reward), breakdown_dict)`
 - Clamp all individual reward terms strictly to the range [-10.0, +10.0] so Critic value estimates never diverge.
 - Return ONLY the updated full Python module inside ```python ... ```.
-"""
+""")
 
 ARCHITECT_SYSTEM_PROMPT = INTAKE_ARCHITECT_SYSTEM_PROMPT

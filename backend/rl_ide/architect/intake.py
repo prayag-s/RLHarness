@@ -22,7 +22,11 @@ from rl_ide.architect.models import (
     PILLAR_INTERACTION,
 )
 from rl_ide.llm.client import BaseLLMClient, FallbackCodeSynthesizer, get_active_llm_client
-from rl_ide.llm.prompts import INTAKE_ARCHITECT_SYSTEM_PROMPT, ARCHITECT_SYSTEM_PROMPT
+from rl_ide.llm.prompts import (
+    INTAKE_ARCHITECT_SYSTEM_PROMPT,
+    ARCHITECT_SYSTEM_PROMPT,
+    with_english_rule,
+)
 from rl_ide.ingest.loader import IngestedDataset
 from rl_ide.security.constraints import extract_hard_constraints
 
@@ -195,7 +199,10 @@ def _synthesize_blueprint_from_prompt_impl(
                 context_parts.append(f"Conversation Context:\n{history_text}")
 
             full_query = "\n\n".join(context_parts) + "\n\n" + UNIVERSAL_INTAKE_PROMPT
-            raw_json = active_client.generate_json(full_query, system_prompt="You are a Universal RL Domain Architect.")
+            raw_json = active_client.generate_json(
+                full_query,
+                system_prompt=with_english_rule("You are a Universal RL Domain Architect."),
+            )
             if raw_json and isinstance(raw_json, dict) and "domain_title" in raw_json:
                 data_type = "uploaded_dataset" if dataset is not None else "pure_simulation"
                 dataset_id = getattr(dataset, "dataset_id", None) if dataset else None

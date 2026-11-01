@@ -20,6 +20,7 @@ from gymnasium import spaces
 import numpy as np
 
 from rl_ide.architect.models import AgentBlueprintSpec
+from rl_ide.llm.prompts import with_english_rule
 from rl_ide.ingest.loader import IngestedDataset
 from rl_ide.llm.client import BaseLLMClient, create_llm_client, FallbackCodeSynthesizer, get_active_llm_client
 from rl_ide.synthesizer.env_builder import (
@@ -390,7 +391,7 @@ class SandboxSmokeTester:
             try:
                 raw = self.client.generate(
                     prompt,
-                    system_prompt=(
+                    system_prompt=with_english_rule(
                         "You are an expert RL environment engineer. You fix environments whose success "
                         "condition is unreachable, without weakening the task into a trivial one."
                     ),
@@ -613,7 +614,10 @@ class SandboxSmokeTester:
                     f"- interactive_step() returns valid dict\n\n"
                     f"Output the complete corrected Python code in ```python ... ```."
                 )
-                raw = self.client.generate(prompt, system_prompt="You are an Expert Python RL Debugger.")
+                raw = self.client.generate(
+                    prompt,
+                    system_prompt=with_english_rule("You are an Expert Python RL Debugger."),
+                )
                 match = re.search(r"```(?:python)?\s*([\s\S]*?)\s*```", raw)
                 if match:
                     return match.group(1).strip()

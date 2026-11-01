@@ -54,6 +54,7 @@ from rl_ide.autopilot.auto_tuner import AutoTunerAgent
 from rl_ide.autopilot.eval_corpus import EvalCorpusStore, greedy_predictor
 from rl_ide.autopilot.verifier_gate import VerifierGate, VerifierSnapshot, offline_metric
 from rl_ide.llm.client import BaseLLMClient, get_active_llm_client, FallbackCodeSynthesizer, UnconfiguredLLMClient
+from rl_ide.llm.prompts import with_english_rule
 
 
 class StudioActionType(str, Enum):
@@ -326,7 +327,10 @@ class StudioOmniAgent:
                     f"\"requires_retrain\": false, \"surgical_instructions\": \"...\", "
                     f"\"user_facing_summary\": \"...\"}}"
                 )
-                res = self.client.generate_json(prompt, system_prompt="You are a code-aware agentic planner.")
+                res = self.client.generate_json(
+                    with_english_rule(prompt),
+                    system_prompt=with_english_rule("You are a code-aware agentic planner."),
+                )
                 if res and isinstance(res, dict) and "supported" in res and "targets" in res:
                     return ChatActionPlan.model_validate(res)
             except Exception as ex:
@@ -1448,7 +1452,7 @@ class StudioOmniAgent:
                     f"Return the complete updated Python module inside ```python ... ```.\n\n"
                     f"Current code:\n{current_code}"
                 )
-                res = self.client.generate(prompt)
+                res = self.client.generate(with_english_rule(prompt))
                 match = re.search(r"```python\s*([\s\S]*?)```", res)
                 if match and "def compute_reward" in match.group(1):
                     candidate = match.group(1).strip()
@@ -1542,7 +1546,7 @@ class StudioOmniAgent:
                     f"Provide a helpful, precise, conversational response to the user. "
                     f"If the user is asking to modify the arena, agent, or environment, explain clearly what actions you can take."
                 )
-                res = self.client.generate(prompt, timeout=15.0)
+                res = self.client.generate(with_english_rule(prompt), timeout=15.0)
                 if res and res.strip():
                     return res.strip()
             except Exception:
