@@ -59,6 +59,7 @@ def warm_sb3_framework():
         pass
 
 
+@pytest.mark.slow  # trains a PPO policy (~30s) and scores in the 68-90% band run to run
 def test_tictactoe_converges_without_oracle_masking(tictactoe_blueprint: AgentBlueprintSpec, tmp_path: Path):
     """Asserts Tic-Tac-Toe converges on its own merits, unmasked, within 4 rounds."""
     start_time = time.time()

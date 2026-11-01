@@ -1,0 +1,57 @@
+name: Set up the code sandbox
+description: >
+  Installs bubblewrap, makes it able to create user namespaces where the host blocks them, and
+  proves the sandbox boundary actually works before the test suite depends on it.
+
+runs:
+  using: composite
+  steps:
+    - name: Install bubblewrap
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends bubblewrap
+        bwrap --version
+
+    # The suite asserts that generated code runs behind bwrap, so this boundary is not optional:
+    # the job fails if it cannot be established.
+    #
+    # Ubuntu 24.04 ships kernel.apparmor_restrict_unprivileged_userns=1 and no AppArmor profile for
+    # /usr/bin/bwrap, so bwrap may unshare but is denied the first capability-gated call it makes
+    # inside its network namespace. It then aborts with "loopback: Failed RTM_NEWADDR: Operation not
+    # permitted" — a misleading message, because that code path never sets errno. Granting bwrap
+    # (and only bwrap) user namespaces leaves the host-wide restriction in place.
+    # https://bugs.launchpad.net/bugs/2162059
+    - name: Set up the sandbox boundary
+      shell: bash
+      run: |
+        set -euo pipefail
+        probe() {
+          bwrap --ro-bind / / --dev /dev --proc /proc --unshare-net --unshare-pid /usr/bin/true
+        }
+
+        if probe; then
+          echo "network namespace + loopback OK"
+          exit 0
+        fi
+
+        if [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)" = "1" ]; then
+          command -v apparmor_parser > /dev/null || sudo apt-get install -y --no-install-recommends apparmor
+          sudo tee /etc/apparmor.d/bwrap > /dev/null <<'PROFILE'
+        abi <abi/4.0>,
+        include <tunables/global>
+        profile bwrap /usr/bin/bwrap flags=(unconfined) {
+          userns,
+        }
+        PROFILE
+          sudo apparmor_parser -r /etc/apparmor.d/bwrap
+          if probe; then
+            echo "network namespace + loopback OK"
+            exit 0
+          fi
+          echo "::warning::the scoped bwrap profile did not help; relaxing the AppArmor userns restriction"
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+        fi
+
+        probe
+        echo "network namespace + loopback OK"

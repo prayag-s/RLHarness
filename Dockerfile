@@ -18,6 +18,9 @@ WORKDIR /app/frontend
 COPY frontend/package.json frontend/package-lock.json* ./
 RUN npm ci
 COPY frontend/ ./
+# The in-app field guide is imported with ?raw from outside the frontend tree, so the build needs
+# docs/USER_GUIDE.md at /app/docs (GuideModal.tsx reaches it as ../../../docs/USER_GUIDE.md).
+COPY docs/USER_GUIDE.md /app/docs/USER_GUIDE.md
 RUN npm run build
 
 FROM python:3.12-slim AS runtime

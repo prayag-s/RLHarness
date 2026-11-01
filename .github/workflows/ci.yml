@@ -27,12 +27,7 @@ jobs:
 
       # bubblewrap is the boundary generated code runs behind (G2). Without it the sandbox refuses
       # to execute, which several tests assert.
-      - name: Install bubblewrap
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends bubblewrap
-          bwrap --version
-          cat /proc/sys/kernel/unprivileged_userns_clone || true
+      - uses: ./.github/actions/setup-sandbox
 
       - name: Install pinned dependencies
         working-directory: backend
@@ -70,10 +65,7 @@ jobs:
           cache: pip
           cache-dependency-path: backend/requirements-dev.lock
 
-      - name: Install bubblewrap
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends bubblewrap
+      - uses: ./.github/actions/setup-sandbox
 
       - name: Install pinned dependencies
         working-directory: backend
@@ -104,6 +96,10 @@ jobs:
 
   image:
     name: container image builds
+    # Image builds are not part of the push/PR gate: nothing here deploys, it only proves the
+    # Dockerfile still builds. Run it on demand (Actions -> CI -> Run workflow) when touching
+    # the Dockerfile or the frontend build.
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
