@@ -24,6 +24,7 @@ from rl_ide.architect.models import AgentBlueprintSpec
 from rl_ide.llm.prompts import with_english_rule
 from rl_ide.ingest.loader import IngestedDataset
 from rl_ide.llm.client import BaseLLMClient, create_llm_client, FallbackCodeSynthesizer, get_active_llm_client
+from rl_ide.synthesizer.patch import PatchError, extract_functions, replace_function
 from rl_ide.synthesizer.env_builder import (
     extract_python_code,
     instantiate_env,
@@ -42,6 +43,37 @@ def repair_attempts(kind: str = "synthesize") -> int:
     default = 1 if kind == "tune" else 2
     raw = os.environ.get(env_name, "").strip()
     return int(raw) if raw.isdigit() else default
+
+
+def functions_in_traceback(full_traceback: str, code: str, limit: int = 2) -> list[str]:
+    """Names the functions a traceback passed through, innermost first.
+
+    A repair that knows which function broke can return that function instead of re-emitting the
+    module, which is both cheaper and safer: the code that already verified cannot drift.
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return []  # no line map to work from; the caller falls back to a whole-module repair
+    spans = [
+        (node.lineno, node.end_lineno or node.lineno, node.name)
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    names: list[str] = []
+    frame_re = re.compile(r'File "[^"]*", line (\d+)(?:, in ([A-Za-z_]\w*|<module>))?')
+    for match in frame_re.finditer(full_traceback or ""):
+        line = int(match.group(1))
+        enclosing = [span for span in spans if span[0] <= line <= span[1]]
+        name = min(enclosing, key=lambda span: span[1] - span[0])[2] if enclosing else None
+        if name is None:
+            frame = match.group(2)
+            name = frame if frame and frame != "<module>" else None
+        if name and name not in names:
+            names.append(name)
+        if len(names) >= limit:
+            break
+    return names
 
 
 class SecurityViolationError(Exception):
@@ -614,8 +646,18 @@ class SandboxSmokeTester:
             # If shape mismatch in obs or demos, let fallback synthesize clean code
             pass
 
-        # 2. Try LLM repair if available
+        # 2. Try LLM repair if available. When the traceback names the function that broke, repair
+        # that function only: the rest of the module already passed and must not be re-rolled.
         if not isinstance(self.client, FallbackCodeSynthesizer):
+            targets = functions_in_traceback(full_traceback, broken_code)
+            if targets:
+                try:
+                    targeted = self._repair_functions(broken_code, targets, full_traceback)
+                    if targeted:
+                        return targeted
+                except Exception:
+                    pass
+
             try:
                 prompt = (
                     f"The following Gymnasium environment code failed verification checks:\n\n"
@@ -636,9 +678,69 @@ class SandboxSmokeTester:
                 )
                 match = re.search(r"```(?:python)?\s*([\s\S]*?)\s*```", raw)
                 if match:
-                    return match.group(1).strip()
+                    candidate = match.group(1).strip()
+                    # Only a complete module counts as a repair. Accepting a fragment here would
+                    # replace the environment with a bare function and burn the next attempt.
+                    if "class SynthesizedGymEnv" in candidate:
+                        try:
+                            ast.parse(candidate)
+                        except SyntaxError:
+                            return broken_code
+                        return candidate
             except Exception:
                 pass
 
         # 3. No silent substitution: returning a *different* environment would hide the failure.
         return broken_code
+
+    def _repair_functions(
+        self,
+        broken_code: str,
+        targets: list[str],
+        full_traceback: str,
+    ) -> str | None:
+        """Asks for just the failing functions and splices them into the module.
+
+        Returns ``None`` when the answer cannot be applied, so the caller can fall back to a
+        whole-module repair instead of shipping a half-applied patch.
+        """
+        names = ", ".join(f"`{name}()`" for name in targets)
+        prompt = (
+            f"These functions in a Gymnasium environment failed verification: {names}.\n\n"
+            f"```python\n{broken_code}\n```\n\n"
+            f"Traceback:\n{full_traceback}\n\n"
+            f"Return ONLY the replacement definition for {names}, in ONE ```python ... ``` block, "
+            f"and change nothing else.\n"
+            f"Constraints: observation and return shapes match; reset()/step() return finite float32; "
+            f"compute_reward() returns (float, dict); get_demonstrations(32) returns (X_32_N, y_32); "
+            f"interactive_step() returns a dict."
+        )
+        raw = self.client.generate(
+            prompt,
+            system_prompt=with_english_rule("You are an Expert Python RL Debugger."),
+            role="verifier_repair",
+        )
+        if not raw:
+            return None
+
+        # A model that ignored the instruction and rewrote the module is still usable; accepting it
+        # here avoids paying for a second call just to ask again.
+        if "class SynthesizedGymEnv" in raw:
+            match = re.search(r"```(?:python)?\s*([\s\S]*?)\s*```", raw)
+            candidate = (match.group(1) if match else raw).strip()
+            try:
+                ast.parse(candidate)
+            except SyntaxError:
+                return None
+            return candidate
+
+        blocks = extract_functions(raw)
+        if not blocks or any(name not in blocks for name in targets):
+            return None
+        updated = broken_code
+        try:
+            for name in targets:
+                updated = replace_function(updated, blocks[name], name)
+        except PatchError:
+            return None
+        return updated

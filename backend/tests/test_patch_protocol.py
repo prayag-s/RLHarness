@@ -101,3 +101,109 @@ def test_repair_attempts_are_bounded_and_overridable(monkeypatch):
 
     monkeypatch.setenv("RL_IDE_TUNE_MAX_REPAIRS", "0")
     assert repair_attempts("tune") == 0
+
+
+# --- targeted verification repair -------------------------------------------
+
+from rl_ide.architect.models import AgentBlueprintSpec  # noqa: E402
+from rl_ide.llm.client import BaseLLMClient, LLMConfig  # noqa: E402
+from rl_ide.synthesizer.verifier import SandboxSmokeTester, functions_in_traceback  # noqa: E402
+
+TRACEBACK = '''Traceback (most recent call last):
+  File "/tmp/attempt.py", line {line}, in step
+    raise ValueError("boom")
+ValueError: boom'''
+
+
+class _RepairClient(BaseLLMClient):
+    def __init__(self, answer: str):
+        super().__init__(LLMConfig(provider="deepseek", api_key="sk-test", model_name="deepseek-flash"))
+        self.answer = answer
+        self.prompts: list[str] = []
+        self.roles: list[str | None] = []
+
+    def generate(self, prompt, system_prompt=None, timeout=None, role=None):  # noqa: ANN001
+        self.prompts.append(prompt)
+        self.roles.append(role)
+        return self.answer
+
+
+def _traceback_at(code: str, marker: str) -> str:
+    line = next(i for i, text in enumerate(code.splitlines(), 1) if marker in text)
+    return TRACEBACK.format(line=line)
+
+
+def _verifier(client: BaseLLMClient) -> SandboxSmokeTester:
+    return SandboxSmokeTester(llm_client=client)
+
+
+def _blueprint() -> AgentBlueprintSpec:
+    return AgentBlueprintSpec(
+        task_title="T",
+        domain_summary="d",
+        data_source_type="simulated",
+        observation_features=["a"],
+        action_labels=["x", "y"],
+        arena_visual_description="stage",
+        interactive_mode_description="click",
+        success_metric_name="Win (%)",
+    )
+
+
+def test_traceback_names_the_innermost_function():
+    code = "\n".join(
+        [
+            "class E:",
+            "    def reset(self):",
+            "        return 1",
+            "",
+            "    def step(self, action):",
+            "        raise ValueError('boom')",
+            "",
+            "    def compute_reward(self, s, a, ns, info):",
+            "        return 0.0, {}",
+        ]
+    )
+    assert functions_in_traceback(_traceback_at(code, "raise ValueError"), code) == ["step"]
+
+
+def test_repair_returns_only_the_failing_function():
+    client = _RepairClient("```python\ndef step(self, action):\n    return None\n```")
+    repaired = _verifier(client)._repair_code(
+        MODULE, "boom", _traceback_at(MODULE, "self.moves += 1"), _blueprint(), None
+    )
+
+    assert "def step(self, action):\n        return None" in repaired
+    assert "ORIGINAL BODY" in repaired, "the working reward function must not be re-rolled"
+    assert "class SynthesizedGymEnv:" in repaired
+    assert client.roles == ["verifier_repair"]
+    assert "Return ONLY the replacement definition" in client.prompts[0]
+
+
+def test_a_module_answer_is_accepted_without_a_second_call():
+    client = _RepairClient("```python\n" + MODULE.replace("ORIGINAL BODY", "REPAIRED") + "```")
+    repaired = _verifier(client)._repair_code(
+        MODULE, "boom", _traceback_at(MODULE, "self.moves += 1"), _blueprint(), None
+    )
+
+    assert "REPAIRED" in repaired
+    assert len(client.prompts) == 1
+
+
+def test_an_unusable_answer_falls_back_to_a_whole_module_repair():
+    client = _RepairClient("I could not find the bug.")
+    _verifier(client)._repair_code(
+        MODULE, "boom", _traceback_at(MODULE, "self.moves += 1"), _blueprint(), None
+    )
+
+    assert len(client.prompts) == 2
+    assert "complete corrected Python code" in client.prompts[1]
+
+
+def test_an_unmappable_traceback_skips_the_targeted_attempt():
+    client = _RepairClient("```python\n" + MODULE + "```")
+    syntax = '  File "/tmp/x.py", line 3\nSyntaxError: invalid syntax'
+    _verifier(client)._repair_code(MODULE, "syntax", syntax, _blueprint(), None)
+
+    assert len(client.prompts) == 1
+    assert "complete corrected Python code" in client.prompts[0]

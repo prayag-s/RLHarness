@@ -96,4 +96,28 @@ def extract_function_block(raw: str, name: str) -> str | None:
     return None
 
 
-__all__ = ["PatchError", "replace_function", "extract_function_block"]
+def extract_functions(raw: str) -> dict[str, str]:
+    """Maps every top-level function in a model answer to its source.
+
+    A targeted repair may legitimately return two functions (a method and the helper it uses), so
+    this accepts multi-function answers while still refusing anything that is not a definition.
+    """
+    source = (raw or "").strip()
+    fences = re.findall(r"```(?:python)?\s*([\s\S]*?)```", source)
+    for candidate in [*fences, source]:
+        try:
+            tree = ast.parse(textwrap.dedent(candidate).strip("\n") + "\n")
+        except SyntaxError:
+            continue
+        found: dict[str, str] = {}
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                segment = ast.get_source_segment(candidate, node)
+                if segment:
+                    found[node.name] = textwrap.dedent(segment)
+        if found:
+            return found
+    return {}
+
+
+__all__ = ["PatchError", "replace_function", "extract_function_block", "extract_functions"]
