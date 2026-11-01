@@ -292,6 +292,8 @@ P0–P2 are the heart of the complaint; P3–P5 make it coherent and durable. Re
    Registry are explicitly allowed).
 9. Clicking a rail metric scrolls to the entry that produced it.
 10. `handleUnifiedSend`'s two-backend fallback is gone: one composer, one backend contract.
+11. Every surface is selectable and copyable: no page-level `select-none`, each thread entry has a
+    copy button, and the arena's resize drag never leaves the document-wide selection lock on.
 
 ---
 

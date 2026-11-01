@@ -109,7 +109,7 @@ export const ConversationSidebar: React.FC<ConversationSidebarProps> = ({
       />
 
       {/* Drawer Container */}
-      <div className="relative w-84 max-w-full bg-gray-950 border-r border-gray-800 flex flex-col h-full shadow-2xl z-10 select-none animate-in slide-in-from-left duration-200">
+      <div className="relative w-84 max-w-full bg-gray-950 border-r border-gray-800 flex flex-col h-full shadow-2xl z-10 animate-in slide-in-from-left duration-200">
         {/* Drawer Header */}
         <div className="p-4 border-b border-gray-800 flex items-center justify-between bg-gray-900/80">
           <div className="flex items-center space-x-2">

@@ -38,22 +38,25 @@ export const ArenaStage: React.FC<ArenaStageProps> = ({ pulse = 0, ...arenaProps
   }, [])
 
   useEffect(() => {
+    // A release outside the window would otherwise leave the whole app unselectable.
+    const endDrag = () => {
+      draggingRef.current = false
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+    }
     const onMove = (e: MouseEvent) => {
       if (!draggingRef.current) return
       const next = window.innerWidth - e.clientX
       setWidth(Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, next)))
     }
-    const onUp = () => {
-      if (!draggingRef.current) return
-      draggingRef.current = false
-      document.body.style.cursor = ''
-      document.body.style.userSelect = ''
-    }
     window.addEventListener('mousemove', onMove)
-    window.addEventListener('mouseup', onUp)
+    window.addEventListener('mouseup', endDrag)
+    window.addEventListener('blur', endDrag)
     return () => {
       window.removeEventListener('mousemove', onMove)
-      window.removeEventListener('mouseup', onUp)
+      window.removeEventListener('mouseup', endDrag)
+      window.removeEventListener('blur', endDrag)
+      endDrag()
     }
   }, [])
 

@@ -1,5 +1,6 @@
 import React, { useState } from 'react'
 import { X, Code, Globe, Copy, Check, FileCode } from 'lucide-react'
+import { copyText } from '../utils/clipboard'
 
 interface CodeInspectorModalProps {
   isOpen: boolean
@@ -22,9 +23,11 @@ export const CodeInspectorModal: React.FC<CodeInspectorModalProps> = ({
   const currentCode = activeTab === 'env' ? envModuleCode : arenaHtml
 
   const handleCopy = () => {
-    navigator.clipboard.writeText(currentCode)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
+    void copyText(currentCode).then((ok) => {
+      if (!ok) return
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    })
   }
 
   return (

@@ -13,6 +13,7 @@ import {
 } from 'lucide-react'
 import { BundleMetadata } from '../types'
 import { fetchBundles } from '../services/api'
+import { copyText } from '../utils/clipboard'
 
 interface RegistryModalProps {
   isOpen: boolean
@@ -49,9 +50,11 @@ export const RegistryModal: React.FC<RegistryModalProps> = ({ isOpen, onClose })
   if (!isOpen) return null
 
   const handleCopy = (text: string, key: string) => {
-    navigator.clipboard.writeText(text)
-    setCopiedKey(key)
-    setTimeout(() => setCopiedKey(null), 2000)
+    void copyText(text).then((ok) => {
+      if (!ok) return
+      setCopiedKey(key)
+      setTimeout(() => setCopiedKey(null), 2000)
+    })
   }
 
   return (

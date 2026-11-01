@@ -1830,6 +1830,11 @@ coach events were not stored at all).
 - **One output language.** Every role prompt (intake, planner, assistant, arena, env, auto-tuner,
   coach judge, verifier) carries a shared `ENGLISH_OUTPUT_RULE`, so user-facing text is English
   whatever language the user writes in; code, identifiers and JSON keys are never translated.
+- **Text is copyable again.** The page-level `select-none` (and the same utility on the scoreboard
+  and the conversation drawer) had made every surface unselectable; it is gone, each thread entry
+  has a copy button (via `frontend/src/utils/clipboard.ts`, which falls back on the legacy copy path
+  when the studio is opened over plain http and `navigator.clipboard` is unavailable), and the
+  arena's resize drag now releases the document-wide selection lock on `blur` as well as `mouseup`.
 
 ### 22.3 Verification
 
@@ -1840,6 +1845,9 @@ coach events were not stored at all).
   check that passed 3/3 in isolation and failed once under a loaded suite run; it does not touch
   the API or the thread.
 - `npm run build` (`tsc` + Vite) passes.
+- Selection/copy verified in the built app: `getComputedStyle(document.body).userSelect` is `auto`
+  (was `none`), a range over thread and guide text yields real text, the thread's copy button flips
+  to *Copied*, and the arena drag lock clears on both `mouseup` and window `blur`.
 
 ### 22.4 Residual risk
 

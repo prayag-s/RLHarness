@@ -112,6 +112,10 @@ Only one party has the turn at a time. While the studio or the trainer is workin
 **queued** rather than injected, and **Stop** hands the turn back to you. Nothing is ever written
 into a turn that someone else is still writing.
 
+Everything you can read, you can copy. Text in the thread, the scoreboard and this guide selects
+normally, and every thread entry carries a **copy** button that puts that message (title and body)
+on the clipboard — handy for pasting a round summary into a ticket or a prompt.
+
 At every arrow in that diagram the **Journey Coach** checks the thing you are about to rely on and tells you when it will not do what you think. It is advisory while you are still deciding, and it stops an expensive build or training run on a structural blocker. Chapter 24 is the full tour; the rest of this book is what it is checking against.
 
 ---

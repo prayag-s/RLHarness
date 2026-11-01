@@ -1,11 +1,13 @@
-import React, { useEffect, useMemo, useRef } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertTriangle,
   ArrowDown,
   Bot,
+  Check,
   CheckCircle2,
   ChevronDown,
   Cog,
+  Copy,
   GraduationCap,
   Layers,
   Play,
@@ -15,6 +17,7 @@ import {
   XCircle,
 } from 'lucide-react'
 import { CoachAction, CoachItem, ThreadEntry, TurnStatus } from '../types'
+import { copyText } from '../utils/clipboard'
 import { CoachCard } from './CoachCard'
 
 interface ThreadViewProps {
@@ -141,6 +144,11 @@ const StageGroup: React.FC<{ entries: ThreadEntry[]; isLive: boolean }> = ({ ent
   )
 }
 
+/** What the copy button puts on the clipboard: the message as it reads in the thread. */
+function entryText(entry: ThreadEntry): string {
+  return [entry.title, entry.body].filter(Boolean).join('\n\n')
+}
+
 const EntryCard: React.FC<{
   entry: ThreadEntry
   onCoachAction: (action: CoachAction, item: CoachItem) => void
@@ -162,6 +170,17 @@ const EntryCard: React.FC<{
 }) => {
   const isUser = entry.actor === 'user'
   const tone = STATUS_TONE[entry.status] || STATUS_TONE.info
+  const [copied, setCopied] = useState(false)
+
+  useEffect(() => {
+    if (!copied) return
+    const id = window.setTimeout(() => setCopied(false), 1600)
+    return () => window.clearTimeout(id)
+  }, [copied])
+
+  const onCopy = async () => {
+    if (await copyText(entryText(entry))) setCopied(true)
+  }
 
   if (entry.kind === 'finding') {
     const item: CoachItem | undefined = entry.data?.item
@@ -214,7 +233,17 @@ const EntryCard: React.FC<{
           {entry.status === 'warning' && <AlertTriangle className="h-3 w-3 text-amber-400" />}
           {entry.status === 'blocked' && <XCircle className="h-3 w-3 text-rose-400" />}
         </span>
-        <span className="text-[10px] text-gray-500 font-mono shrink-0">{clock(entry.at)}</span>
+        <span className="flex items-center gap-1.5 shrink-0">
+          <button
+            onClick={() => void onCopy()}
+            className="rounded p-0.5 text-gray-500 hover:text-gray-200 hover:bg-gray-800/70 transition"
+            title={copied ? 'Copied' : 'Copy this message'}
+            aria-label="Copy this message"
+          >
+            {copied ? <Check className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3" />}
+          </button>
+          <span className="text-[10px] text-gray-500 font-mono">{clock(entry.at)}</span>
+        </span>
       </div>
 
       <p className="text-xs font-medium text-gray-100 leading-snug">{entry.title}</p>

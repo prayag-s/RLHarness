@@ -83,7 +83,7 @@ export const ScoreboardRail: React.FC<ScoreboardRailProps> = ({
     : null
 
   return (
-    <aside className="w-80 shrink-0 flex flex-col h-full border-r border-gray-800 bg-gray-950/80 select-none">
+    <aside className="w-80 shrink-0 flex flex-col h-full border-r border-gray-800 bg-gray-950/80">
       <div className="px-3 py-2 border-b border-gray-800 flex items-center justify-between">
         <span className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-gray-400">
           <Gauge className="h-3.5 w-3.5 text-cyan-400" />
