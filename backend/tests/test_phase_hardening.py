@@ -339,7 +339,7 @@ def test_api_serves_a_shipped_spa_without_shadowing_the_api(tmp_path):
         capture_output=True,
         text=True,
         env=env,
-        cwd=str(Path(__file__).resolve().parents[1]),
+        cwd=str(tmp_path),
     )
     assert result.returncode == 0, result.stderr[-2000:]
     assert "SPA_MOUNTED_OK" in result.stdout

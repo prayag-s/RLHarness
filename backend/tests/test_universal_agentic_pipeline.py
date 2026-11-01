@@ -328,8 +328,9 @@ def test_zero_domain_hardcoding_in_codebase():
         r"_build_cartpole|_build_energy_arbitrage|_build_general_sim|"
         r"cardiac_denial|is_verified_corporate|login_drop_pct|sim-canvas"
     )
+    runtime = Path(__file__).resolve().parent.parent / "rl_ide"
     result = subprocess.run(
-        ["grep", "-rnE", forbidden_pattern, "backend/rl_ide/"],
+        ["grep", "-rnE", forbidden_pattern, str(runtime)],
         capture_output=True,
         text=True,
     )

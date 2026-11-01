@@ -134,7 +134,7 @@ def test_records_from_frame_shuffles_before_truncating():
 # -----------------------------------------------------------------------------
 # Evaluation integrity
 # -----------------------------------------------------------------------------
-def test_evaluation_never_consults_oracle_actions(env):
+def test_evaluation_never_consults_oracle_actions(tmp_path, env):
     """`get_critical_actions` is a tactical oracle; evaluation must not touch it."""
     class OracleTrap(type(env)):
         def get_critical_actions(self):  # pragma: no cover - must never be called
@@ -143,7 +143,7 @@ def test_evaluation_never_consults_oracle_actions(env):
             raise AssertionError("evaluation applied a legality mask the export does not apply")
     trap = OracleTrap(dataset_records=[dict(r) for r in env.records])
     model = PPO("MlpPolicy", trap, device="cpu", verbose=0)
-    controller = AutonomousLoopController(SessionStateStore(base_dir=str(BACKEND_ROOT / "workspaces")))
+    controller = AutonomousLoopController(SessionStateStore(base_dir=str(tmp_path / "workspaces")))
     metric, episodes, illegal = controller.evaluate_policy_deterministic(
         env=trap, model=model, n_eval_episodes=2, round_num=1, split="test"
     )
