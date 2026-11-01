@@ -58,8 +58,8 @@ Everything else in this app is built from these five ideas. Learn them once and 
 
 | Word | Plain meaning | Where you meet it |
 |---|---|---|
-| **Objective** | The job, in English: what the agent should do, in what situation, to what standard | The chat box on the left |
-| **Environment** (also called **Arena**) | The simulated world the agent practises in, including its rules and what counts as a valid move | The centre panel, `env_module.py` |
+| **Objective** | The job, in English: what the agent should do, in what situation, to what standard | The thread, in the centre |
+| **Environment** (also called **Arena**) | The simulated world the agent practises in, including its rules and what counts as a valid move | The arena on the right, `env_module.py` |
 | **Policy** | The agent's decision-making brain | The trained model; **Export Owned Policy** |
 | **Reward** | The score the training algorithm is trying to maximise; it is a *means*, not the goal | `compute_reward()` inside the environment |
 | **Episode** | One complete attempt, from start to finish (one game, one delivery, one claim) | The episode counter and **Replay Episodes** |
@@ -97,6 +97,20 @@ This is the whole product in eight steps. Each step is a chapter later.
 - **Step 6** is how you build intuition and feed the drift monitor.
 - **Step 7** is where you decide whether to trust the result.
 - **Step 8** is a file you can run anywhere.
+
+### Where everything happens
+
+The studio has one conversation and one clock.
+
+| Surface | What it is | What you do there |
+|---|---|---|
+| **Thread** (centre) | Every event, in order: your instruction, the studio's plan, arena changes, coach findings, each training round, every tuning decision | Read what happened; give the next instruction |
+| **Scoreboard** (left) | The numbers only: target vs current, held-out scorecard, Crossfire verdict, drift, rounds, spend | Glance; click a round to jump to it in the thread |
+| **Arena** (right) | The world the agent plays in | Preview, play, inspect — it never narrates |
+
+Only one party has the turn at a time. While the studio or the trainer is working, the input is
+**queued** rather than injected, and **Stop** hands the turn back to you. Nothing is ever written
+into a turn that someone else is still writing.
 
 At every arrow in that diagram the **Journey Coach** checks the thing you are about to rely on and tells you when it will not do what you think. It is advisory while you are still deciding, and it stops an expensive build or training run on a structural blocker. Chapter 24 is the full tour; the rest of this book is what it is checking against.
 
@@ -202,7 +216,7 @@ The architect will use the dataset's columns to define observations and actions.
 
 ## 6. Preview, refine, and lock the arena
 
-After you send the objective, the left-hand **Studio Activity Stream** shows **Architect Evaluation** entries while the arena is generated. The centre panel then shows a **✨ Mock Preview** with a banner asking you to approve it.
+After you send the objective, the thread shows the studio's progress entries (collapsed into one row, expandable) while the arena is generated. The arena on the right then shows a **✨ Mock Preview** with a banner asking you to approve it.
 
 ### 6.1 The three centre tabs
 
@@ -377,9 +391,23 @@ Success rates on stochastic tasks have confidence intervals. A scorecard that re
 
 ---
 
-## 10. Talking to the agent (the chat is a control surface)
+## 10. Talking to the agent (the thread is a control surface)
 
-**Studio Chat** is not a general chatbot. It routes your instruction to one or more execution layers: environment code, reward code, inference strategy, arena UI, or training parameters. The architect classifies your intent before acting.
+The thread is the only place work is narrated, and only one party may write in it at a time:
+
+| Turn state | Who may act | What you see |
+|---|---|---|
+| **Your turn** | You | The input is live; **Send** starts a turn |
+| **Studio has the turn** | Studio or Trainer | Live entries; **Stop** is available; anything you type is queued for the next turn |
+| **A decision is waiting** | You | The last entry asks a question or reports a blocker; answer below |
+
+A turn always ends with one terminal entry — a question, a blocker, a result, or an answer — and only
+then does the input come back. **Esc** stops a running turn.
+
+The studio always answers in English, even if you write in another language. Code, identifiers,
+column names and file contents are never translated.
+
+The instruction you send is not a general chatbot message. It routes your instruction to one or more execution layers: environment code, reward code, inference strategy, arena UI, or training parameters. The architect classifies your intent before acting.
 
 ### 10.1 What you can ask for
 
@@ -551,7 +579,7 @@ The dollar figure next to it (`$0.51 spent`) is metered provider spend for the a
 
 ## 13. The held-out scorecard
 
-The **Held-Out Scorecard** in the telemetry panel is the most important number in the product. It is the closest thing to "how will this behave on data it has not seen?"
+The **Held-Out Scorecard** in the scoreboard on the left is the most important number in the product. It is the closest thing to "how will this behave on data it has not seen?"
 
 ### 13.1 Field by field
 
@@ -615,7 +643,7 @@ Drift is **not** accuracy. A drifted agent may still be right today. Drift says 
 
 ## 15. The Trust drawer: Crossfire, Corpus, Gate
 
-Click **Trust** in the header. Three tabs. The Coach's result card sits inside the scorecard and links here: Crossfire answers "may I claim it?", while the Coach answers "did I understand it?" (chapter 24).
+Click **Trust** in the header, or open the **Held-out scorecard** entry in the thread and click **Review evidence**. Both lead to the same drawer. Three tabs. The Coach's finding appears in the same thread: Crossfire answers "may I claim it?", while the Coach answers "did I understand it?" (chapter 24).
 
 ### 15.1 Crossfire — "am I allowed to call this proven?"
 
@@ -781,7 +809,7 @@ For a new agent, budget roughly:
 | Plateau auto-tunes | 0–2 calls depending on rounds |
 | Final explanation / summary | 1 call |
 
-If you find yourself above ~25 calls for one agent, something is looping. Check the activity stream for repeated synthesis, and simplify the objective.
+If you find yourself above ~25 calls for one agent, something is looping. Check the thread for repeated synthesis entries, and simplify the objective.
 
 ---
 
@@ -893,11 +921,11 @@ Attach `invoices.csv` with columns including `amount`, `risk_score`, `department
 | Corpus shows `regressed` | A previously approved case now fails | Inspect the case; fix or waive with a reason |
 | Export greyed out | No trained policy yet | Train at least one round |
 | Export fails parity | ONNX disagrees with the trained policy | Do not ship; report the failure |
-| Arena looks generic | The synthesised arena is still pending | Read the activity stream; wait or ask for a change |
+| Arena looks generic | The synthesised arena is still pending | Read the thread; wait or ask for a change |
 | Spend climbing with no progress | Repeated synthesis loop | Simplify the objective; switch to a cheaper model; cap budget |
-| **Coach: blocked before training** | A structural finding: zero budget, empty or one-class data, no label for a supervised metric, no action space | Open the Coach card, apply the fix, send the request again. A blocker cannot be acknowledged away |
+| **Coach: blocked before training** | A structural finding: zero budget, empty or one-class data, no label for a supervised metric, no action space | Use the fix on the coach entry in the thread, then send the request again. A blocker cannot be acknowledged away |
 | **Coach: warning will not go away** | You changed nothing, so the evidence is unchanged | Fix the artefact, or acknowledge the warning; it stays quiet until the evidence changes |
-| **Coach panel is empty** | No checkpoint has been evaluated for this conversation yet | Send an objective, attach data, or finish a round; the first card appears with intake |
+| **No coach entry yet** | No checkpoint has been evaluated for this conversation yet | Send an objective, attach data, or finish a round; the first finding appears with intake |
 
 ---
 
@@ -1015,7 +1043,7 @@ Attach `invoices.csv` with columns including `amount`, `risk_score`, `department
 
 **Coach checklist**
 
-- [ ] No blocker in the Coach card before you lock the arena
+- [ ] No coach blocker in the thread before you lock the arena
 - [ ] Objective has a measurable success metric
 - [ ] Every "never" rule has a threshold or a penalty behind it
 - [ ] Dataset has a label column and a clearly named outcome
@@ -1034,16 +1062,17 @@ The rest of this book is advice. The Coach is that advice turned into checks tha
 you are about to spend time or money. It is not a second chatbot and it is not a score. It is a short
 list of "this will not do what you think" findings, and each finding carries the button that fixes it.
 
-You meet it in three places:
+Coach findings appear as entries in the thread, authored by **Coach**, at the moment they are
+produced:
 
 | Where | What it shows |
 |---|---|
-| **Inline card** above the chat input | Objective, data and budget findings for this conversation |
-| **Inside the Held-Out Scorecard** | What the result means and what to do next |
-| **Coach** button in the header | Everything still open, grouped by stage |
+| **In the turn that caused it** | Objective, data, budget, arena or result findings, with the button that fixes each one |
+| **As the turn's last entry** | A blocker, which stops the run before it is paid for |
 
-The badge on the **Coach** button is the count of unresolved findings. Red means a blocker; amber
-means a warning. Opening the panel performs no mutation: it is a read.
+There is no separate coach panel and no badge to hunt for: the finding sits in the conversation next
+to the decision it belongs to, and it appears exactly once. Acknowledging a warning marks it quiet
+until the evidence actually changes.
 
 ### 24.1 The six checkpoints
 
@@ -1130,8 +1159,8 @@ This is the part that keeps the Coach honest:
 - **It fails open.** If the provider is down, the rules still run and the card says the model was
   skipped. A coach failure never breaks the studio.
 
-The Coach panel footer shows how many judge calls this conversation has used. The calls are also in
-the normal usage ledger (§16).
+Judge calls are billed like any other model call, so they show up in the spend figure on the
+scoreboard and in the normal usage ledger (§16).
 
 ### 24.6 A worked example
 

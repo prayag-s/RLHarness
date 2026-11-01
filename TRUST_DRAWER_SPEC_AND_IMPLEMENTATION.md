@@ -2,7 +2,11 @@
 
 **Status:** implemented (`cd6270f`). This document is the design record for the operator UI of the
 Phase P3 / v5.5 controls (golden corpus, verifier gate, Crossfire protocol, cost ledger, passive
-harvest). It supersedes nothing; it closes the gap between *"the controls exist"* and *"a user can
+harvest).
+
+> **Surface update (2026-11-01):** the drawer is now opened from the *evidence* entry in the studio
+> thread (the held-out scorecard or the Crossfire verdict) instead of a header button. Its contents
+> are unchanged — see [`UNIFIED_CHAT_UX_SPEC_AND_PLAN.md`](./UNIFIED_CHAT_UX_SPEC_AND_PLAN.md). It supersedes nothing; it closes the gap between *"the controls exist"* and *"a user can
 operate them without curl"*.
 
 Related: `PHASE_P3_V5_5_REFINED_EXECUTION_PLAN.md` (what the controls do),

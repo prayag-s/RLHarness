@@ -21,6 +21,8 @@ import {
   UsageReport,
   CoachListResponse,
   CoachReport,
+  ThreadResponse,
+  TurnStatus,
 } from '../types'
 
 const API_V4 = '/api/v4'
@@ -369,6 +371,35 @@ export async function fetchConversation(conversationId: string): Promise<Convers
   const res = await apiFetch(`/conversations/${conversationId}`)
   if (!res.ok) {
     throw new Error(`Failed to load conversation ${conversationId}`)
+  }
+  return res.json()
+}
+
+/**
+ * The single ordered transcript. `sinceSeq` makes this cheap to poll while a turn is running.
+ */
+export async function fetchThread(
+  conversationId: string,
+  sinceSeq = 0,
+  limit = 500,
+): Promise<ThreadResponse> {
+  const params = new URLSearchParams()
+  if (sinceSeq > 0) params.set('since_seq', String(sinceSeq))
+  params.set('limit', String(limit))
+  const res = await apiFetch(`/conversations/${conversationId}/thread?${params.toString()}`)
+  if (!res.ok) {
+    throw new Error(`Failed to load the thread for ${conversationId}`)
+  }
+  return res.json()
+}
+
+/** Stop is the only way to interrupt a turn, and it always hands the conversation back. */
+export async function stopTurn(
+  conversationId: string,
+): Promise<{ conversation_id: string; cancelled_job: string | null; turn: TurnStatus }> {
+  const res = await apiFetch(`/conversations/${conversationId}/turn/stop`, { method: 'POST' })
+  if (!res.ok) {
+    throw new Error('Could not stop the current turn')
   }
   return res.json()
 }

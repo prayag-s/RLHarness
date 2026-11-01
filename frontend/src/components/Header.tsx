@@ -3,14 +3,13 @@ import {
   Sparkles,
   Settings,
   Archive,
-  Download,
+  BookOpen,
   CheckCircle2,
   Activity,
   AlertTriangle,
+  ShieldCheck,
   Zap,
   History,
-  ShieldCheck,
-  BookOpen,
 } from 'lucide-react'
 import { LLMSettings } from '../types'
 
@@ -18,11 +17,6 @@ interface HeaderProps {
   llmSettings: LLMSettings
   isLLMVerified?: boolean
   onOpenSettings: () => void
-  onOpenRegistry: () => void
-  registryCount: number
-  onExport: () => void
-  isExporting: boolean
-  hasActivePolicy: boolean
   driftStatus?: string
   driftDetail?: string
   driftSamples?: number
@@ -30,25 +24,19 @@ interface HeaderProps {
   conversationCount?: number
   usageCostUsd?: number
   usageCalls?: number
+  isCheckingLLM?: boolean
+  onOpenGuide: () => void
   onOpenTrust: () => void
   trustVerdict?: string
   trustBlockers?: number
-  onOpenGuide: () => void
-  onOpenCoach: () => void
-  coachBlockers?: number
-  coachWarnings?: number
-  isCheckingLLM?: boolean
+  onOpenRegistry: () => void
+  registryCount: number
 }
 
 export const Header: React.FC<HeaderProps> = ({
   llmSettings,
   isLLMVerified = false,
   onOpenSettings,
-  onOpenRegistry,
-  registryCount,
-  onExport,
-  isExporting,
-  hasActivePolicy,
   driftStatus = 'unmonitored',
   driftDetail,
   driftSamples = 0,
@@ -56,14 +44,13 @@ export const Header: React.FC<HeaderProps> = ({
   conversationCount = 0,
   usageCostUsd = 0,
   usageCalls = 0,
+  isCheckingLLM = false,
+  onOpenGuide,
   onOpenTrust,
   trustVerdict,
   trustBlockers = 0,
-  onOpenGuide,
-  onOpenCoach,
-  coachBlockers = 0,
-  coachWarnings = 0,
-  isCheckingLLM = false,
+  onOpenRegistry,
+  registryCount,
 }) => {
   const getProviderLabel = () => {
     switch (llmSettings.provider) {
@@ -231,37 +218,6 @@ export const Header: React.FC<HeaderProps> = ({
           <span>Guide</span>
         </button>
 
-        {/* Journey Coach: findings that must be fixed before a run is paid for */}
-        <button
-          onClick={onOpenCoach}
-          className={`flex items-center space-x-1.5 px-3 py-1 rounded-lg text-xs font-medium border transition ${
-            coachBlockers > 0
-              ? 'bg-rose-950/50 border-rose-800/70 text-rose-300 hover:border-rose-700'
-              : coachWarnings > 0
-                ? 'bg-amber-950/40 border-amber-800/60 text-amber-300 hover:border-amber-700'
-                : 'bg-gray-900 border-gray-700 text-gray-200 hover:border-gray-600'
-          }`}
-          title={
-            coachBlockers > 0
-              ? `${coachBlockers} blocking finding(s) must be fixed before training`
-              : coachWarnings > 0
-                ? `${coachWarnings} coach warning(s) for this conversation`
-                : 'Objective, data, budget and result findings'
-          }
-        >
-          <Sparkles className="h-3.5 w-3.5 opacity-80" />
-          <span>Coach</span>
-          {coachBlockers > 0 ? (
-            <span className="px-1.5 py-0.2 rounded-full bg-rose-900/80 border border-rose-700/60 text-rose-200 text-[10px] font-mono">
-              {coachBlockers}
-            </span>
-          ) : coachWarnings > 0 ? (
-            <span className="px-1.5 py-0.2 rounded-full bg-amber-900/80 border border-amber-700/60 text-amber-200 text-[10px] font-mono">
-              {coachWarnings}
-            </span>
-          ) : null}
-        </button>
-
         {/* Trust & Provenance: the corpus, the pre-registered verdict, the gate history */}
         <button
           onClick={onOpenTrust}
@@ -293,7 +249,7 @@ export const Header: React.FC<HeaderProps> = ({
         <button
           onClick={onOpenRegistry}
           className="flex items-center space-x-1.5 px-3 py-1 rounded-lg bg-gray-900 border border-gray-700 hover:border-gray-600 text-gray-200 text-xs font-medium transition"
-          title="Open Catalog of Packaged .runbundle Policies"
+          title="Open the catalog of packaged .runbundle policies"
         >
           <Archive className="h-3.5 w-3.5 text-gray-400" />
           <span>Policy Registry</span>
@@ -302,21 +258,6 @@ export const Header: React.FC<HeaderProps> = ({
               {registryCount}
             </span>
           )}
-        </button>
-
-        {/* Export Owned Policy (.onnx) CTA Button */}
-        <button
-          onClick={onExport}
-          disabled={isExporting || !hasActivePolicy}
-          className={`flex items-center space-x-2 px-3.5 py-1.5 rounded-lg text-xs font-bold transition shadow-md ${
-            hasActivePolicy
-              ? 'bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white shadow-emerald-950/40 ring-1 ring-emerald-400/30'
-              : 'bg-gray-800 text-gray-500 border border-gray-700 cursor-not-allowed opacity-60'
-          }`}
-          title={hasActivePolicy ? 'Package policy to standalone ONNX .runbundle' : 'Train an agent first to export'}
-        >
-          <Download className={`h-4 w-4 ${isExporting ? 'animate-bounce' : ''}`} />
-          <span>{isExporting ? 'Packaging .runbundle...' : 'Export Owned Policy (.onnx)'}</span>
         </button>
       </div>
     </header>

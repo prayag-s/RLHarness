@@ -1,8 +1,9 @@
-import React, { useState, useEffect, useRef } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Header } from './components/Header'
-import { ArchitectPanel } from './components/ArchitectPanel'
-import { SandboxedArenaIframe } from './components/SandboxedArenaIframe'
-import { TelemetryPanel } from './components/TelemetryPanel'
+import { ScoreboardRail } from './components/ScoreboardRail'
+import { ThreadView } from './components/ThreadView'
+import { TurnComposer } from './components/TurnComposer'
+import { ArenaStage } from './components/ArenaStage'
 import { SettingsModal } from './components/SettingsModal'
 import { LLMVerificationGateModal } from './components/LLMVerificationGateModal'
 import { RegistryModal } from './components/RegistryModal'
@@ -10,19 +11,14 @@ import { CodeInspectorModal } from './components/CodeInspectorModal'
 import { SQLIngestModal } from './components/SQLIngestModal'
 import { ConversationSidebar } from './components/ConversationSidebar'
 import { TrustPanel } from './components/TrustPanel'
-import { CoachPanel } from './components/CoachPanel'
 
 import {
-  AgentBlueprintSpec,
-  IntakeResponse,
   SessionState,
   RoundSnapshot,
   EpisodeLog,
   LLMSettings,
   IngestedDatasetSummary,
-  ActivityTimelineItem,
   ConversationSummary,
-  ConversationDetail,
   TrainingParams,
   StudioChatResponse,
   Scorecard,
@@ -31,20 +27,15 @@ import {
   ObservedStep,
   CoachAction,
   CoachItem,
-  CoachReport,
+  ThreadEntry,
+  TurnStatus,
 } from './types'
 
 import {
   ApiError,
-  chatWithArchitect,
   chatWithStudioOmni,
   getUsage,
-  lockConversationArena,
   updateArenaLook,
-  startSynthesisSession,
-  fetchSession,
-  interactSession,
-  nudgeSession,
   rollbackSession,
   exportSessionPolicy,
   fetchBundles,
@@ -57,8 +48,8 @@ import {
   deleteConversation,
   clearAllConversations,
   acknowledgeGuidance,
-  evaluateGuidance,
-  fetchGuidance,
+  fetchThread,
+  stopTurn,
 } from './services/api'
 
 // The field guide (Markdown + renderer) is only needed when opened, so keep it out of the
@@ -72,29 +63,36 @@ function isModelRequired(err: unknown): boolean {
   return err instanceof ApiError && err.needsModel
 }
 
+const THREAD_POLL_MS = 1500
+const WS_SYNC_DEBOUNCE_MS = 300
+
+/**
+ * One chat, one clock.
+ *
+ * Every event — your instruction, the studio's plan, the arena, the coach, each training round,
+ * every tuning decision — arrives in a single ordered thread, and only one party may append to it
+ * at a time. Numbers live in the scoreboard beside it; see UNIFIED_CHAT_UX_SPEC_AND_PLAN.md.
+ */
 export const App: React.FC = () => {
-  // Session & Training State
+  // Session & training state (the numbers the scoreboard renders)
   const [activeSession, setActiveSession] = useState<SessionState | null>(null)
-  const [isSynthesizing, setIsSynthesizing] = useState(false)
   const [isTraining, setIsTraining] = useState(false)
   const [isExporting, setIsExporting] = useState(false)
   const [isRollingBack, setIsRollingBack] = useState(false)
 
-  // Arena & Code State
+  // Arena & code
   const [arenaHtml, setArenaHtml] = useState<string>('')
   const [arenaLocked, setArenaLocked] = useState<boolean>(false)
-  // Arena provenance and progress, so a generic preview is never mistaken for the bespoke canvas
-  // and an in-flight synthesis never looks like a broken generator (G15).
   const [arenaSource, setArenaSource] = useState<ArenaSource | null>(null)
   const [arenaPending, setArenaPending] = useState<boolean>(false)
   const [arenaError, setArenaError] = useState<string | null>(null)
   const [arenaStage, setArenaStage] = useState<string>('')
+  const [arenaPulse, setArenaPulse] = useState<number>(0)
   const [envModuleCode, setEnvModuleCode] = useState<string>('')
   const [latestFrame, setLatestFrame] = useState<Record<string, any> | undefined>(undefined)
   const [episodes, setEpisodes] = useState<EpisodeLog[]>([])
-  const chatInputRef = useRef<HTMLInputElement>(null)
 
-  // Telemetry & Metrics
+  // Metrics
   const [currentMetric, setCurrentMetric] = useState<number>(0)
   const [targetThreshold, setTargetThreshold] = useState<number>(85)
   const [targetMetricName, setTargetMetricName] = useState<string>('Success / Win Rate')
@@ -102,16 +100,25 @@ export const App: React.FC = () => {
   const [maxRounds, setMaxRounds] = useState<number>(4)
   const [roundHistory, setRoundHistory] = useState<RoundSnapshot[]>([])
   const [scorecard, setScorecard] = useState<Scorecard | null>(null)
-  // Live drift, scored by the backend on every /interact against the training baseline.
   const [driftStatus, setDriftStatus] = useState<string>('unmonitored')
   const [driftDetail, setDriftDetail] = useState<string>('')
   const [driftSamples, setDriftSamples] = useState<number>(0)
 
-  // Dataset & Timeline
+  // Dataset
   const [attachedDataset, setAttachedDataset] = useState<IngestedDatasetSummary | null>(null)
-  const [timeline, setTimeline] = useState<ActivityTimelineItem[]>([])
 
-  // Conversation Persistence State
+  // The thread: the only place work is narrated
+  const [threadEntries, setThreadEntries] = useState<ThreadEntry[]>([])
+  const [turn, setTurn] = useState<TurnStatus | null>(null)
+  const [pendingEntries, setPendingEntries] = useState<ThreadEntry[]>([])
+  const [notices, setNotices] = useState<ThreadEntry[]>([])
+  const [queuedMessage, setQueuedMessage] = useState<string | null>(null)
+  const [isSending, setIsSending] = useState(false)
+  const [isStopping, setIsStopping] = useState(false)
+  const [focusedSeq, setFocusedSeq] = useState<number | null>(null)
+  const [isLoadingThread, setIsLoadingThread] = useState(false)
+
+  // Conversation persistence
   const [isConversationsOpen, setIsConversationsOpen] = useState(false)
   const [conversations, setConversations] = useState<ConversationSummary[]>([])
   const [activeConversationId, setActiveConversationId] = useState<string | undefined>(undefined)
@@ -122,42 +129,30 @@ export const App: React.FC = () => {
     target_metric_threshold: 90,
   })
 
-  // Trust surface: corpus / Crossfire / gate history, plus the last step the user inspected.
+  // Drawers & modals
   const [isTrustOpen, setIsTrustOpen] = useState(false)
   const [isGuideOpen, setIsGuideOpen] = useState(false)
   const [guideSection, setGuideSection] = useState<string | null>(null)
-  const [isCoachOpen, setIsCoachOpen] = useState(false)
-  const [coachReport, setCoachReport] = useState<CoachReport | null>(null)
-  const [resultsGuidance, setResultsGuidance] = useState<CoachReport | null>(null)
-  const [coachCounts, setCoachCounts] = useState<{ blocker: number; warning: number }>({
-    blocker: 0,
-    warning: 0,
-  })
-  const activeConversationIdRef = useRef<string | undefined>(undefined)
-  const [lastStep, setLastStep] = useState<ObservedStep | null>(null)
-  const [trustRefreshKey, setTrustRefreshKey] = useState(0)
-
-  // Modals & Mandatory LLM Gate
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const [isRegistryOpen, setIsRegistryOpen] = useState(false)
   const [isCodeInspectorOpen, setIsCodeInspectorOpen] = useState(false)
   const [isSQLModalOpen, setIsSQLModalOpen] = useState(false)
   const [registryCount, setRegistryCount] = useState(0)
   const [usage, setUsage] = useState<{ calls: number; cost_usd: number }>({ calls: 0, cost_usd: 0 })
+  const [lastStep, setLastStep] = useState<ObservedStep | null>(null)
+  const [trustRefreshKey, setTrustRefreshKey] = useState(0)
 
-  // Mandatory LLM Verification State
+  // Mandatory LLM gate
   const [isLLMVerified, setIsLLMVerified] = useState<boolean>(false)
   const [isCheckingLLM, setIsCheckingLLM] = useState<boolean>(true)
   const [isGateModalOpen, setIsGateModalOpen] = useState<boolean>(false)
-
-  // LLM Settings
   const [llmSettings, setLlmSettings] = useState<LLMSettings>(() => {
     const saved = localStorage.getItem('rl_ide_v4_llm_settings')
     if (saved) {
       try {
         return JSON.parse(saved)
       } catch {
-        // fallback
+        // fall through to defaults
       }
     }
     return {
@@ -168,123 +163,109 @@ export const App: React.FC = () => {
     }
   })
 
+  const wsRef = useRef<WebSocket | null>(null)
+  const seqRef = useRef(0)
+  const activeConversationRef = useRef<string | undefined>(undefined)
+  const syncTimerRef = useRef<number | null>(null)
+  const chatInputRef = useRef<HTMLInputElement>(null)
+
   useEffect(() => {
-    activeConversationIdRef.current = activeConversationId
+    seqRef.current = threadEntries.length ? threadEntries[threadEntries.length - 1].seq : 0
+  }, [threadEntries])
+
+  useEffect(() => {
+    activeConversationRef.current = activeConversationId
   }, [activeConversationId])
 
-  // The coach is advisory to the shell: a failed count or evaluation must never break the studio.
-  const refreshCoachSummary = async (conversationId?: string) => {
-    const cid = conversationId || activeConversationIdRef.current
-    if (!cid) {
-      setCoachCounts({ blocker: 0, warning: 0 })
-      return
-    }
-    try {
-      const data = await fetchGuidance(cid)
-      setCoachCounts({
-        blocker: data.counts.blocker || 0,
-        warning: data.counts.warning || 0,
+  const pushNotice = useCallback((title: string, body: string, status: ThreadEntry['status']) => {
+    setNotices((prev) => [
+      ...prev,
+      {
+        seq: Number.MAX_SAFE_INTEGER - prev.length,
+        turn_id: 'notice',
+        actor: 'system',
+        kind: 'error',
+        status,
+        title,
+        body,
+        at: new Date().toISOString(),
+      },
+    ])
+  }, [])
+
+  const clearNotices = useCallback(() => setNotices([]), [])
+
+  // ---------------------------------------------------------------- thread I/O
+
+  const syncThread = useCallback(
+    async (conversationId: string, opts: { reset?: boolean } = {}) => {
+      const since = opts.reset ? 0 : seqRef.current
+      const data = await fetchThread(conversationId, since)
+      setThreadEntries((prev) => {
+        if (opts.reset) return data.entries
+        const seen = new Set(prev.map((e) => e.seq))
+        const appended = data.entries.filter((e) => !seen.has(e.seq))
+        return appended.length ? [...prev, ...appended] : prev
       })
+      setTurn(data.turn)
+      return data.turn
+    },
+    [],
+  )
+
+  const scheduleSync = useCallback(
+    (conversationId: string) => {
+      if (syncTimerRef.current) window.clearTimeout(syncTimerRef.current)
+      syncTimerRef.current = window.setTimeout(() => {
+        void syncThread(conversationId).catch(() => undefined)
+      }, WS_SYNC_DEBOUNCE_MS)
+    },
+    [syncThread],
+  )
+
+  // ------------------------------------------------------------- conversations
+
+  const loadConversationsList = useCallback(async () => {
+    try {
+      setIsLoadingConversations(true)
+      setConversations(await fetchConversations())
+    } catch (e) {
+      console.warn('Failed to load conversations', e)
+    } finally {
+      setIsLoadingConversations(false)
+    }
+  }, [])
+
+  const refreshUsage = useCallback(async (cid: string | null | undefined) => {
+    try {
+      const report = await getUsage(cid || undefined)
+      setUsage({ calls: report.totals.calls, cost_usd: report.totals.cost_usd })
     } catch {
-      // Keep the last known counts; the next evaluation will refresh them.
+      // usage is informational; never block the studio on it
     }
-  }
+  }, [])
 
-  const refreshResultsGuidance = async (conversationId: string) => {
-    try {
-      const report = await evaluateGuidance(conversationId, 'results')
-      setResultsGuidance(report)
-      void refreshCoachSummary(conversationId)
-    } catch (err) {
-      console.warn('Coach results evaluation failed', err)
-    }
-  }
+  useEffect(() => {
+    void loadConversationsList()
+  }, [loadConversationsList])
 
-  const markAcknowledged = (report: CoachReport | null, item: CoachItem): CoachReport | null => {
-    if (!report) return report
-    return {
-      ...report,
-      items: report.items.map((candidate) =>
-        candidate.rule_id === item.rule_id &&
-        (candidate.fingerprint || candidate.title) === (item.fingerprint || item.title)
-          ? { ...candidate, status: 'acknowledged' }
-          : candidate,
-      ),
-    }
-  }
+  useEffect(() => {
+    void refreshUsage(activeConversationId)
+  }, [activeConversationId, refreshUsage])
 
-  const handleCoachAction = async (action: CoachAction, item: CoachItem) => {
-    if (action.kind === 'apply_params' || action.kind === 'run_episodes') {
-      const patch = action.payload || {}
-      setTrainingParams((prev) => ({
-        ...prev,
-        ...(patch.max_auto_tune_rounds !== undefined
-          ? { max_auto_tune_rounds: Number(patch.max_auto_tune_rounds) }
-          : {}),
-        ...(patch.episodes_per_round !== undefined
-          ? { episodes_per_round: Number(patch.episodes_per_round) }
-          : {}),
-        ...(patch.target_metric_threshold !== undefined
-          ? { target_metric_threshold: Number(patch.target_metric_threshold) }
-          : {}),
-      }))
-      addTimelineItem('Coach recommendation applied', action.label, 'synthesis', 'success')
-      return
-    }
+  useEffect(() => {
+    fetchBundles()
+      .then((bundles) => setRegistryCount(bundles.length))
+      .catch(() => undefined)
+  }, [isRegistryOpen])
 
-    if (action.kind === 'open_guide') {
-      setGuideSection(String(action.payload?.section || '') || null)
-      setIsGuideOpen(true)
-      return
-    }
+  // -------------------------------------------------------------- LLM startup
 
-    const message =
-      action.kind === 'use_objective'
-        ? String(action.payload?.objective || '')
-        : String(action.payload?.message || '')
-    if (!message) return
-
-    if (action.kind === 'use_objective') {
-      setCoachReport(null)
-    }
-    addTimelineItem('Coach action', action.label, 'synthesis', 'info')
-    try {
-      await handleSendStudioMessage(message)
-    } catch (err: any) {
-      addTimelineItem(
-        'Coach action failed',
-        err?.message || 'Could not apply the fix',
-        'error',
-        'warning',
-      )
-    }
-  }
-
-  const handleAcknowledgeCoach = async (item: CoachItem) => {
-    const cid = activeConversationIdRef.current
-    if (!cid) return
-    try {
-      await acknowledgeGuidance(cid, item.rule_id, item.fingerprint)
-      setCoachReport((prev) => markAcknowledged(prev, item))
-      setResultsGuidance((prev) => markAcknowledged(prev, item))
-      void refreshCoachSummary(cid)
-    } catch (err: any) {
-      addTimelineItem(
-        'Coach acknowledgement failed',
-        err?.message || 'Could not acknowledge the finding',
-        'error',
-        'warning',
-      )
-    }
-  }
-
-  // Mandatory LLM Key Verification on Startup
   useEffect(() => {
     let isMounted = true
     async function verifyStartupCredentials() {
       setIsCheckingLLM(true)
       try {
-        // 1. Check if backend already has an active verified LLM
         const status = await getLLMStatus()
         if (status.is_verified) {
           if (isMounted) {
@@ -300,7 +281,6 @@ export const App: React.FC = () => {
           return
         }
 
-        // 2. If backend is not verified, check if localStorage has saved credentials to test
         const saved = localStorage.getItem('rl_ide_v4_llm_settings')
         if (saved) {
           try {
@@ -312,28 +292,20 @@ export const App: React.FC = () => {
                   setIsLLMVerified(true)
                   setIsGateModalOpen(false)
                   setLlmSettings(parsed)
-                  addTimelineItem(
-                    'LLM Connection Verified ⚡',
-                    `Active engine: ${parsed.provider.toUpperCase()} (${parsed.modelName || 'default'})`,
-                    'info',
-                    'success',
-                  )
                 }
                 return
               }
             }
           } catch {
-            // Credentials failed verification
+            // Credentials failed verification; stay in explore mode.
           }
         }
 
-        // 3. Not verified: stay in explore mode. The studio, uploads and existing agents keep
-        // working; only synthesis opens the setup gate (G13).
         if (isMounted) {
           setIsLLMVerified(false)
           setIsGateModalOpen(false)
         }
-      } catch (err) {
+      } catch {
         if (isMounted) {
           setIsLLMVerified(false)
           setIsGateModalOpen(false)
@@ -343,80 +315,28 @@ export const App: React.FC = () => {
       }
     }
 
-    verifyStartupCredentials()
+    void verifyStartupCredentials()
     return () => {
       isMounted = false
     }
   }, [])
 
-  const wsRef = useRef<WebSocket | null>(null)
-
-  // Cleanup WebSocket on unmount
-  useEffect(() => {
-    return () => {
-      if (wsRef.current) {
-        wsRef.current.close()
-        wsRef.current = null
-      }
-    }
-  }, [])
-
-  // Refresh bundles count on mount
-  useEffect(() => {
-    fetchBundles()
-      .then((bundles) => setRegistryCount(bundles.length))
-      .catch(() => {})
-  }, [isRegistryOpen])
-
-  // Load conversations list on mount
-  const loadConversationsList = async () => {
-    try {
-      setIsLoadingConversations(true)
-      const list = await fetchConversations()
-      setConversations(list)
-    } catch (e) {
-      console.warn('Failed to load conversations', e)
-    } finally {
-      setIsLoadingConversations(false)
-    }
-  }
-
-  useEffect(() => {
-    loadConversationsList()
-  }, [])
-
-  // Spend is per conversation: refresh when it changes and after every studio turn.
-  const refreshUsage = React.useCallback(async (cid: string | null | undefined) => {
-    try {
-      const report = await getUsage(cid || undefined)
-      setUsage({ calls: report.totals.calls, cost_usd: report.totals.cost_usd })
-    } catch {
-      // usage is informational; never block the studio on it
-    }
-  }, [])
-
-  useEffect(() => {
-    refreshUsage(activeConversationId)
-  }, [activeConversationId, refreshUsage])
-
-  // A hosted deployment refuses unauthenticated calls; ask for the tenant token instead of
-  // rendering an empty, broken studio.
   useEffect(() => {
     const onAuthRequired = () => {
       setIsSettingsOpen(true)
-      addTimelineItem(
-        'Authentication Required 🔐',
+      pushNotice(
+        'Authentication required',
         'This deployment needs a tenant token. Add it under Settings → Tenant token.',
-        'info',
         'warning',
       )
     }
     window.addEventListener('rl:auth-required', onAuthRequired)
     return () => window.removeEventListener('rl:auth-required', onAuthRequired)
-  }, [])
+  }, [pushNotice])
 
-  /** Applies a drift snapshot from either the REST payload or a `drift_warning`/`drift` event. */
-  const applyDrift = React.useCallback((snapshot?: DriftSnapshot | null, status?: string) => {
+  // ------------------------------------------------------------------ metrics
+
+  const applyDrift = useCallback((snapshot?: DriftSnapshot | null, status?: string) => {
     const next = status || snapshot?.status
     if (next) setDriftStatus(next)
     if (snapshot) {
@@ -429,376 +349,145 @@ export const App: React.FC = () => {
     }
   }, [])
 
-  const handleSelectConversation = async (cid: string) => {
-    try {
-      const conv = await fetchConversation(cid)
-      setActiveConversationId(cid)
-      setCoachReport(null)
-      setResultsGuidance(null)
-      void refreshCoachSummary(cid)
-      setArenaHtml(conv.arena_html || '')
-      setArenaLocked(conv.arena_locked ?? false)
-      setArenaSource((conv.arena_source as ArenaSource) || null)
-      setArenaError(null)
-      // A reload mid-synthesis must still show that the bespoke canvas is on its way.
-      const job = conv.active_job
-      setArenaPending(Boolean(job && (job.stage === 'env_synthesis' || job.stage === 'arena' || job.stage === 'verification')))
-      setArenaStage(job?.stage || '')
-      setEnvModuleCode(conv.env_code || '')
-      setEpisodes(conv.episodes || [])
-      setScorecard(conv.scorecard || null)
-      applyDrift(conv.drift, conv.drift_status)
-      if (conv.best_metric !== undefined) setCurrentMetric(conv.best_metric)
-      if (conv.current_round !== undefined) setCurrentRound(conv.current_round)
-      if (conv.training_params) {
-        setTrainingParams(conv.training_params)
-        if (conv.training_params.max_auto_tune_rounds) setMaxRounds(conv.training_params.max_auto_tune_rounds)
-        if (conv.training_params.target_metric_threshold) setTargetThreshold(conv.training_params.target_metric_threshold)
-      }
-      if (conv.rounds_history && conv.rounds_history.length > 0) {
-        setRoundHistory(conv.rounds_history.map((r: any) => ({
-          round_num: r.round_num,
-          metric: r.metric,
-          target_threshold: r.target_threshold,
-          target_achieved: r.metric >= r.target_threshold,
-          env_code_snapshot: '',
-          diagnosis: r.diagnosis,
-          changes_summary: r.changes_summary,
-        })))
-      } else {
-        setRoundHistory([])
-      }
-      if (conv.chat_history && conv.chat_history.length > 0) {
-        const restoredTimeline: ActivityTimelineItem[] = conv.chat_history.map((msg: any, mIdx: number) => ({
-          id: `hist_${cid}_${mIdx}`,
-          type: msg.role === 'user' ? 'info' : 'synthesis',
-          title: msg.role === 'user' ? 'User Instruction' : 'Architect Evaluation',
-          description: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content || ''),
-          timestamp: msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '',
-          status: 'info',
-        }))
-        setTimeline(restoredTimeline)
+  // ---------------------------------------------------------------- websocket
+
+  const handleWebSocketEvent = useCallback(
+    (event: any) => {
+      const eventType = event.event
+      const cid = activeConversationRef.current
+
+      if (eventType === 'episode_step') {
+        setLatestFrame(event)
+        if (event.episode_id !== undefined) {
+          setEpisodes((prev) => [
+            ...prev.slice(-49),
+            {
+              episode_id: event.episode_id,
+              total_reward: event.total_reward || 0,
+              reward_breakdown: event.reward_breakdown || {},
+              is_success: !!event.is_success,
+            },
+          ])
+        }
+        return
       }
 
-      if (conv.blueprint_spec) {
-        setActiveSession({
-          session_id: cid,
-          blueprint: conv.blueprint_spec,
-          dataset_id: conv.dataset_id,
-          status: conv.status,
-          current_round: conv.current_round,
-          max_rounds: conv.training_params?.max_auto_tune_rounds || 5,
-          target_threshold: conv.training_params?.target_metric_threshold || 90,
-          current_metric: conv.best_metric,
-          env_module_code: conv.env_code || '',
-          arena_html: conv.arena_html || '',
-          rounds_history: conv.rounds_history,
-          episodes: conv.episodes,
-        })
-      }
-
-      setIsTraining(conv.status === 'training')
-      if (conv.status === 'training') {
-        connectWebSocket(cid)
-      }
-
-      addTimelineItem(
-        'Conversation Restored 📂',
-        `Restored session "${conv.title}" (Score: ${conv.best_metric.toFixed(1)}%).`,
-        'info',
-        'success',
-      )
-    } catch (err: any) {
-      console.error('Failed to restore conversation', err)
-      addTimelineItem('Restore Failed', err.message || 'Could not load conversation', 'error', 'warning')
-    }
-  }
-
-  const handleRequestNewAgent = () => {
-    if (
-      attachedDataset &&
-      !window.confirm(
-        `Start a new agent? "${attachedDataset.name}" will be detached from this draft. The upload stays in the dataset library.`,
-      )
-    ) {
-      return
-    }
-    handleNewAgent()
-  }
-
-  const handleNewAgent = () => {
-    setActiveSession(null)
-    setLastStep(null)
-    setActiveConversationId(undefined)
-    setAttachedDataset(null)
-    setArenaHtml('')
-    setArenaLocked(false)
-    setArenaSource(null)
-    setDriftStatus('unmonitored')
-    setDriftDetail('')
-    setDriftSamples(0)
-    setArenaPending(false)
-    setArenaError(null)
-    setArenaStage('')
-    setEnvModuleCode('')
-    setEpisodes([])
-    setRoundHistory([])
-    setCurrentMetric(0)
-    setCurrentRound(1)
-    setTimeline([])
-    setIsTraining(false)
-    setIsSynthesizing(false)
-    addTimelineItem(
-      'New Workspace Initialized ✨',
-      'Ready to synthesize a brand new RL agent.',
-      'info',
-      'info',
-    )
-  }
-
-  const handleDeleteConversation = async (cid: string) => {
-    try {
-      await deleteConversation(cid)
-      if (activeConversationId === cid) {
-        handleNewAgent()
-      }
-      await loadConversationsList()
-      addTimelineItem('Conversation Deleted', `Session ${cid} removed.`, 'info', 'info')
-    } catch (err: any) {
-      console.error('Failed to delete conversation', err)
-    }
-  }
-
-  const handleClearAllConversations = async () => {
-    try {
-      await clearAllConversations()
-      handleNewAgent()
-      await loadConversationsList()
-      addTimelineItem('History Cleared', 'All saved past conversations have been deleted.', 'info', 'info')
-    } catch (err: any) {
-      console.error('Failed to clear conversations', err)
-      addTimelineItem('Error', 'Failed to clear conversations history.', 'error', 'warning')
-    }
-  }
-
-  // Periodic poll fallback in case WebSocket drops frames or disconnects
-  useEffect(() => {
-    if (!isTraining || !activeSession?.session_id) return
-    const pollTimer = setInterval(async () => {
-      try {
-        const fresh = await fetchSession(activeSession.session_id)
-        if (fresh.current_round) setCurrentRound(fresh.current_round)
-        if (fresh.current_metric !== undefined) setCurrentMetric(fresh.current_metric)
-        const history = fresh.rounds_history || fresh.round_history || []
-        if (history.length > 0) {
-          setRoundHistory(history.map((r: any) => ({
-            round_num: r.round_num,
-            metric: r.metric,
-            target_threshold: r.target_threshold,
-            target_achieved: r.metric >= r.target_threshold,
+      if (eventType === 'drift_warning') {
+        applyDrift(event.drift as DriftSnapshot, 'drifted')
+      } else if (eventType === 'scorecard_ready') {
+        setScorecard(event.scorecard || null)
+        setTrustRefreshKey((k) => k + 1)
+      } else if (eventType === 'arena_updated') {
+        if (event.arena_html) setArenaHtml(event.arena_html)
+        if (event.arena_kind) setArenaSource(event.arena_kind as ArenaSource)
+        setArenaPending(Boolean(event.pending_bespoke))
+        setArenaError(event.error || (event.arena_kind === 'fallback' ? 'Bespoke canvas failed.' : null))
+        setArenaPulse((k) => k + 1)
+      } else if (eventType === 'round_started') {
+        setCurrentRound(event.round ?? event.round_num ?? 1)
+      } else if (eventType === 'round_evaluated') {
+        const rNum = event.round ?? event.round_num ?? 1
+        const metric = event.metric ?? event.current_metric ?? 0
+        const target = event.target ?? event.target_threshold ?? 85
+        setCurrentMetric(metric)
+        setRoundHistory((prev) => [
+          ...prev,
+          {
+            round_num: rNum,
+            metric,
+            target_threshold: target,
+            target_achieved: metric >= target,
             env_code_snapshot: '',
-            diagnosis: r.diagnosis,
-            changes_summary: r.changes_summary,
-          })))
-        }
-        if (fresh.status === 'completed' || fresh.status === 'target_achieved' || fresh.status === 'error') {
-          setIsTraining(false)
-          if (fresh.status === 'error') {
-            addTimelineItem('Training Error', 'Autonomous loop stopped with error.', 'error', 'warning')
+            avg_return: event.avg_return,
+            term_rewards: event.reward_breakdown || event.term_rewards,
+          },
+        ])
+      } else if (eventType === 'auto_tuned') {
+        const diagnosis = event.diagnosis || event.tuning_result?.diagnosis || 'Auto-tuned reward function.'
+        const changesSummary = event.changes_summary || event.tuning_result?.changes_summary || ''
+        setRoundHistory((prev) => {
+          const updated = [...prev]
+          const lastIdx = updated.length - 1
+          if (lastIdx >= 0) {
+            updated[lastIdx] = { ...updated[lastIdx], diagnosis, changes_summary: changesSummary }
           }
-        }
-      } catch (e) {
-        // Silent poll error
-      }
-    }, 2500)
-
-    return () => clearInterval(pollTimer)
-  }, [isTraining, activeSession?.session_id])
-
-  // Helper to append timeline item
-  const addTimelineItem = (
-    title: string,
-    description: string,
-    type: ActivityTimelineItem['type'] = 'info',
-    status: ActivityTimelineItem['status'] = 'info',
-  ) => {
-    const newItem: ActivityTimelineItem = {
-      id: `act_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-      type,
-      title,
-      description,
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-      status,
-    }
-    setTimeline((prev) => [...prev, newItem])
-  }
-
-  // 1. Conversational Intake Interview
-  const handleChatWithArchitect = async (
-    prompt: string,
-    answers: Record<string, string> = {},
-    forceSmartDefaults: boolean = false,
-    explicitTrainingParams?: TrainingParams,
-  ): Promise<IntakeResponse> => {
-    if (!isLLMVerified) {
-      setIsGateModalOpen(true)
-      throw new Error('This step needs a model. Connect a provider in Settings to synthesize, chat or train. Uploading data and browsing existing agents work without a key.')
-    }
-
-    addTimelineItem(
-      'Conversational Intake Consulted',
-      `Evaluating requirements across 5 Pillars for: "${prompt.slice(0, 60)}..."`,
-      'synthesis',
-      'info',
-    )
-
-    try {
-      const resp = await chatWithArchitect({
-        user_prompt: prompt,
-        conversation_id: activeConversationId,
-        dataset_id: attachedDataset?.dataset_id,
-        user_answers: answers,
-        force_smart_defaults: forceSmartDefaults,
-        training_params: explicitTrainingParams || trainingParams,
-      })
-
-      if (resp.conversation_id) {
-        setActiveConversationId(resp.conversation_id)
-      }
-
-      if (resp.guidance) {
-        setCoachReport(resp.guidance)
-        void refreshCoachSummary(resp.conversation_id || activeConversationId)
-      }
-
-      // Refresh conversations list in background
-      loadConversationsList()
-
-      if (resp.status === 'ready_to_build') {
-        addTimelineItem(
-          'Agent Blueprint Locked',
-          `Objective: ${resp.blueprint?.objective || 'Agent specification complete'}`,
-          'synthesis',
-          'success',
-        )
-      }
-
-      return resp
-    } catch (err: any) {
-      if (isModelRequired(err)) {
-        setIsLLMVerified(false)
-        setIsGateModalOpen(true)
-      }
-      throw err
-    }
-  }
-
-  // 1b. Continuous Conversational Studio (StudioOmniAgent)
-  const handleSendStudioMessage = async (
-    message: string,
-    explicitParams?: TrainingParams,
-    answers?: Record<string, string>,
-  ): Promise<StudioChatResponse> => {
-    if (!isLLMVerified) {
-      setIsGateModalOpen(true)
-      throw new Error('This step needs a model. Connect a provider in Settings to synthesize, chat or train. Uploading data and browsing existing agents work without a key.')
-    }
-
-    const cid = activeConversationId || `conv_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`
-    if (!activeConversationId) {
-      setActiveConversationId(cid)
-    }
-
-    addTimelineItem(
-      'User Instruction',
-      message,
-      'info',
-      'info',
-    )
-
-    try {
-      const resp = await chatWithStudioOmni(
-        {
-          conversation_id: cid,
-          user_message: message,
-          dataset_id: attachedDataset?.dataset_id,
-          selected_options: answers || {},
-          training_params: explicitParams || trainingParams,
-        },
-        (stage, detail) => {
-          setArenaStage(stage)
-          if (stage === 'arena_preview' || stage === 'arena') {
-            setArenaPending(true)
-            setArenaError(null)
-          }
-          addTimelineItem(
-            `Job stage: ${stage.replace(/_/g, ' ')}`,
-            detail || 'Working…',
-            'synthesis',
-            'info',
-          )
-        },
-      )
-
-      if (resp.conversation_id) {
-        setActiveConversationId(resp.conversation_id)
-      }
-
-      if (resp.guidance) {
-        setCoachReport(resp.guidance)
-        void refreshCoachSummary(resp.conversation_id)
-      }
-      if (resp.status === 'blocked') {
+          return updated
+        })
+        if (event.tuning_result?.updated_code) setEnvModuleCode(event.tuning_result.updated_code)
+      } else if (eventType === 'target_achieved') {
         setIsTraining(false)
-        addTimelineItem(
-          'Coach stopped training',
-          'A blocking finding must be fixed before the run can start. See the Coach card.',
-          'error',
-          'warning',
-        )
+        setCurrentMetric(event.metric ?? event.current_metric ?? 100)
+      } else if (eventType === 'budget_exhausted') {
+        setIsTraining(false)
+        setCurrentMetric(event.metric ?? event.current_metric ?? 0)
+      } else if (eventType === 'training_error' || eventType === 'error') {
+        setIsTraining(false)
+      } else if (eventType === 'turn_state' && event.turn) {
+        setTurn(event.turn as TurnStatus)
       }
 
-      if (resp.arena_html) {
-        setArenaHtml(resp.arena_html)
+      if (cid) scheduleSync(cid)
+    },
+    [applyDrift, scheduleSync],
+  )
+
+  const connectWebSocket = useCallback(
+    (sessionId: string) => {
+      if (wsRef.current) wsRef.current.close()
+      wsRef.current = connectTelemetryWebSocket(
+        sessionId,
+        handleWebSocketEvent,
+        (err) => console.warn('WebSocket error:', err),
+        () => undefined,
+      )
+    },
+    [handleWebSocketEvent],
+  )
+
+  useEffect(() => {
+    return () => {
+      if (wsRef.current) {
+        wsRef.current.close()
+        wsRef.current = null
       }
-      if (resp.arena_source) {
-        setArenaSource(resp.arena_source)
-      }
+      if (syncTimerRef.current) window.clearTimeout(syncTimerRef.current)
+    }
+  }, [])
+
+  // Poll only while another party owns the turn — that is what makes it turn-by-turn.
+  useEffect(() => {
+    if (!activeConversationId || turn?.state !== 'running') return
+    const id = window.setInterval(() => {
+      void syncThread(activeConversationId).catch(() => undefined)
+    }, THREAD_POLL_MS)
+    return () => window.clearInterval(id)
+  }, [activeConversationId, turn?.state, syncThread])
+
+  // ------------------------------------------------------------------ sending
+
+  const applyStudioResponse = useCallback(
+    (resp: StudioChatResponse, cid: string) => {
+      if (resp.arena_html) setArenaHtml(resp.arena_html)
+      if (resp.arena_source) setArenaSource(resp.arena_source)
       setArenaPending(false)
       setArenaError(resp.arena_source === 'fallback' ? 'Fell back to the schema-driven preview.' : null)
-
-      if (resp.arena_locked !== undefined) {
-        setArenaLocked(resp.arena_locked)
-      }
-
-      if (resp.env_code) {
-        setEnvModuleCode(resp.env_code)
-      }
-
+      if (resp.arena_locked !== undefined) setArenaLocked(resp.arena_locked)
+      if (resp.env_code) setEnvModuleCode(resp.env_code)
       if (resp.best_metric !== undefined || resp.current_metric !== undefined) {
-        const metric = resp.best_metric !== undefined ? resp.best_metric : (resp.current_metric || 0)
-        setCurrentMetric(metric)
+        setCurrentMetric(resp.best_metric !== undefined ? resp.best_metric : resp.current_metric || 0)
       }
-
-      if (resp.current_round !== undefined) {
-        setCurrentRound(resp.current_round)
-      }
-
+      if (resp.current_round !== undefined) setCurrentRound(resp.current_round)
       if (resp.training_params) {
         setTrainingParams(resp.training_params)
-        if (resp.training_params.max_auto_tune_rounds) setMaxRounds(resp.training_params.max_auto_tune_rounds)
-        if (resp.training_params.target_metric_threshold) setTargetThreshold(resp.training_params.target_metric_threshold)
-      }
-
-      if (resp.status === 'training') {
-        setIsTraining(true)
-        connectWebSocket(cid)
-      } else if (resp.status === 'completed' || resp.status === 'target_achieved') {
-        setIsTraining(false)
+        if (resp.training_params.max_auto_tune_rounds)
+          setMaxRounds(resp.training_params.max_auto_tune_rounds)
+        if (resp.training_params.target_metric_threshold)
+          setTargetThreshold(resp.training_params.target_metric_threshold)
       }
 
       if (resp.blueprint) {
-        const effectiveMetric = resp.best_metric !== undefined ? resp.best_metric : (resp.current_metric || 0)
+        const effectiveMetric =
+          resp.best_metric !== undefined ? resp.best_metric : resp.current_metric || 0
         setTargetThreshold(resp.blueprint.target_metric_threshold || 85)
         setTargetMetricName(resp.blueprint.target_metric_name || 'Success Rate')
         setMaxRounds(resp.blueprint.max_auto_tune_rounds || 4)
@@ -818,55 +507,377 @@ export const App: React.FC = () => {
         }))
       }
 
-      const replyText = resp.assistant_message || resp.message || resp.chat_response
-      const isArenaUpdate = (resp.action_types && resp.action_types.includes('update_arena')) || resp.action_type === 'update_arena'
-      if (replyText) {
-        addTimelineItem(
-          'Studio Omni Response',
-          replyText,
-          'synthesis',
-          isArenaUpdate ? 'success' : 'info',
+      if (resp.status === 'training') {
+        setIsTraining(true)
+        connectWebSocket(cid)
+      } else if (resp.status === 'completed' || resp.status === 'target_achieved') {
+        setIsTraining(false)
+      }
+    },
+    [attachedDataset?.dataset_id, connectWebSocket],
+  )
+
+  const sendTurn = useCallback(
+    async (message: string) => {
+      const trimmed = message.trim()
+      if (!trimmed || isSending) return
+      if (!isLLMVerified) {
+        setIsGateModalOpen(true)
+        return
+      }
+
+      const cid =
+        activeConversationId || `conv_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`
+      if (!activeConversationId) setActiveConversationId(cid)
+
+      clearNotices()
+      setIsSending(true)
+      setQueuedMessage(null)
+      setPendingEntries([
+        {
+          seq: Number.MAX_SAFE_INTEGER - 1,
+          turn_id: turn?.turn_id || 'local',
+          actor: 'user',
+          kind: 'instruction',
+          status: 'success',
+          title: 'You',
+          body: trimmed,
+          at: new Date().toISOString(),
+        },
+      ])
+
+      try {
+        const resp = await chatWithStudioOmni(
+          {
+            conversation_id: cid,
+            user_message: trimmed,
+            dataset_id: attachedDataset?.dataset_id,
+            selected_options: {},
+            training_params: trainingParams,
+          },
+          (stage, detail) => {
+            setArenaStage(detail ? `${stage}: ${detail}` : stage)
+            if (stage === 'arena_preview' || stage === 'arena') {
+              setArenaPending(true)
+              setArenaError(null)
+            }
+            // The server records each stage in the thread; pull it in as it happens.
+            scheduleSync(cid)
+          },
+        )
+        applyStudioResponse(resp, cid)
+        await syncThread(cid, { reset: true })
+        void loadConversationsList()
+        void refreshUsage(cid)
+      } catch (err: any) {
+        if (isModelRequired(err)) {
+          setIsLLMVerified(false)
+          setIsGateModalOpen(true)
+        }
+        // A refused turn is information, not a failure: show who owns the conversation.
+        await syncThread(cid, { reset: true }).catch(() => undefined)
+        const cancelled = String(err?.message || '').toLowerCase().includes('cancel')
+        if (!cancelled) {
+          const busy = err?.status === 409 || /mid-turn/i.test(String(err?.message || ''))
+          pushNotice(
+            busy ? 'Not your turn' : 'Turn failed',
+            err?.message || 'The studio could not complete this turn.',
+            'warning',
+          )
+        }
+      } finally {
+        setIsSending(false)
+        setPendingEntries([])
+      }
+    },
+    [
+      activeConversationId,
+      applyStudioResponse,
+      attachedDataset?.dataset_id,
+      clearNotices,
+      isLLMVerified,
+      isSending,
+      loadConversationsList,
+      pushNotice,
+      refreshUsage,
+      scheduleSync,
+      syncThread,
+      trainingParams,
+      turn?.turn_id,
+    ],
+  )
+
+  // Training is a turn like any other: when the owner hands it back, the run is over.
+  useEffect(() => {
+    if (turn && turn.state !== 'running') setIsTraining(false)
+  }, [turn?.state])
+
+  // A queued message is the next turn, and is only sent once the owner hands the turn back.
+  useEffect(() => {
+    if (!queuedMessage || isSending) return
+    if (turn?.state === 'running') return
+    const message = queuedMessage
+    setQueuedMessage(null)
+    void sendTurn(message)
+  }, [queuedMessage, isSending, turn?.state, sendTurn])
+
+  /**
+   * Anything that wants to say something to the studio goes through here: if another party owns
+   * the turn, the message is queued rather than injected into their turn.
+   */
+  const submitInstruction = useCallback(
+    (message: string) => {
+      if (!message.trim()) return
+      if (isSending || turn?.state === 'running') {
+        setQueuedMessage(message)
+        return
+      }
+      void sendTurn(message)
+    },
+    [isSending, sendTurn, turn?.state],
+  )
+
+  const handleStop = useCallback(async () => {
+    const cid = activeConversationRef.current
+    if (!cid || isStopping) return
+    setIsStopping(true)
+    try {
+      const res = await stopTurn(cid)
+      setTurn(res.turn)
+      setIsTraining(false)
+      await syncThread(cid)
+    } catch (err: any) {
+      pushNotice('Could not stop', err?.message || 'Stop failed.', 'warning')
+    } finally {
+      setIsStopping(false)
+    }
+  }, [isStopping, pushNotice, syncThread])
+
+  // ------------------------------------------------------------ coach & trust
+
+  const handleCoachAction = useCallback(
+    async (action: CoachAction, item: CoachItem) => {
+      void item
+      if (action.kind === 'apply_params' || action.kind === 'run_episodes') {
+        const patch = action.payload || {}
+        setTrainingParams((prev) => ({
+          ...prev,
+          ...(patch.max_auto_tune_rounds !== undefined
+            ? { max_auto_tune_rounds: Number(patch.max_auto_tune_rounds) }
+            : {}),
+          ...(patch.episodes_per_round !== undefined
+            ? { episodes_per_round: Number(patch.episodes_per_round) }
+            : {}),
+          ...(patch.target_metric_threshold !== undefined
+            ? { target_metric_threshold: Number(patch.target_metric_threshold) }
+            : {}),
+        }))
+        pushNotice('Coach recommendation applied', action.label, 'success')
+        return
+      }
+
+      if (action.kind === 'open_guide') {
+        setGuideSection(String(action.payload?.section || '') || null)
+        setIsGuideOpen(true)
+        return
+      }
+
+      const message =
+        action.kind === 'use_objective'
+          ? String(action.payload?.objective || '')
+          : String(action.payload?.message || '')
+      if (!message) return
+      submitInstruction(message)
+    },
+    [pushNotice, submitInstruction],
+  )
+
+  const handleAcknowledgeCoach = useCallback(
+    async (item: CoachItem) => {
+      const cid = activeConversationRef.current
+      if (!cid) return
+      try {
+        await acknowledgeGuidance(cid, item.rule_id, item.fingerprint)
+        setThreadEntries((prev) =>
+          prev.map((entry) =>
+            entry.kind === 'finding' && entry.data?.rule_id === item.rule_id
+              ? {
+                  ...entry,
+                  data: { ...entry.data, item: { ...entry.data.item, status: 'acknowledged' } },
+                }
+              : entry,
+          ),
+        )
+      } catch (err: any) {
+        pushNotice(
+          'Acknowledge failed',
+          err?.message || 'Could not acknowledge the finding.',
+          'warning',
         )
       }
+    },
+    [pushNotice],
+  )
 
-      loadConversationsList()
-      refreshUsage(cid)
-      return resp
-    } catch (err: any) {
-      if (isModelRequired(err)) {
-        setIsLLMVerified(false)
-        setIsGateModalOpen(true)
+  // ---------------------------------------------------------------- restoring
+
+  const handleSelectConversation = useCallback(
+    async (cid: string) => {
+      try {
+        setIsLoadingThread(true)
+        const conv = await fetchConversation(cid)
+        setActiveConversationId(cid)
+        setArenaHtml(conv.arena_html || '')
+        setArenaLocked(conv.arena_locked ?? false)
+        setArenaSource((conv.arena_source as ArenaSource) || null)
+        setArenaError(null)
+        const job = conv.active_job
+        setArenaPending(
+          Boolean(
+            job &&
+              (job.stage === 'env_synthesis' ||
+                job.stage === 'arena' ||
+                job.stage === 'verification'),
+          ),
+        )
+        setArenaStage(job?.stage || '')
+        setEnvModuleCode(conv.env_code || '')
+        setEpisodes(conv.episodes || [])
+        setScorecard(conv.scorecard || null)
+        applyDrift(conv.drift, conv.drift_status)
+        if (conv.best_metric !== undefined) setCurrentMetric(conv.best_metric)
+        if (conv.current_round !== undefined) setCurrentRound(conv.current_round)
+        if (conv.training_params) {
+          setTrainingParams(conv.training_params)
+          if (conv.training_params.max_auto_tune_rounds)
+            setMaxRounds(conv.training_params.max_auto_tune_rounds)
+          if (conv.training_params.target_metric_threshold)
+            setTargetThreshold(conv.training_params.target_metric_threshold)
+        }
+        setRoundHistory(
+          (conv.rounds_history || []).map((r: any) => ({
+            round_num: r.round_num,
+            metric: r.metric,
+            target_threshold: r.target_threshold,
+            target_achieved: r.metric >= r.target_threshold,
+            env_code_snapshot: '',
+            diagnosis: r.diagnosis,
+            changes_summary: r.changes_summary,
+          })),
+        )
+
+        // Replay the durable thread verbatim — no relabelling, nothing dropped.
+        setThreadEntries(conv.thread || [])
+        setTurn(conv.turn || null)
+        setQueuedMessage(null)
+        clearNotices()
+
+        if (conv.blueprint_spec) {
+          setActiveSession({
+            session_id: cid,
+            blueprint: conv.blueprint_spec,
+            dataset_id: conv.dataset_id,
+            status: conv.status,
+            current_round: conv.current_round,
+            max_rounds: conv.training_params?.max_auto_tune_rounds || 5,
+            target_threshold: conv.training_params?.target_metric_threshold || 90,
+            current_metric: conv.best_metric,
+            env_module_code: conv.env_code || '',
+            arena_html: conv.arena_html || '',
+            rounds_history: conv.rounds_history,
+            episodes: conv.episodes,
+          })
+        } else {
+          setActiveSession(null)
+        }
+
+        const stillTraining = conv.status === 'training'
+        setIsTraining(stillTraining)
+        if (stillTraining || conv.turn?.state === 'running') connectWebSocket(cid)
+        setIsConversationsOpen(false)
+        void refreshUsage(cid)
+      } catch (err: any) {
+        pushNotice('Restore failed', err?.message || 'Could not load the conversation.', 'warning')
+      } finally {
+        setIsLoadingThread(false)
       }
-      addTimelineItem('Studio Error', err.message || 'Error processing request', 'error', 'warning')
-      throw err
-    }
-  }
+    },
+    [applyDrift, clearNotices, connectWebSocket, pushNotice, refreshUsage],
+  )
 
-  // 1c. Lock Arena and Start Training
-  const handleLockArena = async () => {
-    const cid = activeConversationId
-    if (!cid) return
-    try {
-      await lockConversationArena(cid, true)
-      setArenaLocked(true)
-      addTimelineItem(
-        'Arena Locked 🔒',
-        'Arena layout locked in. Initializing training loop...',
-        'arena',
-        'success',
+  const handleNewAgent = useCallback(() => {
+    if (wsRef.current) {
+      wsRef.current.close()
+      wsRef.current = null
+    }
+    setActiveSession(null)
+    setActiveConversationId(undefined)
+    setThreadEntries([])
+    setTurn(null)
+    setPendingEntries([])
+    setNotices([])
+    setQueuedMessage(null)
+    setArenaHtml('')
+    setArenaLocked(false)
+    setArenaSource(null)
+    setArenaError(null)
+    setArenaPending(false)
+    setEnvModuleCode('')
+    setEpisodes([])
+    setLatestFrame(undefined)
+    setScorecard(null)
+    setCurrentMetric(0)
+    setCurrentRound(1)
+    setRoundHistory([])
+    applyDrift(null, 'unmonitored')
+    setDriftSamples(0)
+    setDriftDetail('')
+    setIsTraining(false)
+    setIsConversationsOpen(false)
+    chatInputRef.current?.focus()
+  }, [applyDrift])
+
+  const handleRequestNewAgent = useCallback(() => {
+    if (
+      attachedDataset &&
+      !window.confirm(
+        `Start a new agent? "${attachedDataset.name}" will be detached from this draft. The upload stays in the dataset library.`,
       )
-      // Send chat message to run training
-      await handleSendStudioMessage('Looks good, start training!')
-    } catch (err: any) {
-      console.error('Failed to lock arena', err)
-      addTimelineItem('Lock Failed', err.message || 'Could not lock arena', 'error', 'warning')
+    ) {
+      return
     }
-  }
+    handleNewAgent()
+  }, [attachedDataset, handleNewAgent])
 
-  // 1c-bis. Retry the bespoke canvas after a failed generation (G15).
-  // A failed restyle now keeps the arena on screen, so the user is never downgraded silently.
-  const handleRetryArena = async () => {
-    const cid = activeConversationId
+  const handleDeleteConversation = useCallback(
+    async (cid: string) => {
+      if (!window.confirm('Delete this conversation and everything it owns?')) return
+      try {
+        await deleteConversation(cid)
+        if (cid === activeConversationRef.current) handleNewAgent()
+        void loadConversationsList()
+      } catch (err: any) {
+        pushNotice('Delete failed', err?.message || 'Could not delete the conversation.', 'warning')
+      }
+    },
+    [handleNewAgent, loadConversationsList, pushNotice],
+  )
+
+  const handleClearAllConversations = useCallback(async () => {
+    if (!window.confirm('Delete every saved conversation? This cannot be undone.')) return
+    try {
+      await clearAllConversations()
+      handleNewAgent()
+      void loadConversationsList()
+    } catch (err: any) {
+      pushNotice('Clear failed', err?.message || 'Could not clear the history.', 'warning')
+    }
+  }, [handleNewAgent, loadConversationsList, pushNotice])
+
+  // ------------------------------------------------------------------- arena
+
+  const handleRetryArena = useCallback(async () => {
+    const cid = activeConversationRef.current
     if (!cid) return
     if (!isLLMVerified) {
       setIsGateModalOpen(true)
@@ -874,7 +885,6 @@ export const App: React.FC = () => {
     }
     setArenaPending(true)
     setArenaError(null)
-    addTimelineItem('Arena Retry Requested 🎨', 'Rebuilding the bespoke domain canvas…', 'arena', 'info')
     try {
       const res = await updateArenaLook(
         cid,
@@ -884,346 +894,57 @@ export const App: React.FC = () => {
       if (res.arena_source === 'bespoke') {
         setArenaSource('bespoke')
         setArenaError(null)
-        addTimelineItem('Bespoke Canvas Ready ✅', 'The arena was regenerated for this domain.', 'arena', 'success')
       } else {
         setArenaError(res.error || 'The provider did not return a valid canvas.')
-        addTimelineItem(
-          'Arena Retry Failed',
-          res.error || 'Kept the existing arena.',
-          'arena',
-          'warning',
-        )
       }
+      void syncThread(cid)
     } catch (err: any) {
-      setArenaError(err.message || 'Arena retry failed')
-      addTimelineItem('Arena Retry Failed', err.message || 'Could not rebuild the arena', 'arena', 'warning')
+      setArenaError(err?.message || 'Arena retry failed')
     } finally {
       setArenaPending(false)
     }
-  }
+  }, [isLLMVerified, syncThread])
 
-  // 1d. Focus chat to edit arena look
-  const handleEditArenaLook = () => {
-    if (chatInputRef.current) {
-      chatInputRef.current.focus()
-      chatInputRef.current.select()
-    }
-  }
+  const handleEditArenaLook = useCallback(() => {
+    chatInputRef.current?.focus()
+    chatInputRef.current?.select()
+  }, [])
 
-  // 2. Start JIT Autonomous Session
-  const handleStartSession = async (blueprint: AgentBlueprintSpec, datasetId?: string) => {
-    if (!isLLMVerified) {
-      setIsGateModalOpen(true)
-      throw new Error('A verified LLM API key is mandatory before synthesizing environments.')
-    }
+  const handleLockArena = useCallback(async () => {
+    // Locking is a turn: say it in the thread instead of mutating the arena from a button.
+    submitInstruction('Looks good, lock the arena and start training')
+  }, [submitInstruction])
 
-    setIsSynthesizing(true)
-    setIsTraining(true)
-    setEpisodes([])
-    setRoundHistory([])
-    setCurrentMetric(0)
-    setTargetThreshold(blueprint.target_metric_threshold || 85)
-    setTargetMetricName(blueprint.target_metric_name || 'Success Rate')
-    setMaxRounds(blueprint.max_auto_tune_rounds || 4)
-    setCurrentRound(1)
+  // ------------------------------------------------------- rounds & evidence
 
-    addTimelineItem(
-      'JIT Synthesis Initiated',
-      `Synthesizing env_module.py and arena.html for ${blueprint.task_id}...`,
-      'synthesis',
-      'info',
-    )
-
-    try {
-      const resp = await startSynthesisSession({
-        blueprint,
-        session_id: activeConversationId,
-        dataset_id: datasetId,
-        run_sync: false,
-      })
-
-      const sid = resp.session_id
-      setActiveConversationId(sid)
-      loadConversationsList()
-
-      // Fetch fresh session state to get synthesized code & arena
-      const sessionData = await fetchSession(sid)
-      setActiveSession(sessionData)
-      setArenaHtml(sessionData.arena_html || '')
-      setEnvModuleCode(sessionData.env_module_code || '')
-      if (sessionData.current_round) setCurrentRound(sessionData.current_round)
-      if (sessionData.current_metric) setCurrentMetric(sessionData.current_metric)
-      setScorecard(sessionData.scorecard || null)
-      const history = sessionData.rounds_history || sessionData.round_history || []
-      if (history.length > 0) {
-        setRoundHistory(history.map((r: any) => ({
-          round_num: r.round_num,
-          metric: r.metric,
-          target_threshold: r.target_threshold,
-          target_achieved: r.metric >= r.target_threshold,
-          env_code_snapshot: '',
-          diagnosis: r.diagnosis,
-          changes_summary: r.changes_summary,
-        })))
-      }
-      if (sessionData.status === 'completed' || sessionData.status === 'target_achieved') {
-        setIsTraining(false)
-      }
-
-      addTimelineItem(
-        'Synthesized env_module.py Verified ✅',
-        'Static AST safety check passed; 25/25 sandbox smoke steps verified without error.',
-        'smoke_test',
-        'success',
-      )
-      addTimelineItem(
-        'Dynamic Arena Synthesized 🎨',
-        `Custom arena.html synthesized with ARENA_UPDATE & ARENA_INTERACT bridge.`,
-        'arena',
-        'success',
-      )
-
-      // Connect WebSocket for live telemetry streaming
-      connectWebSocket(sid)
-    } catch (err: any) {
-      if (err instanceof ApiError && err.guidance) {
-        setCoachReport(err.guidance)
-        setIsCoachOpen(true)
-        addTimelineItem(
-          'Coach blocked the build',
-          err.guidance.items?.[0]?.title || err.message,
-          'error',
+  const handleRollback = useCallback(
+    async (roundNum: number) => {
+      const cid = activeConversationRef.current
+      if (!cid) return
+      if (!window.confirm(`Roll the policy and environment back to Round ${roundNum}?`)) return
+      setIsRollingBack(true)
+      try {
+        const resp = await rollbackSession(cid, roundNum)
+        setCurrentRound(resp.restored_round)
+        setCurrentMetric(resp.restored_metric)
+        pushNotice(
+          `Rolled back to round ${resp.restored_round}`,
+          `Policy weights and environment code restored. Metric ${resp.restored_metric.toFixed(1)}%.`,
           'warning',
         )
-      } else {
-        addTimelineItem('Synthesis Failed', err.message || 'Error compiling environment', 'error', 'warning')
+        await syncThread(cid)
+      } catch (err: any) {
+        pushNotice('Rollback failed', err?.message || 'Error during rollback.', 'warning')
+      } finally {
+        setIsRollingBack(false)
       }
-      setIsTraining(false)
-    } finally {
-      setIsSynthesizing(false)
-    }
-  }
+    },
+    [pushNotice, syncThread],
+  )
 
-  // 3. Connect WebSocket for Live Training Telemetry
-  const connectWebSocket = (sessionId: string) => {
-    if (wsRef.current) {
-      wsRef.current.close()
-    }
-
-    const ws = connectTelemetryWebSocket(
-      sessionId,
-      (data) => {
-        handleWebSocketEvent(data)
-      },
-      (err) => console.warn('WebSocket error:', err),
-      () => console.log('WebSocket closed'),
-    )
-    wsRef.current = ws
-  }
-
-  const handleWebSocketEvent = (event: any) => {
-    const eventType = event.event
-
-    if (eventType === 'drift_warning') {
-      applyDrift(event.drift as DriftSnapshot, 'drifted')
-      addTimelineItem(
-        'Drift Warning ⚠️',
-        (event.drift as DriftSnapshot)?.recommendation || event.message || 'Live inputs moved away from the training baseline.',
-        'round',
-        'warning',
-      )
-    } else if (eventType === 'scorecard_ready') {
-      setScorecard(event.scorecard || null)
-      setTrustRefreshKey((k) => k + 1)
-      const coachConversation = activeConversationIdRef.current
-      if (coachConversation) {
-        void refreshResultsGuidance(coachConversation)
-      }
-      addTimelineItem(
-        'Held-Out Scorecard 🎯',
-        event.message || 'Evaluation finished on unseen rows.',
-        'round',
-        'success',
-      )
-    } else if (eventType === 'arena_updated') {
-      if (event.arena_html) {
-        setArenaHtml(event.arena_html)
-      }
-      if (event.arena_kind) {
-        // 'preview' arrives first (instant, deterministic) and 'bespoke' replaces it in place.
-        setArenaSource(event.arena_kind as ArenaSource)
-      }
-      setArenaPending(Boolean(event.pending_bespoke))
-      setArenaError(event.error || (event.arena_kind === 'fallback' ? 'Bespoke canvas failed.' : null))
-      addTimelineItem(
-        event.arena_kind === 'preview' ? 'Instant Arena Preview ⚡' : 'Arena Hot-Reloaded 🎨',
-        event.arena_kind === 'preview'
-          ? 'Deterministic preview rendered; the bespoke canvas is still generating.'
-          : event.message || 'Updated arena layout and styles without resetting policy weights.',
-        'arena',
-        event.arena_kind === 'fallback' ? 'warning' : 'success',
-      )
-    } else if (eventType === 'round_started') {
-      const rNum = event.round ?? event.round_num ?? 1
-      setCurrentRound(rNum)
-      addTimelineItem(
-        `Round ${rNum} Started`,
-        event.message || `Autonomous training burst executing with PPO policy...`,
-        'round',
-        'info',
-      )
-    } else if (eventType === 'warmstart_completed') {
-      addTimelineItem(
-        'Warm-Start Behavioral Cloning Complete',
-        event.message || `Pre-trained on heuristic demonstration trajectories.`,
-        'round',
-        'info',
-      )
-    } else if (eventType === 'critic_warmup_completed') {
-      addTimelineItem(
-        'Value Critic Calibrated',
-        event.message || `Value network calibrated on updated reward function.`,
-        'round',
-        'info',
-      )
-    } else if (eventType === 'episode_step') {
-      // Forward live frame to arena iframe
-      setLatestFrame(event)
-      if (event.episode_id !== undefined) {
-        setEpisodes((prev) => {
-          const epLog: EpisodeLog = {
-            episode_id: event.episode_id,
-            total_reward: event.total_reward || 0,
-            reward_breakdown: event.reward_breakdown || {},
-            is_success: !!event.is_success,
-          }
-          return [...prev.slice(-49), epLog]
-        })
-      }
-    } else if (eventType === 'round_evaluated') {
-      const rNum = event.round ?? event.round_num ?? 1
-      const metric = event.metric ?? event.current_metric ?? 0
-      const target = event.target ?? event.target_threshold ?? 85
-      const isTargetAchieved = metric >= target
-      setCurrentMetric(metric)
-      const snap: RoundSnapshot = {
-        round_num: rNum,
-        metric,
-        target_threshold: target,
-        target_achieved: isTargetAchieved,
-        env_code_snapshot: '',
-        avg_return: event.avg_return,
-        term_rewards: event.reward_breakdown || event.term_rewards,
-      }
-      setRoundHistory((prev) => [...prev, snap])
-
-      addTimelineItem(
-        `Round ${rNum} Evaluated: ${metric.toFixed(1)}%`,
-        `Target threshold is ${target}%.`,
-        'round',
-        isTargetAchieved ? 'success' : 'info',
-      )
-    } else if (eventType === 'auto_tuned') {
-      const rNum = event.round ?? event.round_num ?? 1
-      const diagnosis = event.diagnosis || event.tuning_result?.diagnosis || 'Auto-tuned reward function.'
-      const changesSummary = event.changes_summary || event.tuning_result?.changes_summary || ''
-      setRoundHistory((prev) => {
-        const updated = [...prev]
-        const lastIdx = updated.length - 1
-        if (lastIdx >= 0) {
-          updated[lastIdx] = {
-            ...updated[lastIdx],
-            diagnosis,
-            changes_summary: changesSummary,
-          }
-        }
-        return updated
-      })
-      if (event.tuning_result?.updated_code) {
-        setEnvModuleCode(event.tuning_result.updated_code)
-      }
-      addTimelineItem(
-        `Auto-Tuner Diagnosis: Round ${rNum} 🧠`,
-        `${diagnosis} ${changesSummary}`,
-        'auto_tune',
-        'warning',
-      )
-    } else if (eventType === 'target_achieved') {
-      setIsTraining(false)
-      const metric = event.metric ?? event.current_metric ?? 100
-      setCurrentMetric(metric)
-      addTimelineItem(
-        '🌟 Target Mastery Achieved!',
-        event.message || `Agent exceeded target metric with ${metric.toFixed(1)}% performance!`,
-        'mastery',
-        'success',
-      )
-    } else if (eventType === 'budget_exhausted') {
-      setIsTraining(false)
-      const metric = event.metric ?? event.current_metric ?? 0
-      setCurrentMetric(metric)
-      addTimelineItem(
-        '🏁 Auto-Tune Complete',
-        event.message || `Completed all auto-tuning rounds. Final metric: ${metric.toFixed(1)}%.`,
-        'round',
-        'info',
-      )
-    } else if (eventType === 'training_error' || eventType === 'error') {
-      setIsTraining(false)
-      addTimelineItem(
-        'Training Error ⚠️',
-        event.message || 'An error occurred during autonomous training.',
-        'error',
-        'warning',
-      )
-    }
-  }
-
-  // 4. Mid-Flight Nudge
-  const handleNudge = async (feedbackText: string) => {
-    if (!activeSession) return
-    addTimelineItem(
-      'Mid-Flight Guidance Nudge Applied',
-      `Prompt: "${feedbackText}" — Triggering targeted reward tuning round...`,
-      'nudge',
-      'warning',
-    )
-    const result = await nudgeSession(activeSession.session_id, feedbackText)
-    if (result.updated_code) {
-      setEnvModuleCode(result.updated_code)
-    }
-    addTimelineItem(
-      'Nudge Auto-Tune Applied',
-      `AutoTuner updated environment code: ${result.changes_summary}`,
-      'auto_tune',
-      'success',
-    )
-  }
-
-  // 5. Rollback to Previous Round
-  const handleRollback = async (roundNum: number) => {
-    if (!activeSession) return
-    setIsRollingBack(true)
-    try {
-      const resp = await rollbackSession(activeSession.session_id, roundNum)
-      setCurrentRound(resp.restored_round)
-      setCurrentMetric(resp.restored_metric)
-      addTimelineItem(
-        `Rollback to Round ${resp.restored_round} Complete`,
-        `Restored policy weights and environment code to snapshot. Metric: ${resp.restored_metric.toFixed(1)}%`,
-        'round',
-        'warning',
-      )
-    } catch (e: any) {
-      addTimelineItem('Rollback Failed', e.message || 'Error during rollback', 'error', 'warning')
-    } finally {
-      setIsRollingBack(false)
-    }
-  }
-
-  // 6. Export Standalone ONNX RunBundle
-  const handleExportPolicy = async () => {
-    if (!activeSession) return
+  const handleExportPolicy = useCallback(async () => {
+    const cid = activeConversationRef.current
+    if (!cid) return
 
     const evidenceGaps: string[] = []
     if (scorecard) {
@@ -1244,9 +965,7 @@ export const App: React.FC = () => {
         evidenceGaps.push(`Crossfire verdict: ${scorecard.crossfire.verdict}.`)
       }
       if (scorecard.eval_corpus && scorecard.eval_corpus.failed_cases > 0) {
-        evidenceGaps.push(
-          `${scorecard.eval_corpus.failed_cases} golden-corpus case(s) fail.`,
-        )
+        evidenceGaps.push(`${scorecard.eval_corpus.failed_cases} golden-corpus case(s) fail.`)
       }
       if (scorecard.safety && scorecard.safety.violations > 0) {
         evidenceGaps.push(
@@ -1265,79 +984,143 @@ export const App: React.FC = () => {
 
     setIsExporting(true)
     try {
-      const exportRes = await exportSessionPolicy(activeSession.session_id)
-      addTimelineItem(
-        'Policy Exported to ONNX .runbundle 📦',
-        `Parity verified (max diff: ${exportRes.onnx_parity_diff.toExponential(2)}). Runbundle packaged.`,
-        'mastery',
+      const exportRes = await exportSessionPolicy(cid)
+      pushNotice(
+        'Policy exported',
+        `ONNX parity verified (max diff ${exportRes.onnx_parity_diff.toExponential(2)}). Runbundle packaged.`,
         'success',
       )
-      // Trigger download
       window.open(exportRes.download_url, '_blank')
       setRegistryCount((prev) => prev + 1)
+      await syncThread(cid)
     } catch (err: any) {
-      addTimelineItem('Export Failed', err.message || 'Error exporting policy', 'error', 'warning')
+      pushNotice('Export failed', err?.message || 'Error exporting the policy.', 'warning')
     } finally {
       setIsExporting(false)
     }
-  }
+  }, [pushNotice, scorecard, syncThread])
 
-  // 7. Universal File Upload
-  const handleFileUpload = async (file: File) => {
-    try {
-      const summary = await uploadDatasetFile(file)
-      setAttachedDataset(summary)
-      if (summary.guidance) {
-        setCoachReport(summary.guidance)
+  /** Jump from a number in the scoreboard to the entry that produced it. */
+  const focusRoundInThread = useCallback(
+    (round: number) => {
+      const match = [...threadEntries]
+        .reverse()
+        .find((e) => e.anchor?.round === round && (e.kind === 'round' || e.kind === 'tune'))
+      setFocusedSeq(match ? match.seq : null)
+    },
+    [threadEntries],
+  )
+
+  // ------------------------------------------------------------------ uploads
+
+  const handleFileUpload = useCallback(
+    async (file: File) => {
+      try {
+        const summary = await uploadDatasetFile(file)
+        setAttachedDataset(summary)
+        submitInstruction(`Use the attached dataset "${summary.name}" for this agent`)
+      } catch (e: any) {
+        pushNotice('Upload failed', e?.message || 'Could not ingest the file.', 'warning')
       }
-      addTimelineItem(
-        'Dataset Attached 📊',
-        `Uploaded "${summary.name}" (${summary.num_rows} rows, ${summary.columns.length} columns)`,
-        'synthesis',
-        'success',
-      )
-    } catch (e: any) {
-      addTimelineItem('Upload Failed', e.message || 'Could not ingest file', 'error', 'warning')
-    }
-  }
+    },
+    [pushNotice, submitInstruction],
+  )
 
-  // 8. Save LLM Settings & Gate Unlock
-  const handleSaveLLMSettings = (settings: LLMSettings) => {
+  const handleSQLDatasetSelected = useCallback(
+    (ds: IngestedDatasetSummary) => {
+      setAttachedDataset(ds)
+      submitInstruction(`Use the SQL dataset "${ds.name}" (${ds.num_rows} rows) for this agent`)
+    },
+    [submitInstruction],
+  )
+
+  // ----------------------------------------------------------------- settings
+
+  const handleSaveLLMSettings = useCallback((settings: LLMSettings) => {
     setLlmSettings(settings)
     setIsLLMVerified(true)
     localStorage.setItem('rl_ide_v4_llm_settings', JSON.stringify(settings))
-    addTimelineItem(
-      'LLM Provider Updated',
-      `Active engine set to ${settings.provider.toUpperCase()} (${settings.modelName || 'default'})`,
-      'info',
-      'info',
-    )
-  }
+  }, [])
 
-  const handleGateVerified = (settings: LLMSettings) => {
+  const handleGateVerified = useCallback((settings: LLMSettings) => {
     setLlmSettings(settings)
     setIsLLMVerified(true)
     setIsGateModalOpen(false)
-    addTimelineItem(
-      'LLM Connection Verified ⚡',
-      `Credentials verified with live probe: ${settings.provider.toUpperCase()} (${settings.modelName || 'default'}). Synthesis, chat and training are enabled.`,
-      'info',
-      'success',
-    )
-  }
+  }, [])
+
+  // ------------------------------------------------------------------- render
+
+  const displayedEntries = useMemo(
+    () => [...threadEntries, ...pendingEntries, ...notices],
+    [threadEntries, pendingEntries, notices],
+  )
+
+  // While our own request is in flight the studio owns the turn, even before the server says so.
+  const effectiveTurn: TurnStatus | null = useMemo(() => {
+    if (isSending && turn?.state !== 'running') {
+      return {
+        conversation_id: activeConversationId || '',
+        turn_id: turn?.turn_id || 'local',
+        state: 'running',
+        actor: 'studio',
+        opened_at: new Date().toISOString(),
+        closed_at: null,
+        outcome: null,
+      }
+    }
+    return turn
+  }, [activeConversationId, isSending, turn])
+
+  const quickActions = useMemo(() => {
+    if (!arenaLocked) {
+      return [
+        '🎨 Neon cyberpunk theme',
+        '📊 Add a telemetry HUD',
+        '🔍 Larger canvas',
+        '🔒 Lock arena & start training',
+      ]
+    }
+    return [
+      '🔄 Train 5 more rounds',
+      '🧠 Make it more aggressive',
+      '🛡️ Penalise mistakes harder',
+      '🎨 Redesign the arena look',
+    ]
+  }, [arenaLocked])
+
+  const handleQuickAction = useCallback(
+    (chip: string) => {
+      if (chip.includes('Lock arena')) {
+        void handleLockArena()
+      } else if (chip.includes('Train 5 more rounds')) {
+        submitInstruction('Train for 5 more rounds with 500 episodes per round')
+      } else if (chip.includes('aggressive')) {
+        submitInstruction('Change the agent behaviour: make it more aggressive and prioritise attacking')
+      } else if (chip.includes('Penalise')) {
+        submitInstruction('Change the agent behaviour: heavily penalise stalling and defensive mistakes')
+      } else if (chip.includes('cyberpunk')) {
+        submitInstruction('Change the arena look to a neon cyberpunk theme with glowing borders')
+      } else if (chip.includes('telemetry HUD')) {
+        submitInstruction(
+          'Change the arena look to add a detailed action probability radar and telemetry HUD',
+        )
+      } else if (chip.includes('Larger canvas')) {
+        submitInstruction('Change the arena look: make the canvas larger with gold highlights')
+      } else {
+        submitInstruction(chip)
+      }
+    },
+    [handleLockArena, submitInstruction],
+  )
+
+  const conversationIdForDrawers = activeConversationId ?? activeSession?.session_id ?? undefined
 
   return (
     <div className="flex flex-col h-screen w-screen overflow-hidden bg-gray-950 text-gray-100 font-sans relative">
-      {/* Top Header */}
       <Header
         llmSettings={llmSettings}
         isLLMVerified={isLLMVerified}
         onOpenSettings={() => (isLLMVerified ? setIsSettingsOpen(true) : setIsGateModalOpen(true))}
-        onOpenRegistry={() => setIsRegistryOpen(true)}
-        registryCount={registryCount}
-        onExport={handleExportPolicy}
-        isExporting={isExporting}
-        hasActivePolicy={!!activeSession}
         driftStatus={driftStatus}
         driftDetail={driftDetail}
         driftSamples={driftSamples}
@@ -1345,50 +1128,88 @@ export const App: React.FC = () => {
         conversationCount={conversations.length}
         usageCostUsd={usage.cost_usd}
         usageCalls={usage.calls}
+        isCheckingLLM={isCheckingLLM}
+        onOpenGuide={() => {
+          setGuideSection(null)
+          setIsGuideOpen(true)
+        }}
         onOpenTrust={() => setIsTrustOpen(true)}
         trustVerdict={scorecard?.crossfire?.verdict ?? activeSession?.crossfire?.verdict}
         trustBlockers={
           scorecard?.crossfire?.reasons?.length ?? activeSession?.crossfire?.reasons?.length ?? 0
         }
-        onOpenGuide={() => setIsGuideOpen(true)}
-        onOpenCoach={() => setIsCoachOpen(true)}
-        coachBlockers={coachCounts.blocker}
-        coachWarnings={coachCounts.warning}
-        isCheckingLLM={isCheckingLLM}
+        onOpenRegistry={() => setIsRegistryOpen(true)}
+        registryCount={registryCount}
       />
 
-      {/* Main Studio 3-Panel Workspace */}
-      <div className="flex-1 flex overflow-hidden transition-all duration-300">
-        {/* Left Panel: Conversational Intake Architect & Autonomous Stream */}
-        <ArchitectPanel
-          onStartSession={handleStartSession}
-          onChatWithArchitect={handleChatWithArchitect}
-          onNudge={handleNudge}
-          onOpenSQLModal={() => setIsSQLModalOpen(true)}
-          onFileUpload={handleFileUpload}
-          attachedDataset={attachedDataset}
-          onRemoveDataset={() => setAttachedDataset(null)}
-          timeline={timeline}
-          isTraining={isTraining || activeSession?.status === 'training'}
-          isSynthesizing={isSynthesizing}
-          activeSessionId={activeSession?.session_id}
-          isLLMVerified={isLLMVerified}
-          isCheckingLLM={isCheckingLLM}
-          onOpenSettings={() => setIsGateModalOpen(true)}
-          trainingParams={trainingParams}
-          onUpdateTrainingParams={setTrainingParams}
-          isArenaLocked={arenaLocked}
-          onLockArena={handleLockArena}
-          onSendStudioMessage={handleSendStudioMessage}
-          chatInputRef={chatInputRef}
-          coachReport={coachReport}
-          onCoachAction={handleCoachAction}
-          onAcknowledgeCoach={handleAcknowledgeCoach}
+      {/* Scoreboard left · Thread centre · Arena right */}
+      <div className="flex-1 flex overflow-hidden">
+        <ScoreboardRail
+          targetMetricName={targetMetricName}
+          targetThreshold={targetThreshold}
+          currentMetric={currentMetric}
+          currentRound={currentRound}
+          maxRounds={maxRounds}
+          roundHistory={roundHistory}
+          scorecard={scorecard}
+          driftStatus={driftStatus}
+          driftDetail={driftDetail}
+          usage={usage}
+          dataset={attachedDataset}
+          sessionStatus={isTraining ? 'training' : activeSession?.status}
+          onFocusRound={focusRoundInThread}
+          onExport={handleExportPolicy}
+          isExporting={isExporting}
+          hasPolicy={Boolean(activeSession)}
         />
 
-        {/* Center Panel: Universal Sandboxed Arena Iframe */}
-        <SandboxedArenaIframe
-          sessionId={activeSession?.session_id}
+        <main className="flex-1 min-w-0 flex flex-col bg-gray-950">
+          {isLoadingThread ? (
+            <div className="flex-1 flex items-center justify-center text-xs text-gray-500">
+              Loading the thread…
+            </div>
+          ) : (
+            <ThreadView
+              entries={displayedEntries}
+              turn={effectiveTurn}
+              conversationTitle={
+                conversations.find((c) => c.conversation_id === activeConversationId)?.title
+              }
+              onCoachAction={handleCoachAction}
+              onAcknowledge={handleAcknowledgeCoach}
+              onOpenTrust={() => setIsTrustOpen(true)}
+              onSelectRound={focusRoundInThread}
+              onRollbackRound={activeSession ? handleRollback : undefined}
+              canRollback={Boolean(activeSession) && !isRollingBack}
+              focusedSeq={focusedSeq}
+            />
+          )}
+
+          <TurnComposer
+            turn={effectiveTurn}
+            isLLMVerified={isLLMVerified}
+            onOpenSettings={() => setIsGateModalOpen(true)}
+            onSend={(message) => void sendTurn(message)}
+            onStop={() => void handleStop()}
+            isStopping={isStopping}
+            queued={queuedMessage}
+            onQueue={setQueuedMessage}
+            onCancelQueued={() => setQueuedMessage(null)}
+            attachedDataset={attachedDataset}
+            onAttachFile={(file) => void handleFileUpload(file)}
+            onOpenSQLModal={() => setIsSQLModalOpen(true)}
+            onRemoveDataset={() => setAttachedDataset(null)}
+            trainingParams={trainingParams}
+            onUpdateTrainingParams={setTrainingParams}
+            quickActions={quickActions}
+            onQuickAction={handleQuickAction}
+            inputRef={chatInputRef}
+            hasPolicy={arenaLocked}
+          />
+        </main>
+
+        <ArenaStage
+          sessionId={activeSession?.session_id ?? activeConversationId}
           arenaHtml={arenaHtml}
           isTraining={isTraining}
           isArenaLocked={arenaLocked}
@@ -1400,42 +1221,24 @@ export const App: React.FC = () => {
           arenaSource={arenaSource}
           arenaPending={arenaPending}
           arenaError={arenaError}
-          onRetryArena={handleRetryArena}
+          onRetryArena={() => void handleRetryArena()}
           onStepObserved={setLastStep}
-        />
-
-        {/* Right Panel: Target Expectations & Multi-Round Telemetry */}
-        <TelemetryPanel
-          targetMetricName={targetMetricName}
-          targetThreshold={targetThreshold}
-          currentMetric={currentMetric}
-          currentRound={currentRound}
-          maxRounds={maxRounds}
-          roundHistory={roundHistory}
-          scorecard={scorecard}
-          driftStatus={driftStatus}
-          onRollback={handleRollback}
-          isRollingBack={isRollingBack}
-          resultsGuidance={resultsGuidance}
-          onCoachAction={handleCoachAction}
-          onAcknowledgeCoach={handleAcknowledgeCoach}
+          pulse={arenaPulse}
         />
       </div>
 
-      {/* Persistent Conversation History Drawer */}
       <ConversationSidebar
         isOpen={isConversationsOpen}
         onClose={() => setIsConversationsOpen(false)}
         conversations={conversations}
         activeConversationId={activeConversationId}
-        onSelectConversation={handleSelectConversation}
+        onSelectConversation={(cid) => void handleSelectConversation(cid)}
         onNewAgent={handleRequestNewAgent}
-        onDeleteConversation={handleDeleteConversation}
-        onClearAll={handleClearAllConversations}
+        onDeleteConversation={(cid) => void handleDeleteConversation(cid)}
+        onClearAll={() => void handleClearAllConversations()}
         isLoading={isLoadingConversations}
       />
 
-      {/* Provider setup: opened on demand by any model-backed action, dismissible otherwise. */}
       <LLMVerificationGateModal
         isOpen={!isCheckingLLM && isGateModalOpen}
         canDismiss={isLLMVerified === false}
@@ -1444,7 +1247,6 @@ export const App: React.FC = () => {
         onClose={() => setIsGateModalOpen(false)}
       />
 
-      {/* Modals */}
       <SettingsModal
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}
@@ -1452,10 +1254,7 @@ export const App: React.FC = () => {
         onSaveSettings={handleSaveLLMSettings}
       />
 
-      <RegistryModal
-        isOpen={isRegistryOpen}
-        onClose={() => setIsRegistryOpen(false)}
-      />
+      <RegistryModal isOpen={isRegistryOpen} onClose={() => setIsRegistryOpen(false)} />
 
       <React.Suspense fallback={null}>
         <GuideModal
@@ -1471,20 +1270,12 @@ export const App: React.FC = () => {
       <TrustPanel
         isOpen={isTrustOpen}
         onClose={() => setIsTrustOpen(false)}
-        conversationId={activeConversationId ?? activeSession?.session_id}
+        conversationId={conversationIdForDrawers}
         session={activeSession}
         lastStep={lastStep}
         refreshKey={trustRefreshKey}
         actionLabels={activeSession?.blueprint?.action_labels ?? []}
         onCorpusChanged={() => setTrustRefreshKey((k) => k + 1)}
-      />
-
-      <CoachPanel
-        isOpen={isCoachOpen}
-        onClose={() => setIsCoachOpen(false)}
-        conversationId={activeConversationId ?? activeSession?.session_id}
-        onAction={handleCoachAction}
-        onChanged={() => void refreshCoachSummary()}
       />
 
       <CodeInspectorModal
@@ -1497,17 +1288,17 @@ export const App: React.FC = () => {
       <SQLIngestModal
         isOpen={isSQLModalOpen}
         onClose={() => setIsSQLModalOpen(false)}
-        onDatasetSelected={(ds) => {
-          setAttachedDataset(ds)
-          addTimelineItem(
-            'SQL Dataset Attached 🗄️',
-            `Connected "${ds.name}" (${ds.num_rows} rows, ${ds.columns.length} columns)`,
-            'synthesis',
-            'success',
-          )
-        }}
+        onDatasetSelected={handleSQLDatasetSelected}
       />
+
+      {/* The arena reports its stage without a separate panel competing with the thread. */}
+      {arenaStage && (
+        <span className="sr-only" aria-live="polite">
+          {arenaStage}
+        </span>
+      )}
     </div>
   )
 }
+
 export default App

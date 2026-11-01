@@ -1795,3 +1795,56 @@ costs nothing.
 - Hard mode is process-wide (`RL_IDE_COACH_BLOCKERS`), not a per-conversation setting.
 
 The full design record is in `JOURNEY_COACH_SPEC_AND_IMPLEMENTATION.md`.
+
+---
+
+## 22. One chat, one clock — the unified sequential studio (2026-11-01)
+
+### 22.1 Problem
+
+The studio narrated the same work in four places: an activity stream inside the left intake
+panel, a metrics panel on the right, a coach card duplicated in both, and a coach drawer behind a
+header button. Nothing owned "the turn": the composer was gated only by `isAskingArchitect`, so a
+training run could stream rounds while the user started another studio turn, and a reload rewrote
+history (every non-user row was relabelled "Architect Evaluation", and rounds, tuning, arena and
+coach events were not stored at all).
+
+### 22.2 What changed
+
+- **One durable thread.** `thread_entries` + `thread_turns` (new
+  `backend/rl_ide/state/thread_store.py`) hold one append-only, gap-free, per-conversation
+  sequence. Actors are explicit: `user`, `studio`, `trainer`, `coach`, `gatekeeper`, `system`.
+- **One owner per turn.** `begin_turn` is an atomic compare-and-set; a second party gets a 409.
+  Training inherits the turn its chat request opened rather than opening a competing one.
+- **Layout.** Scoreboard (left, read-only numbers) · thread (centre, the only chat) · arena
+  (right, resizable and collapsible). `ArchitectPanel`, `TelemetryPanel` and `CoachPanel` are gone.
+- **Composer.** Locked while the other party works; typed text is queued for the next turn;
+  `Stop`/Esc hands the turn back. A cancelled turn is recorded as stopped, not failed.
+- **Restore = replay.** Conversation load returns `thread` and `turn`, so a reload mid-training
+  shows exactly what happened, with the original actors and order. Pre-thread conversations are
+  migrated once, without relabelling.
+- **Coach findings live in the turn that produced them.** The trust drawer is unchanged and keeps
+  its header entry point, and can also be opened from a verdict/scorecard entry's *Review evidence*.
+- **The header keeps its read-only surfaces.** Guide, Trust and Policy Registry stay in the top row;
+  only the controls that start or mutate work moved (Coach deleted, Export into the scoreboard rail).
+- **One output language.** Every role prompt (intake, planner, assistant, arena, env, auto-tuner,
+  coach judge, verifier) carries a shared `ENGLISH_OUTPUT_RULE`, so user-facing text is English
+  whatever language the user writes in; code, identifiers and JSON keys are never translated.
+
+### 22.3 Verification
+
+- `backend/tests/test_unified_thread.py` (11) and `test_unified_thread_api.py` (7): sequencing,
+  single-owner turns, stale-turn recovery, legacy migration, 409 on a concurrent turn, stop,
+  replay, delete.
+- Full backend suite: 287 passed, 2 skipped. `test_v4_convergence` is a stochastic PPO convergence
+  check that passed 3/3 in isolation and failed once under a loaded suite run; it does not touch
+  the API or the thread.
+- `npm run build` (`tsc` + Vite) passes.
+
+### 22.4 Residual risk
+
+- A sandboxed training burst cannot be cut mid-round; `Stop` requests cancellation, says so in the
+  thread, and releases the prompt instead of leaving a silent spinner.
+- The prompt payload is unchanged (`chat_history` still written for older readers); the thread is
+  the authority for the UI.
+- The manual browser scripts in the repository root still drive the pre-thread DOM.

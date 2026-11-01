@@ -477,6 +477,70 @@ export interface ConversationSummary {
   updated_at: string
 }
 
+// ---------------------------------------------------------------------------
+// The unified thread (see UNIFIED_CHAT_UX_SPEC_AND_PLAN.md)
+//
+// One ordered transcript holds every event; the turn says who currently owns it. Actors are
+// explicit so nothing can be relabelled into "Architect Evaluation" again.
+// ---------------------------------------------------------------------------
+
+export type ThreadActor = 'user' | 'studio' | 'trainer' | 'coach' | 'gatekeeper' | 'system'
+
+export type ThreadKind =
+  | 'instruction'
+  | 'answer'
+  | 'question'
+  | 'plan'
+  | 'stage'
+  | 'arena'
+  | 'round'
+  | 'tune'
+  | 'scorecard'
+  | 'verdict'
+  | 'finding'
+  | 'result'
+  | 'error'
+
+export type ThreadStatus = 'pending' | 'running' | 'success' | 'warning' | 'blocked' | 'info'
+
+export interface ThreadAction {
+  label: string
+  kind: string
+  payload?: Record<string, any>
+}
+
+export interface ThreadEntry {
+  seq: number
+  turn_id: string
+  actor: ThreadActor
+  kind: ThreadKind
+  status: ThreadStatus
+  title: string
+  body: string
+  at: string
+  anchor?: { round?: number; metric?: number } | null
+  actions?: ThreadAction[] | null
+  data?: any
+}
+
+export type TurnState = 'idle' | 'running' | 'decision_required' | 'blocked'
+
+export interface TurnStatus {
+  conversation_id: string
+  turn_id: string | null
+  state: TurnState
+  actor: string | null
+  opened_at: string | null
+  closed_at: string | null
+  outcome: string | null
+}
+
+export interface ThreadResponse {
+  conversation_id: string
+  turn: TurnStatus
+  entries: ThreadEntry[]
+}
+
 export interface ConversationDetail {
   conversation_id: string
   title: string
@@ -502,6 +566,10 @@ export interface ConversationDetail {
   drift_status?: 'unmonitored' | 'warming_up' | 'healthy' | 'drifted' | string
   /** Present while a synthesis/training job is in flight, so a reload knows work is still running. */
   active_job?: { job_id: string; kind: string; stage: string; status: string } | null
+  /** The durable transcript, replayed verbatim on load. */
+  thread?: ThreadEntry[]
+  /** Who owns the conversation right now. */
+  turn?: TurnStatus
 }
 
 export interface IngestedDatasetSummary {
@@ -555,16 +623,6 @@ export interface LLMStatusResponse {
   error?: string | null
   latency_ms?: number
   last_verified_at?: number | null
-}
-
-export interface ActivityTimelineItem {
-  id: string
-  type: 'synthesis' | 'smoke_test' | 'arena' | 'round' | 'auto_tune' | 'mastery' | 'nudge' | 'error' | 'info'
-  title: string
-  description: string
-  timestamp: string
-  status: 'pending' | 'success' | 'warning' | 'info'
-  data?: any
 }
 
 export interface UsageReport {

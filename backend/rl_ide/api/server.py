@@ -43,6 +43,15 @@ from rl_ide.state.conversation_store import (
     generate_title_from_prompt,
     utc_now_iso,
 )
+from rl_ide.state.thread_store import (
+    TurnInProgressError as ThreadTurnBusy,
+    get_thread_store,
+)
+from rl_ide.state.thread_events import (
+    entries_from_studio_response,
+    entry_from_event,
+    settle_state,
+)
 from rl_ide.autopilot.loop_controller import (
     AutonomousLoopController,
     SessionStateStore,
@@ -499,6 +508,31 @@ def architect_chat(req: ArchitectChatRequest):
 
     resp.conversation_id = cid
 
+    # Intake is a turn too: it either opens one or joins the one already running.
+    thread = get_thread_store()
+    owns_turn = False
+    turn = thread.state(cid)
+    if turn.get("state") != "running":
+        try:
+            turn = thread.begin_turn(cid, actor="user")
+            owns_turn = True
+        except ThreadTurnBusy:
+            turn = thread.state(cid)
+    turn_id = turn.get("turn_id")
+    thread.append(
+        cid,
+        [
+            {
+                "actor": "user",
+                "kind": "instruction",
+                "status": "success",
+                "title": "You",
+                "body": req.user_prompt,
+            }
+        ],
+        turn_id=turn_id,
+    )
+
     # Evaluate what the user is about to build. Advisory here: this endpoint is the repair
     # surface, so a blocker is reported with its fix instead of stopping the conversation.
     try:
@@ -571,6 +605,10 @@ def architect_chat(req: ArchitectChatRequest):
             blueprint_spec=resp.blueprint_spec.model_dump() if resp.blueprint_spec else None,
             training_params=t_params,
         )
+
+    thread.append(cid, entries_from_studio_response(resp), turn_id=turn_id)
+    if owns_turn:
+        thread.close_turn(cid, turn_id=turn_id, state=settle_state(resp), outcome="completed")
 
     return resp
 
@@ -709,9 +747,21 @@ async def start_session(req: SessionStartRequest):
             detail=f"Synthesis failed: {exc}",
         )
 
+    # Training is a turn: claim it if nobody owns the conversation, otherwise inherit the
+    # turn the chat request opened, so the user only gets the prompt back when the run ends.
+    thread = get_thread_store()
+    if thread.state(sid).get("state") != "running":
+        try:
+            turn = thread.begin_turn(sid, actor="trainer")
+        except ThreadTurnBusy:
+            turn = thread.state(sid)
+    else:
+        turn = thread.state(sid)
+    turn_id = turn.get("turn_id")
+
     # Event emitter helper
     def sync_event_emitter(event_data: dict[str, Any]):
-        manager.publish(sid, event_data)
+        _broadcast_threadsafe(sid, event_data)
         if event_data.get("event") in ("round_evaluated", "target_achieved", "budget_exhausted", "auto_tuned"):
             sess = global_store.get_session(sid)
             if sess:
@@ -746,6 +796,7 @@ async def start_session(req: SessionStartRequest):
             env_code=final_session.env_module_code,
             latest_model_zip_path=final_session.latest_model_zip_path,
         )
+        thread.close_turn(sid, turn_id=turn_id, state="decision_required", outcome="completed")
         return final_session
     else:
         # Launch background task in a worker thread so event loop is never blocked
@@ -781,6 +832,9 @@ async def start_session(req: SessionStartRequest):
                     "session_id": sid,
                     "message": f"Training loop error: {loop_err}",
                 })
+                thread.close_turn(sid, turn_id=turn_id, state="idle", outcome="failed")
+            else:
+                thread.close_turn(sid, turn_id=turn_id, state="decision_required", outcome="completed")
 
         _spawn_background(_run_background())
         return {
@@ -932,7 +986,96 @@ def get_conversation(conversation_id: str):
         if active
         else None
     )
+    # The unified thread is the transcript; the turn says who currently owns the conversation.
+    # A pre-thread conversation is migrated once, in place, so its history is not lost or relabelled.
+    thread = get_thread_store()
+    thread.migrate_legacy(conversation_id, conv.get("chat_history"))
+    conv["thread"] = thread.tail(conversation_id, limit=500)
+    conv["turn"] = thread.state(conversation_id)
     return conv
+
+
+@app.get("/api/v4/conversations/{conversation_id}/thread")
+def get_conversation_thread(conversation_id: str, since_seq: int = 0, limit: int = 500):
+    """The single ordered transcript, pollable with ``since_seq`` while a turn is running."""
+    conv_store = get_conversation_store()
+    conv = conv_store.get_conversation(conversation_id, owner_id=current_owner())
+    if not conv:
+        raise HTTPException(status_code=404, detail=f"Conversation '{conversation_id}' not found.")
+    thread = get_thread_store()
+    thread.migrate_legacy(conversation_id, conv.get("chat_history"))
+    entries = (
+        thread.entries(conversation_id, since_seq=since_seq, limit=limit)
+        if since_seq
+        else thread.tail(conversation_id, limit=limit)
+    )
+    return {
+        "conversation_id": conversation_id,
+        "turn": thread.state(conversation_id),
+        "entries": entries,
+    }
+
+
+@app.post("/api/v4/conversations/{conversation_id}/turn/stop")
+def stop_conversation_turn(conversation_id: str):
+    """Hands the conversation back to the user: cancels the running job and ends the turn.
+
+    Stop is the only way to interrupt a turn, and it is a clean boundary: the cancelled job records
+    its own ``job_cancelled`` entry, so the transcript never shows a half-written turn.
+    """
+    conv_store = get_conversation_store()
+    if not conv_store.get_conversation(conversation_id, owner_id=current_owner()):
+        raise HTTPException(status_code=404, detail=f"Conversation '{conversation_id}' not found.")
+
+    thread = get_thread_store()
+    active = jobs.active_job(conversation_id)
+    if active:
+        jobs.request_cancel(active["job_id"])
+        turn = thread.state(conversation_id)
+        if active.get("kind") == "training" and turn.get("state") == "running":
+            # A training burst runs in one sandbox process and cannot be cut mid-round. Say so,
+            # and hand the prompt back anyway: waiting silently is what felt broken.
+            thread.append(
+                conversation_id,
+                [
+                    {
+                        "actor": "system",
+                        "kind": "result",
+                        "status": "info",
+                        "title": "Stop requested",
+                        "body": "The current round will finish; no further rounds will start.",
+                    }
+                ],
+                turn_id=turn.get("turn_id"),
+            )
+            turn = thread.close_turn(
+                conversation_id, turn_id=turn.get("turn_id"), state="idle", outcome="stopped"
+            )
+    else:
+        turn = thread.state(conversation_id)
+        if turn.get("state") == "running":
+            thread.append(
+                conversation_id,
+                [
+                    {
+                        "actor": "system",
+                        "kind": "result",
+                        "status": "info",
+                        "title": "Stopped",
+                        "body": "You stopped this turn.",
+                    }
+                ],
+                turn_id=turn.get("turn_id"),
+            )
+            turn = thread.close_turn(
+                conversation_id, turn_id=turn.get("turn_id"), state="idle", outcome="stopped"
+            )
+    manager.publish(conversation_id, {"event": "turn_state", "turn": turn})
+    return {
+        "conversation_id": conversation_id,
+        "cancelled_job": active["job_id"] if active else None,
+        "turn": turn,
+    }
 
 
 @app.patch("/api/v4/conversations/{conversation_id}/params")
@@ -971,6 +1114,7 @@ def clear_all_conversations():
     for summary in conversations:
         cid = summary["conversation_id"]
         conv_store.delete(cid, owner_id=owner)
+        get_thread_store().delete(cid)
         close_interact_session(cid)
         forget_drift_state(cid)
         global_store.delete_session(cid)
@@ -988,6 +1132,7 @@ def delete_conversation(conversation_id: str):
     if not conv:
         raise HTTPException(status_code=404, detail=f"Conversation '{conversation_id}' not found.")
     conv_store.delete(conversation_id, owner_id=owner)
+    get_thread_store().delete(conversation_id)
     close_interact_session(conversation_id)
     forget_drift_state(conversation_id)
     global_store.delete_session(conversation_id)
@@ -1149,12 +1294,35 @@ def _remember_loop() -> None:
         interrupted = jobs.reconcile_interrupted()
         if interrupted:
             print(f"[jobs] marked {interrupted} interrupted job(s) as failed after restart")
+        # A turn left running by a crashed process would otherwise lock the studio forever.
+        reclaimed = get_thread_store().reconcile_interrupted()
+        if reclaimed:
+            print(f"[thread] reclaimed {reclaimed} interrupted turn(s)")
+
+
+def _record_thread_event(conversation_id: str, event: dict[str, Any]) -> None:
+    """Persists an event as a thread entry under whichever turn currently owns the conversation."""
+    if not conversation_id:
+        return
+    entry = entry_from_event(event)
+    if entry is None:
+        return
+    thread = get_thread_store()
+    turn = thread.state(conversation_id)
+    turn_id = turn.get("turn_id")
+    if turn.get("state") != "running":
+        # A late event still belongs to the turn that produced it, never to a new pseudo-turn.
+        recent = thread.tail(conversation_id, limit=1)
+        if recent:
+            turn_id = recent[0]["turn_id"]
+    thread.append(conversation_id, [entry], turn_id=turn_id)
 
 
 def _broadcast_threadsafe(conversation_id: str, event: dict[str, Any]) -> None:
-    """Publishes an event for the session's sockets; callable from any thread, no loop required."""
+    """Publishes an event for the session's sockets and records it in the thread; any thread, no loop."""
     if conversation_id:
         manager.publish(conversation_id, event)
+        _record_thread_event(conversation_id, event)
 
 
 def job_public(job: dict[str, Any]) -> dict[str, Any]:
@@ -1221,6 +1389,27 @@ def _run_chat_job(job: dict[str, Any]) -> None:
     def cancelled() -> bool:
         return store.is_cancel_requested(job_id)
 
+    thread = get_thread_store()
+    try:
+        turn = thread.begin_turn(conversation_id, actor="user")
+    except ThreadTurnBusy as busy:
+        store.finish(job_id, status=FAILED, error=f"TurnInProgressError: {busy}")
+        return
+    turn_id = turn["turn_id"]
+    thread.append(
+        conversation_id,
+        [
+            {
+                "actor": "user",
+                "kind": "instruction",
+                "status": "success",
+                "title": "You",
+                "body": str(payload.get("message") or ""),
+            }
+        ],
+        turn_id=turn_id,
+    )
+
     try:
         progress("intake", "Reading the request and planning changes")
         dataset_id = payload.get("dataset_id")
@@ -1253,24 +1442,40 @@ def _run_chat_job(job: dict[str, Any]) -> None:
                 "action_types": [a.value for a in response.action_types],
             },
         )
+        thread.append(conversation_id, entries_from_studio_response(response), turn_id=turn_id)
 
+        training_job = None
         if not payload.get("run_sync"):
-            _enqueue_training_if_requested(
+            training_job = _enqueue_training_if_requested(
                 conversation_id=conversation_id,
                 response=response,
                 owner_id=job.get("owner_id") or "local",
                 dataset=dataset,
+                turn_id=turn_id,
+            )
+        if training_job:
+            # The trainer now owns the turn: the user gets the prompt back when the run ends.
+            thread.handover_turn(conversation_id, turn_id, "trainer")
+        else:
+            thread.close_turn(
+                conversation_id,
+                turn_id=turn_id,
+                state=settle_state(response),
+                outcome="completed",
             )
     except JobCancelled:
         store.finish(job_id, status=CANCELLED, error="Cancelled by the user.")
         _broadcast_threadsafe(conversation_id, {"event": "job_cancelled", "job_id": job_id})
+        thread.close_turn(conversation_id, turn_id=turn_id, state="idle", outcome="cancelled")
     except TrainingInProgressError as exc:
         store.finish(job_id, status=FAILED, error=f"TrainingInProgressError: {exc}")
+        thread.close_turn(conversation_id, turn_id=turn_id, state="idle", outcome="failed")
     except Exception as exc:  # noqa: BLE001 - surfaced to the client, never silently swallowed
         store.finish(job_id, status=FAILED, error=f"{type(exc).__name__}: {exc}")
         _broadcast_threadsafe(
             conversation_id, {"event": "job_failed", "job_id": job_id, "message": str(exc)}
         )
+        thread.close_turn(conversation_id, turn_id=turn_id, state="idle", outcome="failed")
 
 
 def _enqueue_training_if_requested(
@@ -1279,6 +1484,7 @@ def _enqueue_training_if_requested(
     response: Any,
     owner_id: str,
     dataset: Any,
+    turn_id: str | None = None,
 ) -> dict[str, Any] | None:
     """Queues a training job instead of holding a coroutine in this process's memory."""
     if StudioActionType.RUN_OR_CONTINUE_TRAINING not in (response.action_types or []):
@@ -1308,6 +1514,8 @@ def _enqueue_training_if_requested(
             "episodes_per_burst": int(
                 (response.training_params or {}).get("episodes_per_round") or bp.episodes_per_round or 200
             ),
+            # The turn the chat request opened; the trainer inherits it rather than opening one.
+            "turn_id": turn_id,
         },
     )
     _ensure_training_consumer()
@@ -1376,12 +1584,22 @@ def resume_training(conversation_id: str, req: ResumeTrainingRequest = ResumeTra
     else:
         get_coach().enforce(resume_report)
 
+    # Resuming is a turn: release it if the previous process left one open, then claim it.
+    thread = get_thread_store()
+    current = thread.state(conversation_id)
+    if current.get("state") == "running":
+        thread.close_turn(
+            conversation_id, turn_id=current.get("turn_id"), state="idle", outcome="interrupted"
+        )
+    turn = thread.begin_turn(conversation_id, actor="trainer")
+
     payload = {
         "dataset_id": conv.get("dataset_id"),
         "max_rounds": target,
         "additional_rounds": remaining,
         "episodes_per_burst": int(req.episodes_per_burst or blueprint.episodes_per_round or 200),
         "resume_of_rounds": done,
+        "turn_id": turn["turn_id"],
     }
     job = jobs.create(
         kind="training", conversation_id=conversation_id, owner_id=current_owner(), payload=payload
@@ -1426,6 +1644,19 @@ def _run_training_job(job: dict[str, Any]) -> None:
         store.finish(job_id, status=FAILED, error="Conversation or blueprint disappeared before training.")
         return
 
+    # A training job never claims a turn: it writes into the turn its chat request opened (or the
+    # most recent one), so a late round can never join a turn that someone else is writing.
+    thread = get_thread_store()
+    turn_id = payload.get("turn_id")
+    if not turn_id:
+        current = thread.state(conversation_id)
+        if current.get("state") == "running":
+            turn_id = current.get("turn_id")
+        else:
+            recent = thread.tail(conversation_id, limit=1)
+            turn_id = recent[0]["turn_id"] if recent else None
+    outcome = "failed"
+
     try:
         store.set_stage(job_id, "training", "Training in the sandbox")
         blueprint = AgentBlueprintSpec.model_validate(conv["blueprint_spec"])
@@ -1458,6 +1689,7 @@ def _run_training_job(job: dict[str, Any]) -> None:
                 "best_metric": trained.current_metric,
             },
         )
+        outcome = "completed"
         _broadcast_threadsafe(
             conversation_id,
             {"event": "job_completed", "job_id": job_id, "status": trained.status},
@@ -1469,6 +1701,16 @@ def _run_training_job(job: dict[str, Any]) -> None:
         _broadcast_threadsafe(
             conversation_id, {"event": "job_failed", "job_id": job_id, "message": str(exc)}
         )
+    finally:
+        # Training is a turn: it must hand the conversation back even when it dies. Without a
+        # known turn id, closing would release a turn someone else opened, so do nothing.
+        if turn_id:
+            thread.close_turn(
+                conversation_id,
+                turn_id=turn_id,
+                state="decision_required" if outcome == "completed" else "idle",
+                outcome=outcome,
+            )
 
 
 def _drain_training_jobs() -> None:
@@ -1619,6 +1861,8 @@ async def conversation_omni_chat(
         owner_id=current_owner(),
         payload=payload,
     )
+    # The job is at intake the moment it is accepted, so a poller never sees a stale "queued".
+    jobs.set_stage(job["job_id"], "intake", "Reading the request and planning changes")
 
     if "respond-async" in (request.headers.get("prefer") or "").lower():
         threading.Thread(target=_run_chat_job, args=(job,), name=f"rl-chat-{job['job_id']}", daemon=True).start()
@@ -1632,6 +1876,8 @@ async def conversation_omni_chat(
     if finished["status"] == FAILED:
         error = finished.get("error") or "Studio chat failed."
         if error.startswith("TrainingInProgressError: "):
+            raise HTTPException(status_code=409, detail=error.split(": ", 1)[1])
+        if error.startswith("TurnInProgressError: "):
             raise HTTPException(status_code=409, detail=error.split(": ", 1)[1])
         raise HTTPException(status_code=500, detail=error)
 
@@ -2426,16 +2672,55 @@ class NudgeRequest(BaseModel):
 
 @app.post("/api/v4/sessions/{session_id}/nudge")
 def session_nudge(session_id: str, req: NudgeRequest):
-    """Applies human feedback prose and runs an extra targeted tuning round."""
+    """Applies human feedback prose and runs an extra targeted tuning round.
+
+    A nudge is a turn like any other: it cannot be typed over a run that is already in progress.
+    """
     require_verified_llm()
+    thread = get_thread_store()
+    try:
+        turn = thread.begin_turn(session_id, actor="user")
+    except ThreadTurnBusy as busy:
+        raise HTTPException(status_code=409, detail=str(busy))
+    turn_id = turn["turn_id"]
+    thread.append(
+        session_id,
+        [
+            {
+                "actor": "user",
+                "kind": "instruction",
+                "status": "success",
+                "title": "You",
+                "body": req.feedback,
+            }
+        ],
+        turn_id=turn_id,
+    )
     try:
         tuning_res = global_controller.nudge_session(session_id, req.feedback)
+        thread.append(
+            session_id,
+            [
+                {
+                    "actor": "trainer",
+                    "kind": "tune",
+                    "status": "success",
+                    "title": "Nudge applied",
+                    "body": str(getattr(tuning_res, "changes_summary", "") or "The reward function was retuned."),
+                }
+            ],
+            turn_id=turn_id,
+        )
+        thread.close_turn(session_id, turn_id=turn_id, state="decision_required", outcome="completed")
         return tuning_res
     except TrainingInProgressError as exc:
+        thread.close_turn(session_id, turn_id=turn_id, state="idle", outcome="failed")
         raise HTTPException(status_code=409, detail=str(exc))
     except KeyError as exc:
+        thread.close_turn(session_id, turn_id=turn_id, state="idle", outcome="failed")
         raise HTTPException(status_code=404, detail=str(exc))
     except Exception as exc:
+        thread.close_turn(session_id, turn_id=turn_id, state="idle", outcome="failed")
         raise HTTPException(status_code=400, detail=str(exc))
 
 

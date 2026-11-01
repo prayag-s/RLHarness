@@ -3,6 +3,11 @@
 **Status:** implemented. This is the design record for the layer that catches a shortcut before it
 costs a run, and explains the evidence after one finishes.
 
+> **Surface update (2026-11-01):** the findings now appear as `coach` entries inside the single
+> studio thread, and the separate Coach drawer and header badge are gone. The rules, stages,
+> severities and actions below are unchanged — see
+> [`UNIFIED_CHAT_UX_SPEC_AND_PLAN.md`](./UNIFIED_CHAT_UX_SPEC_AND_PLAN.md) for the surface change.
+
 Related: `docs/USER_GUIDE.md` §24 (the operator tour: checkpoints, severities, a worked example and
 the switches), `TRUST_DRAWER_SPEC_AND_IMPLEMENTATION.md` (the controls the coach explains),
 `progress.md` §21.
