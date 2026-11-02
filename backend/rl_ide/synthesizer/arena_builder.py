@@ -777,8 +777,13 @@ class JITArenaSynthesizer:
         || (typeof cell === 'string' && /^[\\d.+-]+$/.test(cell.trim())));
       if (arrayValue && cellLike) {{
         const interactive = arrayValue.flat.length === ACTION_LABELS.length;
+        // A square board (3x3, 5x5, ...) is a single object, not a row of meters: keep it compact
+        // and square so the cells touch, instead of stretching 40px cells across the whole stage.
+        const square = arrayValue.cols * arrayValue.cols === arrayValue.flat.length;
         grid.style.display = 'grid';
         grid.style.gridTemplateColumns = `repeat(${{arrayValue.cols}}, minmax(0, 1fr))`;
+        grid.style.maxWidth = square ? `${{arrayValue.cols * 4.5}}rem` : '';
+        grid.style.margin = square ? '0 auto' : '';
         grid.innerHTML = arrayValue.flat.map((cell, idx) => {{
           const isMarked = cell !== 0 && cell !== null && cell !== undefined && cell !== '';
           const label = isMarked ? String(cell).slice(0, 4) : '';
@@ -787,7 +792,8 @@ class JITArenaSynthesizer:
             : 'border-slate-800 bg-slate-950 hover:border-slate-700';
           const click = interactive ? ` onclick="sendInteractiveAction(${{idx}})"` : '';
           const cursor = interactive ? ' cursor-pointer' : '';
-          return `<div${{click}} class="w-10 h-10 sm:w-12 sm:h-12 border rounded-lg flex items-center justify-center font-bold text-sm arena-cell${{cursor}} ${{style}}">${{label}}</div>`;
+          const size = square ? 'w-full aspect-square text-base' : 'w-10 h-10 sm:w-12 sm:h-12 text-sm';
+          return `<div${{click}} class="${{size}} border rounded-lg flex items-center justify-center font-bold arena-cell${{cursor}} ${{style}}">${{label}}</div>`;
         }}).join('');
       }} else if (arrayValue) {{
         // Text/object arrays are labels, not board cells: show them in full as chips.

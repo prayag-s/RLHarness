@@ -192,6 +192,28 @@ def test_unverified_environment_is_not_written(tmp_path, monkeypatch):
 
 
 # -----------------------------------------------------------------------------
+# A failed model call is reported as such, not as a missing LLM
+# -----------------------------------------------------------------------------
+def test_synthesis_failure_names_the_provider_error(monkeypatch):
+    blueprint = IntakeArchitectAgent().interview(
+        "Train an agent on a 3x3 board", force_smart_defaults=True
+    ).blueprint_spec
+    client = create_llm_client(
+        LLMConfig(provider="deepseek", api_key="sk-test", model_name="deepseek-chat")
+    )
+
+    def _truncated(*args, **kwargs):
+        raise RuntimeError("response for role 'env_synthesizer' was truncated at max_tokens=8000")
+
+    monkeypatch.setattr(client, "generate", _truncated)
+    with pytest.raises(EnvironmentSynthesisError) as excinfo:
+        synthesize_universal_env(blueprint, client=client, allow_placeholder=False)
+    # The user must be told the call failed, not sent hunting for an API key that is already set.
+    assert "truncated at max_tokens=8000" in str(excinfo.value)
+    assert "required to generate" not in str(excinfo.value)
+
+
+# -----------------------------------------------------------------------------
 # Auto-tuner: unverified output is never persisted or loaded
 # -----------------------------------------------------------------------------
 def test_auto_tune_failure_keeps_previous_code(tmp_path):
@@ -236,6 +258,49 @@ def test_auto_tune_failure_keeps_previous_code(tmp_path):
     assert any(e.get("event") == "auto_tune_failed" for e in events)
     assert session.env_module_code == original_code
     assert env_path.read_text(encoding="utf-8") == original_code
+
+
+def test_tuner_without_code_never_blanks_the_module(tmp_path):
+    """A tuner that had nothing to rewrite hands back no code; that must not erase the module."""
+    from rl_ide.autopilot.auto_tuner import TuningResult
+
+    store = SessionStateStore(base_dir=tmp_path / "workspaces")
+    controller = AutonomousLoopController(store=store)
+    blueprint = IntakeArchitectAgent().interview(
+        "Train an agent on a 3x3 board", force_smart_defaults=True
+    ).blueprint_spec
+
+    _, env_path, env_cls = JITEnvironmentSynthesizer().synthesize(
+        blueprint=blueprint, workspace_dir=tmp_path / "workspaces" / "sess_blank"
+    )
+    original_code = env_path.read_text(encoding="utf-8")
+
+    def _empty_tune(**kwargs):
+        return TuningResult(
+            round=kwargs["round_num"],
+            current_metric=0.0,
+            target_threshold=blueprint.target_metric_threshold,
+            diagnosis="synthetic",
+            changes_summary="No environment source was available; reward function unchanged.",
+            updated_code="",
+            verified=True,
+            applied=False,
+        )
+
+    controller._auto_tuner = type("T", (), {"tune": staticmethod(_empty_tune)})()
+
+    session = controller.run_loop(
+        session_id="sess_blank",
+        blueprint=blueprint,
+        env_cls=env_cls,
+        max_rounds=2,
+        episodes_per_burst=2,
+    )
+    assert session.env_module_code == original_code
+    assert env_path.read_text(encoding="utf-8") == original_code
+    snapshots = sorted(Path("runs/sess_blank").glob("v*/env_module.py"))
+    assert len(snapshots) == 2
+    assert all(snapshot.read_text(encoding="utf-8") == original_code for snapshot in snapshots)
 
 
 # -----------------------------------------------------------------------------

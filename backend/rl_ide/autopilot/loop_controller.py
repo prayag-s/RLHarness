@@ -276,6 +276,13 @@ class SessionStateStore:
         run_dir = Path("runs") / session_id / f"v{round_num}"
         run_dir.mkdir(parents=True, exist_ok=True)
 
+        session = self.get_session(session_id)
+        # A round with no reward change reports the code it ran with, but a caller that lost track of
+        # it must not blank the module: every later round, snapshot and export reads this string, and
+        # an empty env_module.py on disk is an unrecoverable run.
+        if not env_code.strip() and session is not None:
+            env_code = session.env_module_code
+
         env_code_path = run_dir / "env_module.py"
         env_code_path.write_text(env_code, encoding="utf-8")
 
@@ -309,7 +316,8 @@ class SessionStateStore:
             session.weights_path = str(weights_path)
             if model_zip_path.exists():
                 session.latest_model_zip_path = str(model_zip_path)
-            session.env_module_code = env_code
+            if env_code.strip():
+                session.env_module_code = env_code
             self.save_session_state(session)
 
         return snapshot
@@ -974,7 +982,11 @@ class AutonomousLoopController:
                 )
                 continue
 
-            current_code = tuning_res.updated_code
+            # A tuner that verified nothing (`applied=False`) hands back the code it was given, but
+            # one that had no source to rewrite can hand back nothing: adopt only real code, so the
+            # live module, this round's snapshot and every export keep the environment that trained.
+            if tuning_res.updated_code.strip():
+                current_code = tuning_res.updated_code
             session.env_module_code = current_code
             mutation_kind = "reward"
 

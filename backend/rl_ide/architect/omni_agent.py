@@ -129,6 +129,31 @@ def planner_mode() -> str:
     return mode if mode in {"auto", "always", "off"} else "auto"
 
 
+# A declared collection length is written many ways by the intake model ("list of 9 integers",
+# "list[int] of length 9", "9-element array", "(9,)"), and it is the only signal that lets the arena
+# draw a board before the environment exists: an empty list renders as no board at all.
+_LENGTH_PATTERNS = (
+    r"(?:list|array|tuple)\s*(?:\[[^\]]*\])?(?:\s*of)?\s*(?:length\s*)?(\d+)(?!\s*[dD]\b)",
+    r"(\d+)[- ](?:element|item|cell|entry|slot)s?",
+    r"(?:length|len|size)\s*(?:=|:|of)?\s*(\d+)",
+    r"\(\s*(\d+)\s*,?\s*\)",
+)
+_MAX_DECLARED_CELLS = 1024
+
+
+def _declared_cells(type_desc: str) -> list[int]:
+    """Placeholder cell list for a declared numeric array, sized from its stated length."""
+    text = str(type_desc or "").lower()
+    if not re.search(r"\b(int|integer|float|number|numeric|bool)", text):
+        return []
+    for pattern in _LENGTH_PATTERNS:
+        match = re.search(pattern, text)
+        if match:
+            cells = int(match.group(1))
+            return [0] * cells if 0 < cells <= _MAX_DECLARED_CELLS else []
+    return []
+
+
 class StudioOmniAgent:
     """Unified Conversational Agent & Studio Router (Codex-style continuous loop)."""
 
@@ -544,8 +569,8 @@ class StudioOmniAgent:
         sample: dict[str, Any] = {}
         for key, type_desc in (blueprint.state_dict_schema or {}).items():
             text = str(type_desc).lower()
-            if "list" in text:
-                sample[key] = []
+            if "list" in text or "array" in text or "tuple" in text:
+                sample[key] = _declared_cells(text)
             elif "int" in text:
                 sample[key] = 0
             elif "float" in text:

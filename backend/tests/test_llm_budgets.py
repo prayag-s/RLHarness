@@ -65,13 +65,21 @@ def test_classification_roles_do_not_pay_for_reasoning(captured):
     assert body["max_tokens"] <= 700
 
 
-def test_code_roles_may_think_but_at_low_effort(captured):
+def test_code_roles_emit_code_instead_of_reasoning(captured):
+    """A module plus chain-of-thought does not fit one ceiling.
+
+    deepseek-chat ignores `reasoning_effort`: an env synthesis call spent all 8000 tokens on
+    reasoning (`reasoning_tokens == output_tokens`) and returned an empty, truncated answer.
+    """
     _client().generate("write the env", role="env_synthesizer")
     body = captured[-1]
-    assert body["reasoning_effort"] == "low"
-    # The ceiling must cover reasoning and the answer, or the answer is truncated away.
+    assert body["thinking"] == {"type": "disabled"}
+    assert "reasoning_effort" not in body
     assert body["max_tokens"] == profile_for("env_synthesizer").max_tokens
     assert body["max_tokens"] <= 8000
+
+    _client().generate("repair the env", role="verifier_repair")
+    assert captured[-1]["thinking"] == {"type": "disabled"}
 
 
 def test_configured_token_limit_cannot_be_exceeded(captured):

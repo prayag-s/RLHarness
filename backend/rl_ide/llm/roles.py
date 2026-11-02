@@ -39,11 +39,13 @@ _PROFILES: dict[str, GenerationProfile] = {
     # Escape hatch for ``RL_IDE_ARENA_MODE=bespoke``, which still emits a whole HTML document.
     "arena_ui_bespoke": GenerationProfile(False, "low", 12000),
     # For a thinking role the ceiling must cover reasoning *and* the answer: a cap that reasoning
-    # alone exhausts pays for tokens and returns nothing. These two are bounded function rewrites
-    # with an explicit diagnosis, where reasoning measured 600-3,000 variable tokens for the same
-    # answer, so it is switched off rather than budgeted for.
-    "env_synthesizer": GenerationProfile(True, "low", 8000, timeout_s=300.0),
-    "verifier_repair": GenerationProfile(True, "low", 6000, timeout_s=240.0),
+    # alone exhausts pays for tokens and returns nothing. deepseek-chat ignores `reasoning_effort`
+    # and keeps thinking at its default effort, so writing a whole environment module spent all
+    # 8000 tokens on chain-of-thought (usage rows: reasoning_tokens == output_tokens == 8000) and
+    # returned an empty, truncated answer — three paid rounds in a row with no environment. Code
+    # roles therefore emit code only, like every other bounded-output role here.
+    "env_synthesizer": GenerationProfile(False, "low", 8000, timeout_s=300.0),
+    "verifier_repair": GenerationProfile(False, "low", 6000, timeout_s=240.0),
     "auto_tuner": GenerationProfile(False, "low", 1200),
     "reward_rewrite": GenerationProfile(False, "low", 900),
 }

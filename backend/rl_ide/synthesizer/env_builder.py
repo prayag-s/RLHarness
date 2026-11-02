@@ -23,7 +23,12 @@ import numpy as np
 
 from rl_ide.architect.models import AgentBlueprintSpec, DynamicTaskBlueprint
 from rl_ide.ingest.loader import IngestedDataset
-from rl_ide.llm.client import BaseLLMClient, FallbackCodeSynthesizer, get_active_llm_client
+from rl_ide.llm.client import (
+    BaseLLMClient,
+    FallbackCodeSynthesizer,
+    UnconfiguredLLMClient,
+    get_active_llm_client,
+)
 from rl_ide.llm.prompts import ENV_BUILDER_SYSTEM_PROMPT
 
 
@@ -723,6 +728,9 @@ def synthesize_universal_env(
 
     # Path 1: Live LLM Code Synthesis if configured
     code: str | None = None
+    # Why the provider call produced nothing usable. Swallowing it made a truncated or failed
+    # generation look like "no LLM is configured", which sends the user to the wrong setting.
+    llm_error: str | None = None
     if not isinstance(active_client, FallbackCodeSynthesizer):
         try:
             prompt = (
@@ -749,15 +757,21 @@ def synthesize_universal_env(
             extracted = extract_python_code(raw)
             if extracted and "class SynthesizedGymEnv" in extracted:
                 code = extracted
-        except Exception:
+            else:
+                llm_error = "the model returned no `SynthesizedGymEnv` class"
+        except Exception as exc:
+            llm_error = f"{type(exc).__name__}: {exc}"
             code = None
 
     # No usable LLM output: refuse to fabricate a task unless a placeholder is allowed.
     if not code:
         if not allow_placeholder:
+            if isinstance(active_client, UnconfiguredLLMClient):
+                reason = "No LLM is configured, so a task-specific environment cannot be generated."
+            else:
+                reason = llm_error or "the model returned no usable environment module."
             raise EnvironmentSynthesisError(
-                "No verified environment code could be synthesized for this task. "
-                "A working LLM is required to generate a task-specific environment."
+                "No verified environment code could be synthesized for this task: " + reason
             )
         code = _generate_schema_driven_env_code(bp_spec, user_prompt=user_prompt)
 

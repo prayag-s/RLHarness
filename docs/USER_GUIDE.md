@@ -569,12 +569,18 @@ declares a *role* with its own budget (`backend/rl_ide/llm/roles.py`):
 |---|---|---|
 | `chat_planner`, `coach_judge`, `diagnostic_chat`, `intake_blueprint`, `arena_ui` | off | 700–1,800 |
 | `auto_tuner`, `reward_rewrite` | off | 900–1,200 |
-| `verifier_repair` | on, low effort | 6,000 |
-| `env_synthesizer` | on, low effort | 8,000 |
+| `verifier_repair` | off | 6,000 |
+| `env_synthesizer` | off | 8,000 |
 
 A thinking role's ceiling covers reasoning *and* the answer. If a response is cut off at the ceiling
 the call fails with an explicit error instead of returning a truncated module: the tokens are
 already paid for, and a half-written environment only costs more to verify.
+
+The two code roles emit code only. `deepseek-chat` ignores `reasoning_effort` and keeps thinking at
+its default effort, so a thinking `env_synthesizer` can spend the whole 8,000-token ceiling on
+chain-of-thought and return nothing at all (the usage row shows `reasoning_tokens == output_tokens`).
+Writing the module without reasoning measured ~3,700 tokens, so the ceiling is headroom, not a
+target.
 
 The usage report shows `totals`, an `efficiency` block (`reasoning_tokens`, `cached_input_tokens`,
 `cache_hit_rate`) and a `by_role` breakdown, so a surprising bill can be traced to the call site
@@ -593,8 +599,8 @@ applied automatically.
 
 Three decisions, in order of effect: keep the default `deepseek-flash` (it is already the cheapest
 capable model here), leave thinking off for everything that only classifies or styles, and let the
-arena be rendered by code from a spec rather than written as a full HTML document. Raise effort or
-switch models only when the environment itself is the blocker.
+arena be rendered by code from a spec rather than written as a full HTML document. Switch models
+only when the environment itself is the blocker.
 
 ### 12.5 What the header is telling you
 
